@@ -12,6 +12,7 @@ import { startOfTomorrowUtc } from '../common/time/local-date.js';
 export interface PlantViability extends ViabilityResult {
   plantId: string;
   nickname: string | null;
+  speciesSlug: string;
 }
 
 @Injectable()
@@ -56,7 +57,7 @@ export class MovingService {
         placeLightRank: placeLightRank(plant.place.lightType),
         effectiveHumidityPct: effective.humidityPct,
       });
-      return { plantId: plant.id, nickname: plant.nickname, ...result };
+      return { plantId: plant.id, nickname: plant.nickname, speciesSlug: plant.speciesSlug, ...result };
     });
   }
 
