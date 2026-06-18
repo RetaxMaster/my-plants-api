@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Task {
+  WATER
+  FERTILIZE
+  REPOT
+  ROTATE
+  CLEAN_LEAVES
+}
+
+enum CareEventType {
+  DONE
+  POSTPONED
+  SYMPTOM
+}
+
+enum LightType {
+  DIRECT
+  BRIGHT_INDIRECT
+  MEDIUM
+  LOW
+}
+
+enum HumidityCharacter {
+  DRY
+  NORMAL
+  HUMID
+}
+
+model Owner {
+  id     String  @id @default(cuid())
+  name   String
+  cities City[]
+  places Place[]
+  plants Plant[]
+
+  @@map("owners")
+}
+
+model City {
+  id        String  @id @default(cuid())
+  ownerId   String
+  owner     Owner   @relation(fields: [ownerId], references: [id])
+  name      String
+  latitude  Float
+  longitude Float
+  timezone  String
+  isPrimary Boolean @default(false)
+  places    Place[]
+
+  @@index([ownerId])
+  @@map("cities")
+}
+
+model Place {
+  id                String            @id @default(cuid())
+  ownerId           String
+  owner             Owner             @relation(fields: [ownerId], references: [id])
+  cityId            String
+  city              City              @relation(fields: [cityId], references: [id])
+  name              String
+  indoor            Boolean
+  lightType         LightType
+  climateControlled Boolean           @default(false)
+  humidityCharacter HumidityCharacter @default(NORMAL)
+  indoorTempMinC    Float?
+  indoorTempMaxC    Float?
+  plants            Plant[]
+
+  @@index([ownerId])
+  @@index([cityId])
+  @@map("places")
+}
+
+model Species {
+  slug           String  @id
+  scientificName String  @unique
+  record         Json
+  plants         Plant[]
+
+  @@map("species")
+}
+
+model Plant {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       Owner    @relation(fields: [ownerId], references: [id])
+  placeId     String
+  place       Place    @relation(fields: [placeId], references: [id])
+  speciesSlug String
+  species     Species  @relation(fields: [speciesSlug], references: [slug])
+  nickname    String?
+  acquiredOn  DateTime @db.Date
+  createdAt   DateTime @default(now())
+
+  events      CareEvent[]
+  adjustments PlantTaskAdjustment[]
+  overrides   TaskOverride[]
+  dueCache    DueCache[]
+
+  @@index([ownerId])
+  @@index([placeId])
+  @@map("plants")
+}
+
+model CareEvent {
+  id         String        @id @default(cuid())
+  plantId    String
+  plant      Plant         @relation(fields: [plantId], references: [id])
+  task       Task
+  type       CareEventType
+  occurredOn DateTime      @db.Date
+  payload    Json?
+  createdAt  DateTime      @default(now())
+
+  @@index([plantId, task])
+  @@map("care_events")
+}
+
+model PlantTaskAdjustment {
+  id         String   @id @default(cuid())
+  plantId    String
+  plant      Plant    @relation(fields: [plantId], references: [id])
+  task       Task
+  multiplier Float    @default(1.0)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([plantId, task])
+  @@map("plant_task_adjustments")
+}
+
+model TaskOverride {
+  id        String   @id @default(cuid())
+  plantId   String
+  plant     Plant    @relation(fields: [plantId], references: [id])
+  task      Task
+  nextDueOn DateTime @db.Date
+
+  @@unique([plantId, task])
+  @@map("task_overrides")
+}
+
+model DueCache {
+  id         String   @id @default(cuid())
+  plantId    String
+  plant      Plant    @relation(fields: [plantId], references: [id])
+  task       Task
+  nextDueOn  DateTime @db.Date
+  computedAt DateTime @default(now())
+
+  @@unique([plantId, task])
+  @@map("due_caches")
+}
+
+model ScheduledMove {
+  id           String   @id @default(cuid())
+  ownerId      String
+  targetCityId String
+  moveOn       DateTime @db.Date
+  applied      Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([ownerId])
+  @@map("scheduled_moves")
+}

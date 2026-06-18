@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "prisma:env": "tsx scripts/write-prisma-env.ts",
     "prisma:generate": "npm run prisma:env && prisma generate",
-    "prisma:migrate": "npm run prisma:env && prisma migrate dev"
+    "prisma:migrate": "npm run prisma:env && prisma migrate deploy",
+    "prisma:migrate:dev": "npm run prisma:env && prisma migrate dev"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.4",
