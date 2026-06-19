@@ -83,6 +83,8 @@ model Species {
   slug           String  @id
   scientificName String  @unique @map("scientific_name")
   record         Json
+  // Human-readable Markdown brief (the "blogpost"); persisted in the DB, not in files.
+  brief          String? @db.Text
   plants         Plant[]
 
   @@map("species")
