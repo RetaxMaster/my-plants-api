@@ -2,4 +2,6 @@ node_modules/
 dist/
 .env
 .env.local
+prisma/.env
 *.tgz
+.playwright-cli/

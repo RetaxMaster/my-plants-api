@@ -1,3 +1,4 @@
+import './load-env-file.js'; // must run before loadEnv() reads process.env
 import { Global, Module } from '@nestjs/common';
 import { buildDatabaseUrl } from './database-url.js';
 import { loadEnv, type Env } from './env.js';

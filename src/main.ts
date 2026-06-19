@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import './config/load-env-file.js'; // load .env before anything reads process.env
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module.js';
