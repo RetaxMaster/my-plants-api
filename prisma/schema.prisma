@@ -46,13 +46,13 @@ model Owner {
 
 model City {
   id        String  @id @default(cuid())
-  ownerId   String
+  ownerId   String  @map("owner_id")
   owner     Owner   @relation(fields: [ownerId], references: [id])
   name      String
   latitude  Float
   longitude Float
   timezone  String
-  isPrimary Boolean @default(false)
+  isPrimary Boolean @default(false) @map("is_primary")
   places    Place[]
 
   @@index([ownerId])
@@ -61,17 +61,17 @@ model City {
 
 model Place {
   id                String            @id @default(cuid())
-  ownerId           String
+  ownerId           String            @map("owner_id")
   owner             Owner             @relation(fields: [ownerId], references: [id])
-  cityId            String
+  cityId            String            @map("city_id")
   city              City              @relation(fields: [cityId], references: [id])
   name              String
   indoor            Boolean
-  lightType         LightType
-  climateControlled Boolean           @default(false)
-  humidityCharacter HumidityCharacter @default(NORMAL)
-  indoorTempMinC    Float?
-  indoorTempMaxC    Float?
+  lightType         LightType         @map("light_type")
+  climateControlled Boolean           @default(false) @map("climate_controlled")
+  humidityCharacter HumidityCharacter @default(NORMAL) @map("humidity_character")
+  indoorTempMinC    Float?            @map("indoor_temp_min_c")
+  indoorTempMaxC    Float?            @map("indoor_temp_max_c")
   plants            Plant[]
 
   @@index([ownerId])
@@ -81,7 +81,7 @@ model Place {
 
 model Species {
   slug           String  @id
-  scientificName String  @unique
+  scientificName String  @unique @map("scientific_name")
   record         Json
   plants         Plant[]
 
@@ -90,15 +90,15 @@ model Species {
 
 model Plant {
   id          String   @id @default(cuid())
-  ownerId     String
+  ownerId     String   @map("owner_id")
   owner       Owner    @relation(fields: [ownerId], references: [id])
-  placeId     String
+  placeId     String   @map("place_id")
   place       Place    @relation(fields: [placeId], references: [id])
-  speciesSlug String
+  speciesSlug String   @map("species_slug")
   species     Species  @relation(fields: [speciesSlug], references: [slug])
   nickname    String?
-  acquiredOn  DateTime @db.Date
-  createdAt   DateTime @default(now())
+  acquiredOn  DateTime @db.Date @map("acquired_on")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   events      CareEvent[]
   adjustments PlantTaskAdjustment[]
@@ -112,13 +112,13 @@ model Plant {
 
 model CareEvent {
   id         String        @id @default(cuid())
-  plantId    String
+  plantId    String        @map("plant_id")
   plant      Plant         @relation(fields: [plantId], references: [id])
   task       Task
   type       CareEventType
-  occurredOn DateTime      @db.Date
+  occurredOn DateTime      @db.Date @map("occurred_on")
   payload    Json?
-  createdAt  DateTime      @default(now())
+  createdAt  DateTime      @default(now()) @map("created_at")
 
   @@index([plantId, task])
   @@map("care_events")
@@ -126,11 +126,11 @@ model CareEvent {
 
 model PlantTaskAdjustment {
   id         String   @id @default(cuid())
-  plantId    String
+  plantId    String   @map("plant_id")
   plant      Plant    @relation(fields: [plantId], references: [id])
   task       Task
   multiplier Float    @default(1.0)
-  updatedAt  DateTime @updatedAt
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@unique([plantId, task])
   @@map("plant_task_adjustments")
@@ -138,10 +138,10 @@ model PlantTaskAdjustment {
 
 model TaskOverride {
   id        String   @id @default(cuid())
-  plantId   String
+  plantId   String   @map("plant_id")
   plant     Plant    @relation(fields: [plantId], references: [id])
   task      Task
-  nextDueOn DateTime @db.Date
+  nextDueOn DateTime @db.Date @map("next_due_on")
 
   @@unique([plantId, task])
   @@map("task_overrides")
@@ -149,11 +149,11 @@ model TaskOverride {
 
 model DueCache {
   id         String   @id @default(cuid())
-  plantId    String
+  plantId    String   @map("plant_id")
   plant      Plant    @relation(fields: [plantId], references: [id])
   task       Task
-  nextDueOn  DateTime @db.Date
-  computedAt DateTime @default(now())
+  nextDueOn  DateTime @db.Date @map("next_due_on")
+  computedAt DateTime @default(now()) @map("computed_at")
 
   @@unique([plantId, task])
   @@map("due_caches")
@@ -161,11 +161,11 @@ model DueCache {
 
 model ScheduledMove {
   id           String   @id @default(cuid())
-  ownerId      String
-  targetCityId String
-  moveOn       DateTime @db.Date
+  ownerId      String   @map("owner_id")
+  targetCityId String   @map("target_city_id")
+  moveOn       DateTime @db.Date @map("move_on")
   applied      Boolean  @default(false)
-  createdAt    DateTime @default(now())
+  createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([ownerId])
   @@map("scheduled_moves")

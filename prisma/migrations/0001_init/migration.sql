@@ -9,149 +9,148 @@ CREATE TABLE `owners` (
 -- CreateTable
 CREATE TABLE `cities` (
     `id` VARCHAR(191) NOT NULL,
-    `ownerId` VARCHAR(191) NOT NULL,
+    `owner_id` VARCHAR(191) NOT NULL,
     `name` VARCHAR(191) NOT NULL,
     `latitude` DOUBLE NOT NULL,
     `longitude` DOUBLE NOT NULL,
     `timezone` VARCHAR(191) NOT NULL,
-    `isPrimary` BOOLEAN NOT NULL DEFAULT false,
+    `is_primary` BOOLEAN NOT NULL DEFAULT false,
 
-    INDEX `cities_ownerId_idx`(`ownerId`),
+    INDEX `cities_owner_id_idx`(`owner_id`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `places` (
     `id` VARCHAR(191) NOT NULL,
-    `ownerId` VARCHAR(191) NOT NULL,
-    `cityId` VARCHAR(191) NOT NULL,
+    `owner_id` VARCHAR(191) NOT NULL,
+    `city_id` VARCHAR(191) NOT NULL,
     `name` VARCHAR(191) NOT NULL,
     `indoor` BOOLEAN NOT NULL,
-    `lightType` ENUM('DIRECT', 'BRIGHT_INDIRECT', 'MEDIUM', 'LOW') NOT NULL,
-    `climateControlled` BOOLEAN NOT NULL DEFAULT false,
-    `humidityCharacter` ENUM('DRY', 'NORMAL', 'HUMID') NOT NULL DEFAULT 'NORMAL',
-    `indoorTempMinC` DOUBLE NULL,
-    `indoorTempMaxC` DOUBLE NULL,
+    `light_type` ENUM('DIRECT', 'BRIGHT_INDIRECT', 'MEDIUM', 'LOW') NOT NULL,
+    `climate_controlled` BOOLEAN NOT NULL DEFAULT false,
+    `humidity_character` ENUM('DRY', 'NORMAL', 'HUMID') NOT NULL DEFAULT 'NORMAL',
+    `indoor_temp_min_c` DOUBLE NULL,
+    `indoor_temp_max_c` DOUBLE NULL,
 
-    INDEX `places_ownerId_idx`(`ownerId`),
-    INDEX `places_cityId_idx`(`cityId`),
+    INDEX `places_owner_id_idx`(`owner_id`),
+    INDEX `places_city_id_idx`(`city_id`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `species` (
     `slug` VARCHAR(191) NOT NULL,
-    `scientificName` VARCHAR(191) NOT NULL,
+    `scientific_name` VARCHAR(191) NOT NULL,
     `record` JSON NOT NULL,
 
-    UNIQUE INDEX `species_scientificName_key`(`scientificName`),
+    UNIQUE INDEX `species_scientific_name_key`(`scientific_name`),
     PRIMARY KEY (`slug`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `plants` (
     `id` VARCHAR(191) NOT NULL,
-    `ownerId` VARCHAR(191) NOT NULL,
-    `placeId` VARCHAR(191) NOT NULL,
-    `speciesSlug` VARCHAR(191) NOT NULL,
+    `owner_id` VARCHAR(191) NOT NULL,
+    `place_id` VARCHAR(191) NOT NULL,
+    `species_slug` VARCHAR(191) NOT NULL,
     `nickname` VARCHAR(191) NULL,
-    `acquiredOn` DATE NOT NULL,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `acquired_on` DATE NOT NULL,
+    `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-    INDEX `plants_ownerId_idx`(`ownerId`),
-    INDEX `plants_placeId_idx`(`placeId`),
+    INDEX `plants_owner_id_idx`(`owner_id`),
+    INDEX `plants_place_id_idx`(`place_id`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `care_events` (
     `id` VARCHAR(191) NOT NULL,
-    `plantId` VARCHAR(191) NOT NULL,
+    `plant_id` VARCHAR(191) NOT NULL,
     `task` ENUM('WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES') NOT NULL,
     `type` ENUM('DONE', 'POSTPONED', 'SYMPTOM') NOT NULL,
-    `occurredOn` DATE NOT NULL,
+    `occurred_on` DATE NOT NULL,
     `payload` JSON NULL,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-    INDEX `care_events_plantId_task_idx`(`plantId`, `task`),
+    INDEX `care_events_plant_id_task_idx`(`plant_id`, `task`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `plant_task_adjustments` (
     `id` VARCHAR(191) NOT NULL,
-    `plantId` VARCHAR(191) NOT NULL,
+    `plant_id` VARCHAR(191) NOT NULL,
     `task` ENUM('WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES') NOT NULL,
     `multiplier` DOUBLE NOT NULL DEFAULT 1.0,
-    `updatedAt` DATETIME(3) NOT NULL,
+    `updated_at` DATETIME(3) NOT NULL,
 
-    UNIQUE INDEX `plant_task_adjustments_plantId_task_key`(`plantId`, `task`),
+    UNIQUE INDEX `plant_task_adjustments_plant_id_task_key`(`plant_id`, `task`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `task_overrides` (
     `id` VARCHAR(191) NOT NULL,
-    `plantId` VARCHAR(191) NOT NULL,
+    `plant_id` VARCHAR(191) NOT NULL,
     `task` ENUM('WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES') NOT NULL,
-    `nextDueOn` DATE NOT NULL,
+    `next_due_on` DATE NOT NULL,
 
-    UNIQUE INDEX `task_overrides_plantId_task_key`(`plantId`, `task`),
+    UNIQUE INDEX `task_overrides_plant_id_task_key`(`plant_id`, `task`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `due_caches` (
     `id` VARCHAR(191) NOT NULL,
-    `plantId` VARCHAR(191) NOT NULL,
+    `plant_id` VARCHAR(191) NOT NULL,
     `task` ENUM('WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES') NOT NULL,
-    `nextDueOn` DATE NOT NULL,
-    `computedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `next_due_on` DATE NOT NULL,
+    `computed_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-    UNIQUE INDEX `due_caches_plantId_task_key`(`plantId`, `task`),
+    UNIQUE INDEX `due_caches_plant_id_task_key`(`plant_id`, `task`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- CreateTable
 CREATE TABLE `scheduled_moves` (
     `id` VARCHAR(191) NOT NULL,
-    `ownerId` VARCHAR(191) NOT NULL,
-    `targetCityId` VARCHAR(191) NOT NULL,
-    `moveOn` DATE NOT NULL,
+    `owner_id` VARCHAR(191) NOT NULL,
+    `target_city_id` VARCHAR(191) NOT NULL,
+    `move_on` DATE NOT NULL,
     `applied` BOOLEAN NOT NULL DEFAULT false,
-    `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-    INDEX `scheduled_moves_ownerId_idx`(`ownerId`),
+    INDEX `scheduled_moves_owner_id_idx`(`owner_id`),
     PRIMARY KEY (`id`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- AddForeignKey
-ALTER TABLE `cities` ADD CONSTRAINT `cities_ownerId_fkey` FOREIGN KEY (`ownerId`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `cities` ADD CONSTRAINT `cities_owner_id_fkey` FOREIGN KEY (`owner_id`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `places` ADD CONSTRAINT `places_ownerId_fkey` FOREIGN KEY (`ownerId`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `places` ADD CONSTRAINT `places_owner_id_fkey` FOREIGN KEY (`owner_id`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `places` ADD CONSTRAINT `places_cityId_fkey` FOREIGN KEY (`cityId`) REFERENCES `cities`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `places` ADD CONSTRAINT `places_city_id_fkey` FOREIGN KEY (`city_id`) REFERENCES `cities`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `plants` ADD CONSTRAINT `plants_ownerId_fkey` FOREIGN KEY (`ownerId`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `plants` ADD CONSTRAINT `plants_owner_id_fkey` FOREIGN KEY (`owner_id`) REFERENCES `owners`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `plants` ADD CONSTRAINT `plants_placeId_fkey` FOREIGN KEY (`placeId`) REFERENCES `places`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `plants` ADD CONSTRAINT `plants_place_id_fkey` FOREIGN KEY (`place_id`) REFERENCES `places`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `plants` ADD CONSTRAINT `plants_speciesSlug_fkey` FOREIGN KEY (`speciesSlug`) REFERENCES `species`(`slug`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `plants` ADD CONSTRAINT `plants_species_slug_fkey` FOREIGN KEY (`species_slug`) REFERENCES `species`(`slug`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `care_events` ADD CONSTRAINT `care_events_plantId_fkey` FOREIGN KEY (`plantId`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `care_events` ADD CONSTRAINT `care_events_plant_id_fkey` FOREIGN KEY (`plant_id`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `plant_task_adjustments` ADD CONSTRAINT `plant_task_adjustments_plantId_fkey` FOREIGN KEY (`plantId`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `plant_task_adjustments` ADD CONSTRAINT `plant_task_adjustments_plant_id_fkey` FOREIGN KEY (`plant_id`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `task_overrides` ADD CONSTRAINT `task_overrides_plantId_fkey` FOREIGN KEY (`plantId`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE `task_overrides` ADD CONSTRAINT `task_overrides_plant_id_fkey` FOREIGN KEY (`plant_id`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE `due_caches` ADD CONSTRAINT `due_caches_plantId_fkey` FOREIGN KEY (`plantId`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
-
+ALTER TABLE `due_caches` ADD CONSTRAINT `due_caches_plant_id_fkey` FOREIGN KEY (`plant_id`) REFERENCES `plants`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE;
