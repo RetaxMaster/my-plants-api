@@ -21,7 +21,11 @@ function makeService(savedCities: Array<{ id: string; latitude: number; longitud
       }),
     },
   } as unknown as ConstructorParameters<typeof MovingService>[0];
-  const owner = { currentOwnerId: vi.fn(async () => 'owner-1') } as unknown as ConstructorParameters<typeof MovingService>[1];
+  const owner = {
+    currentOwnerId: () => 'owner-1',
+    currentRole: () => 'USER',
+    ownerFilter: () => ({ ownerId: 'owner-1' }),
+  } as unknown as ConstructorParameters<typeof MovingService>[1];
   const weather = {} as ConstructorParameters<typeof MovingService>[2];
   const carePlan = {} as ConstructorParameters<typeof MovingService>[3];
   const svc = new MovingService(prisma, owner, weather, carePlan);

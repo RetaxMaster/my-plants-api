@@ -45,7 +45,11 @@ function makeService() {
   const prisma = {
     plant: { findMany: vi.fn(async () => [plantRow]) },
   } as unknown as ConstructorParameters<typeof MovingService>[0];
-  const owner = { currentOwnerId: vi.fn(async () => 'owner-1') } as unknown as ConstructorParameters<typeof MovingService>[1];
+  const owner = {
+    currentOwnerId: () => 'owner-1',
+    currentRole: () => 'USER',
+    ownerFilter: () => ({ ownerId: 'owner-1' }),
+  } as unknown as ConstructorParameters<typeof MovingService>[1];
   const weather = {
     forLocation: vi.fn(async () => ({ tempC: 22, humidityPct: 50, seasonalLowC: 12, seasonalHighC: 30 })),
   } as unknown as ConstructorParameters<typeof MovingService>[2];

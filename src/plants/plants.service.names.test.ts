@@ -35,7 +35,11 @@ function makeService(plants: Array<Record<string, unknown>>) {
       findFirst: vi.fn(async () => plants[0] ?? null),
     },
   } as unknown as ConstructorParameters<typeof PlantsService>[0];
-  const owner = { currentOwnerId: vi.fn(async () => 'owner-1') } as unknown as ConstructorParameters<typeof PlantsService>[1];
+  const owner = {
+    currentOwnerId: () => 'owner-1',
+    currentRole: () => 'USER',
+    ownerFilter: () => ({ ownerId: 'owner-1' }),
+  } as unknown as ConstructorParameters<typeof PlantsService>[1];
   const carePlan = {} as ConstructorParameters<typeof PlantsService>[2];
   const weather = {} as ConstructorParameters<typeof PlantsService>[3];
   return new PlantsService(prisma, owner, carePlan, weather);
