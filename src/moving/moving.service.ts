@@ -1,12 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { parseSpeciesRecord, LIGHT_LEVELS } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
-import { assessViability, type ViabilityResult } from '../engines/viability.js';
-import { effectiveConditions } from '../engines/indoor-climate.js';
-import { placeLightRank } from '../places/place-conditions.js';
+import { buildViability, type ViabilityResult } from '../engines/viability.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { roundCoord4 } from '../common/geo/round-coord.js';
 
@@ -36,26 +34,25 @@ export class MovingService {
 
     return plants.map((plant) => {
       const record = parseSpeciesRecord(plant.species.record);
-      const effective = effectiveConditions(
+      const result = buildViability(
+        record,
         {
           indoor: plant.place.indoor,
           climateControlled: plant.place.climateControlled,
           humidityCharacter: plant.place.humidityCharacter,
           indoorTempMinC: plant.place.indoorTempMinC,
           indoorTempMaxC: plant.place.indoorTempMaxC,
+          lightType: plant.place.lightType,
         },
-        weather ? { tempC: weather.tempC, humidityPct: weather.humidityPct } : null,
+        weather
+          ? {
+              tempC: weather.tempC,
+              humidityPct: weather.humidityPct,
+              seasonalLowC: weather.seasonalLowC,
+              seasonalHighC: weather.seasonalHighC,
+            }
+          : null,
       );
-      const result = assessViability({
-        survivalMinC: record.temperature.survivalMinC,
-        survivalMaxC: record.temperature.survivalMaxC,
-        minLightRank: LIGHT_LEVELS.indexOf(record.light.minimum),
-        minHumidityPct: record.humidity.minimumPct,
-        seasonalLowC: weather?.seasonalLowC ?? record.temperature.idealMinC,
-        seasonalHighC: weather?.seasonalHighC ?? record.temperature.idealMaxC,
-        placeLightRank: placeLightRank(plant.place.lightType),
-        effectiveHumidityPct: effective.humidityPct,
-      });
       return { plantId: plant.id, nickname: plant.nickname, speciesSlug: plant.speciesSlug, ...result };
     });
   }
