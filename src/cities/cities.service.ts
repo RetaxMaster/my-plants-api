@@ -1,11 +1,22 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { OpenMeteoGeocodingClient, type CitySearchResult } from '../weather/open-meteo.geocoding.client.js';
 import type { CreateCityDto } from './create-city.dto.js';
 
 @Injectable()
 export class CitiesService {
-  constructor(private readonly prisma: PrismaService, private readonly owner: OwnerService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly owner: OwnerService,
+    private readonly geocoding: OpenMeteoGeocodingClient,
+  ) {}
+
+  // Proxies the geocoding bank. Not owner-scoped: the candidate list is public reference
+  // data, not the owner's saved cities. Degrades to [] (the client never throws).
+  search(query: string): Promise<CitySearchResult[]> {
+    return this.geocoding.search(query);
+  }
 
   async list() {
     const ownerId = await this.owner.currentOwnerId();
