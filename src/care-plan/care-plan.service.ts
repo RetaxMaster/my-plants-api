@@ -146,6 +146,13 @@ export class CarePlanService {
     for (const p of plants) await this.recomputePlant(p.id);
   }
 
+  // Recompute only one owner's plants — the USER-scoped form of recomputeAll (the controller gates
+  // which one runs by role).
+  async recomputeOwner(ownerId: string): Promise<void> {
+    const plants = await this.prisma.plant.findMany({ where: { ownerId }, select: { id: true } });
+    for (const p of plants) await this.recomputePlant(p.id);
+  }
+
   // "Today" uses the owner's primary-city timezone; due dates are DATE granularity.
   async todaysTasks(ownerId: string): Promise<{ plantId: string; task: Task; nextDueOn: Date }[]> {
     const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });

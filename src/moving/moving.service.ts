@@ -101,10 +101,11 @@ export class MovingService {
     return { id: move.id };
   }
 
-  // Applies any move whose date has arrived: target becomes primary, outdoor places repoint to
-  // it, then the whole garden recomputes. Idempotent via the `applied` flag.
-  async applyDueMoves(now: Date = new Date()): Promise<number> {
-    const ownerId = await this.owner.currentOwnerId();
+  // Applies any of ONE owner's moves whose date has arrived: target becomes primary, that owner's
+  // outdoor places repoint to it. Idempotent via the `applied` flag. Owner-AGNOSTIC of the actor:
+  // the ownerId is a parameter, never read from CLS — this runs in system jobs (cron/startup) that
+  // have no request actor. Does NOT recompute (the all-owners caller recomputes once at the end).
+  async applyDueMovesForOwner(ownerId: string, now: Date): Promise<number> {
     const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });
     const cutoff = startOfTomorrowUtc(primary?.timezone ?? 'UTC', now);
     const due = await this.prisma.scheduledMove.findMany({
@@ -120,7 +121,16 @@ export class MovingService {
         await tx.scheduledMove.update({ where: { id: move.id }, data: { applied: true } });
       });
     }
-    if (due.length > 0) await this.carePlan.recomputeAll();
-    return due.length;
+    return due.length; // NOTE: no recompute here — applyAllDueMoves recomputes once at the end.
+  }
+
+  // Owner-agnostic system job (cron / startup): apply every owner's due moves, then recompute the
+  // whole garden ONCE if anything applied. Never reads the CLS actor — it iterates owner.findMany().
+  async applyAllDueMoves(now: Date = new Date()): Promise<number> {
+    const owners = await this.prisma.owner.findMany({ select: { id: true } });
+    let total = 0;
+    for (const o of owners) total += await this.applyDueMovesForOwner(o.id, now);
+    if (total > 0) await this.carePlan.recomputeAll();
+    return total;
   }
 }

@@ -8,6 +8,7 @@ export class MovingCron {
 
   @Cron(CronExpression.EVERY_DAY_AT_4AM) // before the 5 AM care-plan recompute
   async daily(): Promise<void> {
-    await this.moving.applyDueMoves();
+    // System job: applies due moves for ALL owners (no request actor). Recomputes once internally.
+    await this.moving.applyAllDueMoves();
   }
 }
