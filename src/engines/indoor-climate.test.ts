@@ -9,7 +9,9 @@ const weather = { tempC: 30, humidityPct: 45 };
 
 describe('effectiveConditions', () => {
   it('passes outdoor weather straight through for outdoor places', () => {
-    expect(effectiveConditions(outdoor, weather)).toEqual({ tempC: 30, humidityPct: 45 });
+    expect(effectiveConditions(outdoor, weather)).toEqual({
+      tempC: 30, humidityPct: 45, tempSignal: true, humiditySignal: true,
+    });
   });
 
   it('uses the midpoint of an indoor temperature range when provided', () => {
@@ -22,12 +24,6 @@ describe('effectiveConditions', () => {
     expect(effectiveConditions(place, weather).tempC).toBe(21);
   });
 
-  it('damps outdoor temperature toward the comfort baseline for a plain indoor place', () => {
-    const place: PlaceClimateInput = { ...outdoor, indoor: true };
-    // 21 + 0.4 * (30 - 21) = 24.6
-    expect(effectiveConditions(place, weather).tempC).toBeCloseTo(24.6, 5);
-  });
-
   it('raises humidity for a HUMID indoor place and lowers it for DRY', () => {
     const humid: PlaceClimateInput = { ...outdoor, indoor: true, humidityCharacter: 'HUMID' };
     const dry: PlaceClimateInput = { ...outdoor, indoor: true, humidityCharacter: 'DRY' };
@@ -35,8 +31,54 @@ describe('effectiveConditions', () => {
     expect(effectiveConditions(dry, weather).humidityPct).toBe(35);
   });
 
+  it('indoor with no range, not climate-controlled, falls back to raw outdoor temp (real signal)', () => {
+    const e = effectiveConditions(
+      { indoor: true, climateControlled: false, humidityCharacter: 'NORMAL', indoorTempMinC: null, indoorTempMaxC: null },
+      { tempC: 33, humidityPct: 40 },
+    );
+    expect(e.tempC).toBe(33);
+    expect(e.tempSignal).toBe(true);
+  });
+
+  it('indoor climate-controlled with no range stays at the comfort baseline (no temp signal)', () => {
+    const e = effectiveConditions(
+      { indoor: true, climateControlled: true, humidityCharacter: 'NORMAL', indoorTempMinC: null, indoorTempMaxC: null },
+      { tempC: 33, humidityPct: 40 },
+    );
+    expect(e.tempC).toBe(21);
+    expect(e.tempSignal).toBe(false);
+  });
+
+  it('indoor with a null humidityCharacter falls back to outdoor humidity (real signal)', () => {
+    const e = effectiveConditions(
+      { indoor: true, climateControlled: false, humidityCharacter: null, indoorTempMinC: 20, indoorTempMaxC: 22 },
+      { tempC: 25, humidityPct: 70 },
+    );
+    expect(e.humidityPct).toBe(70);
+    expect(e.humiditySignal).toBe(true);
+  });
+
+  it('indoor with null humidity and no weather uses the 50% baseline (no humidity signal)', () => {
+    const e = effectiveConditions(
+      { indoor: true, climateControlled: false, humidityCharacter: null, indoorTempMinC: 20, indoorTempMaxC: 22 },
+      null,
+    );
+    expect(e.humidityPct).toBe(50);
+    expect(e.humiditySignal).toBe(false);
+  });
+
+  it('outdoor with weather is a real signal for both', () => {
+    const e = effectiveConditions(
+      { indoor: false, climateControlled: false, humidityCharacter: null, indoorTempMinC: null, indoorTempMaxC: null },
+      { tempC: 30, humidityPct: 45 },
+    );
+    expect(e).toEqual({ tempC: 30, humidityPct: 45, tempSignal: true, humiditySignal: true });
+  });
+
   it('is neutral when weather is missing (uses baselines)', () => {
     const place: PlaceClimateInput = { ...outdoor, indoor: true };
-    expect(effectiveConditions(place, null)).toEqual({ tempC: 21, humidityPct: 50 });
+    expect(effectiveConditions(place, null)).toEqual({
+      tempC: 21, humidityPct: 50, tempSignal: false, humiditySignal: true,
+    });
   });
 });
