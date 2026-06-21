@@ -27,7 +27,7 @@ describe('computeAdherence', () => {
       scheduledDueOn: day('2026-06-23'),
       hadOverride: true,
     });
-    expect(a.eligible).toBe(false);
+    expect(a?.eligible).toBe(false);
   });
 
   it('is ineligible for a same-day / back-dated DONE (observedDays < 1)', () => {
@@ -37,7 +37,7 @@ describe('computeAdherence', () => {
       scheduledDueOn: day('2026-06-23'),
       hadOverride: false,
     });
-    expect(a.eligible).toBe(false);
+    expect(a?.eligible).toBe(false);
   });
 
   it('is ineligible when scheduledDays < 1', () => {
@@ -47,7 +47,7 @@ describe('computeAdherence', () => {
       scheduledDueOn: day('2026-06-13'),
       hadOverride: false,
     });
-    expect(a.eligible).toBe(false);
+    expect(a?.eligible).toBe(false);
   });
 
   it('returns null when there is no due-cache row (scheduledDueOn = null)', () => {
