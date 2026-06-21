@@ -1,7 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { parseSpeciesRecord } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
+import { WeatherService } from '../weather/weather.service.js';
+import { buildViability, type ViabilityResult } from '../engines/viability.js';
 import { startOfTodayUtc } from '../common/time/local-date.js';
 import { careTaskStatus, type CareStatus } from './plant-care.js';
 import type { Task } from '@prisma/client';
@@ -13,6 +16,7 @@ export class PlantsService {
     private readonly prisma: PrismaService,
     private readonly owner: OwnerService,
     private readonly carePlan: CarePlanService,
+    private readonly weather: WeatherService,
   ) {}
 
   async list() {
@@ -32,6 +36,7 @@ export class PlantsService {
   async getCare(id: string): Promise<{
     plantId: string;
     tasks: { task: Task; nextDueOn: string; daysUntilDue: number; status: CareStatus }[];
+    viability: ViabilityResult;
   }> {
     const ownerId = await this.owner.currentOwnerId();
     const plant = await this.prisma.plant.findFirst({ where: { id, ownerId } });
@@ -66,7 +71,35 @@ export class PlantsService {
       };
     });
 
-    return { plantId: id, tasks };
+    // Viability of the plant in its CURRENT place, against its own city's weather.
+    const full = await this.prisma.plant.findUniqueOrThrow({
+      where: { id },
+      include: { species: true, place: { include: { city: true } } },
+    });
+    const record = parseSpeciesRecord(full.species.record);
+    const { city } = full.place;
+    const weather = await this.weather.forCity(city.id, city.latitude, city.longitude);
+    const viability = buildViability(
+      record,
+      {
+        indoor: full.place.indoor,
+        climateControlled: full.place.climateControlled,
+        humidityCharacter: full.place.humidityCharacter,
+        indoorTempMinC: full.place.indoorTempMinC,
+        indoorTempMaxC: full.place.indoorTempMaxC,
+        lightType: full.place.lightType,
+      },
+      weather
+        ? {
+            tempC: weather.tempC,
+            humidityPct: weather.humidityPct,
+            seasonalLowC: weather.seasonalLowC,
+            seasonalHighC: weather.seasonalHighC,
+          }
+        : null,
+    );
+
+    return { plantId: id, tasks, viability };
   }
 
   async create(dto: CreatePlantDto) {
