@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { parseSpeciesRecord, LIGHT_LEVELS } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -8,6 +8,7 @@ import { assessViability, type ViabilityResult } from '../engines/viability.js';
 import { effectiveConditions } from '../engines/indoor-climate.js';
 import { placeLightRank } from '../places/place-conditions.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
+import { roundCoord4 } from '../common/geo/round-coord.js';
 
 export interface PlantViability extends ViabilityResult {
   plantId: string;
@@ -24,12 +25,10 @@ export class MovingService {
     private readonly carePlan: CarePlanService,
   ) {}
 
-  // What-if: viability of every plant against the target city's weather. Writes nothing.
-  async simulate(targetCityId: string): Promise<PlantViability[]> {
+  // What-if: viability of every plant against an arbitrary geocoded target. Writes nothing.
+  async simulate(latitude: number, longitude: number): Promise<PlantViability[]> {
     const ownerId = await this.owner.currentOwnerId();
-    const city = await this.prisma.city.findFirst({ where: { id: targetCityId, ownerId } });
-    if (!city) throw new NotFoundException(`Unknown city: ${targetCityId}`);
-    const weather = await this.weather.forCity(city.id, city.latitude, city.longitude);
+    const weather = await this.weather.forLocation(`${latitude},${longitude}`, latitude, longitude);
     const plants = await this.prisma.plant.findMany({
       where: { ownerId },
       include: { species: true, place: true },
@@ -61,12 +60,34 @@ export class MovingService {
     });
   }
 
-  async schedule(targetCityId: string, moveOn: string): Promise<{ id: string }> {
+  // Persists a planned move. Finds-or-creates the owner's destination City by coordinates
+  // rounded to 4 decimals (never exact float equality), then schedules the move against it.
+  async schedule(
+    target: { name: string; latitude: number; longitude: number; timezone: string },
+    moveOn: string,
+  ): Promise<{ id: string }> {
     const ownerId = await this.owner.currentOwnerId();
-    const city = await this.prisma.city.findFirst({ where: { id: targetCityId, ownerId } });
-    if (!city) throw new NotFoundException(`Unknown city: ${targetCityId}`);
+    const wantLat = roundCoord4(target.latitude);
+    const wantLng = roundCoord4(target.longitude);
+
+    const owned = await this.prisma.city.findMany({ where: { ownerId } });
+    let city = owned.find(
+      (c) => roundCoord4(c.latitude) === wantLat && roundCoord4(c.longitude) === wantLng,
+    );
+    if (!city) {
+      city = await this.prisma.city.create({
+        data: {
+          ownerId,
+          name: target.name,
+          latitude: target.latitude,
+          longitude: target.longitude,
+          timezone: target.timezone,
+        },
+      });
+    }
+
     const move = await this.prisma.scheduledMove.create({
-      data: { ownerId, targetCityId, moveOn: new Date(moveOn) },
+      data: { ownerId, targetCityId: city.id, moveOn: new Date(moveOn) },
     });
     return { id: move.id };
   }
