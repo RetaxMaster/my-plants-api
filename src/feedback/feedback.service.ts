@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type CareEventType, type Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { nextAdjustment } from '../engines/adaptation.js';
 import { computeEarlyRatio } from '../engines/punctuality.js';
@@ -10,7 +11,11 @@ const POSTPONE_WINDOW_DAYS = 60;
 
 @Injectable()
 export class FeedbackService {
-  constructor(private readonly prisma: PrismaService, private readonly carePlan: CarePlanService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly owner: OwnerService,
+    private readonly carePlan: CarePlanService,
+  ) {}
 
   async record(input: {
     plantId: string;
@@ -20,6 +25,16 @@ export class FeedbackService {
     postponeToOn?: Date;
     payload?: unknown;
   }): Promise<void> {
+    // Owner-scope the write: a feedback event mutates the plant's history, schedule, overrides and
+    // adaptation, so reject any plant that is not the current owner's (mirrors the read path on
+    // GET /plants/:id/care) before touching anything.
+    const ownerId = await this.owner.currentOwnerId();
+    const owned = await this.prisma.plant.findFirst({
+      where: { id: input.plantId, ownerId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException(`Unknown plant: ${input.plantId}`);
+
     // DONE-on-WATER closes a punctuality cycle (spec A.2). Capture adherence BEFORE any write —
     // an active override here is precisely the "this cycle was postponed" signal; deleting it first
     // would make every cycle look eligible (the double-count A.1 forbids).
