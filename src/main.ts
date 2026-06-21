@@ -7,9 +7,10 @@ import { loadEnv } from './config/env.js';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
-  // The web app (a different localhost port) calls this API from the browser, so enable CORS,
-  // restricted to the web origin (env-overridable). Note: v1 has no auth (single-user, local);
-  // real authentication arrives with multi-user — see the roadmap.
+  // Auth is on: a global JWT guard (default-deny) protects every route except those marked
+  // @Public(). In production the browser talks to the web app's BFF, not this API directly, so the
+  // bearer token never reaches the browser. CORS (restricted to the web origin, env-overridable) is
+  // kept as a defensive allowance — harmless under the BFF, useful for local direct calls.
   app.enableCors({ origin: [process.env.WEB_ORIGIN ?? 'http://localhost:8001'] });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   await app.listen(loadEnv().PORT);
