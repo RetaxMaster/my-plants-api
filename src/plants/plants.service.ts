@@ -30,14 +30,18 @@ export class PlantsService {
   }
 
   async list() {
-    const ownerId = await this.owner.currentOwnerId();
-    const plants = await this.prisma.plant.findMany({ where: { ownerId }, include: { species: true } });
+    const plants = await this.prisma.plant.findMany({
+      where: { ...this.owner.ownerFilter() },
+      include: { species: true },
+    });
     return plants.map((p) => this.withNames(p));
   }
 
   async get(id: string) {
-    const ownerId = await this.owner.currentOwnerId();
-    const plant = await this.prisma.plant.findFirst({ where: { id, ownerId }, include: { species: true } });
+    const plant = await this.prisma.plant.findFirst({
+      where: { id, ...this.owner.ownerFilter() },
+      include: { species: true },
+    });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
     return this.withNames(plant);
   }
@@ -49,8 +53,7 @@ export class PlantsService {
     tasks: { task: Task; nextDueOn: string; daysUntilDue: number; status: CareStatus }[];
     viability: ViabilityResult;
   }> {
-    const ownerId = await this.owner.currentOwnerId();
-    const plant = await this.prisma.plant.findFirst({ where: { id, ownerId } });
+    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
 
     // If the cache is empty (e.g. plant created before any recompute), recompute on demand so the
@@ -69,7 +72,9 @@ export class PlantsService {
       });
     }
 
-    const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });
+    // Boundary uses the PLANT's owner primary-city timezone (so an ADMIN viewing another owner's
+    // plant gets that owner's local "today", not the admin's).
+    const primary = await this.prisma.city.findFirst({ where: { ownerId: plant.ownerId, isPrimary: true } });
     const startOfToday = startOfTodayUtc(primary?.timezone ?? 'UTC');
 
     const tasks = due.map((d) => {
@@ -114,7 +119,9 @@ export class PlantsService {
   }
 
   async create(dto: CreatePlantDto) {
-    const ownerId = await this.owner.currentOwnerId();
+    // Create: stamp the acting actor's ownerId and validate the parent place belongs to that same
+    // owner (NOT ownerFilter — even an ADMIN creates a plant under their own owner).
+    const ownerId = this.owner.currentOwnerId();
     const place = await this.prisma.place.findFirst({ where: { id: dto.placeId, ownerId } });
     if (!place) throw new BadRequestException(`Unknown place: ${dto.placeId}`);
     const species = await this.prisma.species.findUnique({ where: { slug: dto.speciesSlug } });

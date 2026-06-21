@@ -18,13 +18,15 @@ export class CitiesService {
     return this.geocoding.search(query);
   }
 
+  // Read: USER own-only, ADMIN all.
   async list() {
-    const ownerId = await this.owner.currentOwnerId();
-    return this.prisma.city.findMany({ where: { ownerId } });
+    return this.prisma.city.findMany({ where: { ...this.owner.ownerFilter() } });
   }
 
+  // Create: stamp the acting actor's ownerId; the isPrimary reset is scoped to that SAME owner
+  // (never {} — an ADMIN must not clear every owner's primary flag).
   async create(dto: CreateCityDto) {
-    const ownerId = await this.owner.currentOwnerId();
+    const ownerId = this.owner.currentOwnerId();
     return this.prisma.$transaction(async (tx) => {
       if (dto.isPrimary) {
         await tx.city.updateMany({ where: { ownerId }, data: { isPrimary: false } });
@@ -33,18 +35,20 @@ export class CitiesService {
     });
   }
 
+  // Read/access-check: USER own-only, ADMIN any.
   async get(id: string) {
-    const ownerId = await this.owner.currentOwnerId();
-    const city = await this.prisma.city.findFirst({ where: { id, ownerId } });
+    const city = await this.prisma.city.findFirst({ where: { id, ...this.owner.ownerFilter() } });
     if (!city) throw new NotFoundException(`Unknown city: ${id}`);
     return city;
   }
 
+  // Per-owner sweep: load the target via get() (USER own-only, ADMIN any), then scope the
+  // isPrimary reset to THAT CITY's owner — derived from the target resource, never {} and never
+  // the actor. This lets an ADMIN flip another owner's primary without touching anyone else's.
   async makePrimary(id: string) {
-    const ownerId = await this.owner.currentOwnerId();
-    await this.get(id); // ensures ownership
+    const city = await this.get(id);
     return this.prisma.$transaction(async (tx) => {
-      await tx.city.updateMany({ where: { ownerId }, data: { isPrimary: false } });
+      await tx.city.updateMany({ where: { ownerId: city.ownerId }, data: { isPrimary: false } });
       return tx.city.update({ where: { id }, data: { isPrimary: true } });
     });
   }

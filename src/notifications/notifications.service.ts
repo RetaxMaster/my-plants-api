@@ -16,7 +16,9 @@ export class InAppNotificationsService implements NotificationChannel {
   }
 
   async pending(): Promise<DueNotification[]> {
-    const ownerId = await this.owner.currentOwnerId();
+    // Per-actor: "my" due tasks. No admin bypass — notifications are personal, not a cross-owner
+    // sweep. currentOwnerId() is synchronous now (reads CLS).
+    const ownerId = this.owner.currentOwnerId();
     const due = await this.carePlan.todaysTasks(ownerId);
     return due.map((d) => ({ plantId: d.plantId, task: d.task, nextDueOn: d.nextDueOn }));
   }

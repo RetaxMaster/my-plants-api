@@ -26,11 +26,11 @@ export class FeedbackService {
     payload?: unknown;
   }): Promise<void> {
     // Owner-scope the write: a feedback event mutates the plant's history, schedule, overrides and
-    // adaptation, so reject any plant that is not the current owner's (mirrors the read path on
-    // GET /plants/:id/care) before touching anything.
-    const ownerId = await this.owner.currentOwnerId();
+    // adaptation, so reject any plant the actor may not touch (mirrors the read path on
+    // GET /plants/:id/care) before mutating. Single-row mutation: resolve { id, ...ownerFilter() }
+    // (USER own-only, ADMIN any), then mutate by id.
     const owned = await this.prisma.plant.findFirst({
-      where: { id: input.plantId, ownerId },
+      where: { id: input.plantId, ...this.owner.ownerFilter() },
       select: { id: true },
     });
     if (!owned) throw new NotFoundException(`Unknown plant: ${input.plantId}`);

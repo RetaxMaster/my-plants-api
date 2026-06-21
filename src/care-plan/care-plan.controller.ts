@@ -8,7 +8,7 @@ export class CarePlanController {
 
   @Get('today')
   async today() {
-    return this.carePlan.todaysTasks(await this.owner.currentOwnerId());
+    return this.carePlan.todaysTasks(this.owner.currentOwnerId());
   }
 
   @Post('recompute')

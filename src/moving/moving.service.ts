@@ -26,8 +26,10 @@ export class MovingService {
   ) {}
 
   // What-if: viability of every plant against an arbitrary geocoded target. Writes nothing.
+  // Stays on currentOwnerId() (NOT ownerFilter): "simulate MY garden against a location". With {}
+  // an ADMIN would simulate viability across EVERY owner's plants, which is not the feature's intent.
   async simulate(latitude: number, longitude: number): Promise<PlantViability[]> {
-    const ownerId = await this.owner.currentOwnerId();
+    const ownerId = this.owner.currentOwnerId();
     const weather = await this.weather.forLocation(`${latitude},${longitude}`, latitude, longitude);
     const plants = await this.prisma.plant.findMany({
       where: { ownerId },
@@ -72,7 +74,8 @@ export class MovingService {
     target: { name: string; latitude: number; longitude: number; timezone: string },
     moveOn: string,
   ): Promise<{ id: string }> {
-    const ownerId = await this.owner.currentOwnerId();
+    // Create: stamp the acting actor's owner (currentOwnerId, synchronous now).
+    const ownerId = this.owner.currentOwnerId();
     const wantLat = roundCoord4(target.latitude);
     const wantLng = roundCoord4(target.longitude);
 
