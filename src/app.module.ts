@@ -13,6 +13,7 @@ import { FeedbackModule } from './feedback/feedback.module.js';
 import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
+import { AuthModule } from './auth/auth.module.js';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { StartupModule } from './startup/startup.module.js';
     MovingModule,
     NotificationsModule,
     StartupModule,
+    AuthModule,
   ],
 })
 export class AppModule {}
