@@ -13,6 +13,7 @@ enum Task {
   REPOT
   ROTATE
   CLEAN_LEAVES
+  MIST
 }
 
 enum CareEventType {
