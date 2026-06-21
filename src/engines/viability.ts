@@ -1,3 +1,8 @@
+import { LIGHT_LEVELS, type SpeciesRecord } from '@retaxmaster/my-plants-species-schema';
+import { effectiveConditions } from './indoor-climate.js';
+import { placeLightRank } from '../places/place-conditions.js';
+import type { LightType } from '@prisma/client';
+
 export interface ViabilityInput {
   survivalMinC: number;
   survivalMaxC: number;
@@ -52,4 +57,50 @@ export function assessViability(i: ViabilityInput): ViabilityResult {
 
   const level: ViabilityLevel = poor ? 'poor' : caution ? 'caution' : 'good';
   return { level, reasons };
+}
+
+export interface ViabilityPlace {
+  indoor: boolean;
+  climateControlled: boolean;
+  humidityCharacter: 'DRY' | 'NORMAL' | 'HUMID';
+  indoorTempMinC: number | null;
+  indoorTempMaxC: number | null;
+  lightType: LightType;
+}
+
+export interface ViabilityWeather {
+  tempC: number;
+  humidityPct: number;
+  seasonalLowC: number;
+  seasonalHighC: number;
+}
+
+// Maps a parsed species record + a flat place shape + (optional) weather into a ViabilityInput
+// and assesses it. Flat shapes only — keeps the engines layer Prisma-free. The single source of
+// truth for viability mapping; both moving.simulate and GET /plants/:id/care call it.
+export function buildViability(
+  record: SpeciesRecord,
+  place: ViabilityPlace,
+  weather: ViabilityWeather | null,
+): ViabilityResult {
+  const effective = effectiveConditions(
+    {
+      indoor: place.indoor,
+      climateControlled: place.climateControlled,
+      humidityCharacter: place.humidityCharacter,
+      indoorTempMinC: place.indoorTempMinC,
+      indoorTempMaxC: place.indoorTempMaxC,
+    },
+    weather ? { tempC: weather.tempC, humidityPct: weather.humidityPct } : null,
+  );
+  return assessViability({
+    survivalMinC: record.temperature.survivalMinC,
+    survivalMaxC: record.temperature.survivalMaxC,
+    minLightRank: LIGHT_LEVELS.indexOf(record.light.minimum),
+    minHumidityPct: record.humidity.minimumPct,
+    seasonalLowC: weather?.seasonalLowC ?? record.temperature.idealMinC,
+    seasonalHighC: weather?.seasonalHighC ?? record.temperature.idealMaxC,
+    placeLightRank: placeLightRank(place.lightType),
+    effectiveHumidityPct: effective.humidityPct,
+  });
 }
