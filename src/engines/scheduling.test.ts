@@ -11,16 +11,16 @@ const base: ScheduleInput = {
   droughtTolerance: 'medium',
   temperatureSensitivity: 'high',
   lightSensitivity: 'low',
+  humiditySensitivity: 'high',
   reduceInDormancy: true,
   idealMinC: 18,
   idealMaxC: 27,
+  idealHumidityPct: 60,
   idealLightRank: 2, // bright-indirect
   anchor: new Date('2026-06-01'),
   adjustment: 1,
-  effective: { tempC: 22, humidityPct: 55 },
+  effective: { tempC: 22, humidityPct: 60, tempSignal: true, humiditySignal: true },
   placeLightRank: 2,
-  isOutdoor: true,
-  weatherAvailable: true,
   season: 'summer',
   reduceSeason: 'winter',
 };
@@ -32,25 +32,39 @@ describe('computeNextDue', () => {
   });
 
   it('shortens the interval in hot weather for a temperature-sensitive plant', () => {
-    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 40 } });
+    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: true, humiditySignal: true } });
     const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
     expect(days).toBeLessThan(10);
   });
 
-  it('ignores outdoor heat for an indoor plant', () => {
-    const outdoorHot = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 40 } });
-    const indoorHot = computeNextDue({ ...base, isOutdoor: false, effective: { tempC: 33, humidityPct: 40 } });
-    expect(indoorHot.getTime()).toBeGreaterThan(outdoorHot.getTime());
+  it('shortens for indoor heat when there is a real temperature signal', () => {
+    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: true, humiditySignal: true } });
+    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
+    expect(days).toBeLessThan(10);
   });
 
-  it('is neutral on temperature when outdoor weather is unavailable', () => {
-    const noWeather = computeNextDue({
-      ...base,
-      weatherAvailable: false,
-      effective: { tempC: 33, humidityPct: 40 }, // would otherwise shorten
-    });
-    const days = Math.round((noWeather.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBe(10); // base interval, temperature modulator forced to 1.0
+  it('is neutral on temperature when there is no temperature signal', () => {
+    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: false, humiditySignal: true } });
+    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
+    expect(days).toBe(10);
+  });
+
+  it('shortens the interval when the air is drier than ideal', () => {
+    const dry = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 30, tempSignal: true, humiditySignal: true } });
+    const days = Math.round((dry.getTime() - base.anchor.getTime()) / 86_400_000);
+    expect(days).toBeLessThan(10);
+  });
+
+  it('lengthens the interval when the air is more humid than ideal', () => {
+    const humid = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 85, tempSignal: true, humiditySignal: true } });
+    const days = Math.round((humid.getTime() - base.anchor.getTime()) / 86_400_000);
+    expect(days).toBeGreaterThan(10);
+  });
+
+  it('is neutral on humidity when there is no humidity signal', () => {
+    const due = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 30, tempSignal: true, humiditySignal: false } });
+    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
+    expect(days).toBe(10);
   });
 
   it('lengthens during dormancy when reduceInDormancy is set', () => {

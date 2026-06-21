@@ -6,16 +6,16 @@ export interface ScheduleInput {
   droughtTolerance: DroughtTolerance;
   temperatureSensitivity: Sensitivity;
   lightSensitivity: Sensitivity;
+  humiditySensitivity: Sensitivity;
   reduceInDormancy: boolean;
   idealMinC: number;
   idealMaxC: number;
+  idealHumidityPct: number;
   idealLightRank: number; // 0..3 (low..direct)
   anchor: Date;
   adjustment: number; // per-plant learned multiplier (>0)
-  effective: EffectiveConditions;
+  effective: EffectiveConditions; // carries tempSignal/humiditySignal
   placeLightRank: number; // 0..3
-  isOutdoor: boolean;
-  weatherAvailable: boolean; // false → temperature modulator is forced neutral
   season: Season;
   reduceSeason: Season; // the dormancy season for this hemisphere (typically 'winter')
 }
@@ -25,15 +25,22 @@ const TOLERANCE_SPAN: Record<DroughtTolerance, number> = { low: 0.5, medium: 1.0
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 
-// Hotter than ideal → drink sooner (multiplier < 1); colder → slower (> 1). Outdoor only,
-// and only when real weather is available — missing weather must be neutral (spec).
+// Hotter than ideal → drink sooner; colder → slower. Only when there's a real temperature signal.
 function tempModulator(input: ScheduleInput): number {
-  if (!input.isOutdoor || !input.weatherAvailable) return 1;
+  if (!input.effective.tempSignal) return 1;
   const { tempC } = input.effective;
   let deviation = 0;
   if (tempC > input.idealMaxC) deviation = -(tempC - input.idealMaxC);
   else if (tempC < input.idealMinC) deviation = input.idealMinC - tempC;
   return clamp(1 + deviation * SENS_WEIGHT[input.temperatureSensitivity] * 0.1, 0.5, 1.6);
+}
+
+// Drier than ideal → drink sooner; more humid → slower. Only with a real humidity signal.
+// Humidity is in percentage points, so a small factor keeps a tens-of-points gap bounded.
+function humidityModulator(input: ScheduleInput): number {
+  if (!input.effective.humiditySignal) return 1;
+  const deviation = input.idealHumidityPct - input.effective.humidityPct; // + = drier than ideal
+  return clamp(1 - deviation * SENS_WEIGHT[input.humiditySensitivity] * 0.04, 0.7, 1.4);
 }
 
 // Brighter than ideal → drink sooner; dimmer → slower.
@@ -52,6 +59,7 @@ export function computeNextDue(input: ScheduleInput): Date {
     input.adjustment *
     tempModulator(input) *
     lightModulator(input) *
+    humidityModulator(input) *
     seasonModulator(input);
 
   const span = TOLERANCE_SPAN[input.droughtTolerance];
