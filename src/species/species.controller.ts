@@ -14,4 +14,9 @@ export class SpeciesController {
   one(@Param('slug') slug: string) {
     return this.species.record(slug);
   }
+
+  @Get(':slug/brief')
+  brief(@Param('slug') slug: string) {
+    return this.species.brief(slug);
+  }
 }
