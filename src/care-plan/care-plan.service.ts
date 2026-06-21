@@ -56,7 +56,13 @@ export class CarePlanService {
       const anchor = lastDone?.occurredOn ?? plant.acquiredOn;
       const adjustment = plant.adjustments.find((a) => a.task === task)?.multiplier ?? 1;
 
-      const due = this.dueForTask(task, record, { effective, weatherAvailable: weather !== null, isOutdoor: !place.indoor, placeLightRank: placeLightRank(place.lightType), season, anchor, adjustment });
+      const due = this.dueForTask(task, record, {
+        effective,
+        placeLightRank: placeLightRank(place.lightType),
+        season,
+        anchor,
+        adjustment,
+      });
       await this.upsertDue(plantId, task, due);
     }
   }
@@ -66,8 +72,6 @@ export class CarePlanService {
     record: SpeciesRecord,
     ctx: {
       effective: EffectiveConditions;
-      weatherAvailable: boolean;
-      isOutdoor: boolean;
       placeLightRank: number;
       season: Season;
       anchor: Date;
@@ -80,16 +84,16 @@ export class CarePlanService {
         droughtTolerance: record.watering.droughtTolerance,
         temperatureSensitivity: record.watering.temperatureSensitivity,
         lightSensitivity: record.watering.lightSensitivity,
+        humiditySensitivity: record.watering.humiditySensitivity,
         reduceInDormancy: record.watering.reduceInDormancy,
         idealMinC: record.temperature.idealMinC,
         idealMaxC: record.temperature.idealMaxC,
+        idealHumidityPct: record.humidity.idealPct,
         idealLightRank: lightRank(record.light.ideal),
         anchor: ctx.anchor,
         adjustment: ctx.adjustment,
         effective: ctx.effective,
         placeLightRank: ctx.placeLightRank,
-        isOutdoor: ctx.isOutdoor,
-        weatherAvailable: ctx.weatherAvailable,
         season: ctx.season,
         reduceSeason: 'winter',
       });

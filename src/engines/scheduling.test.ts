@@ -67,6 +67,14 @@ describe('computeNextDue', () => {
     expect(days).toBe(10);
   });
 
+  it('waters a humidity-sensitive plant sooner in a DRY indoor place than in a HUMID one', () => {
+    // The DRY (35%) vs HUMID (65%) indoor mapping from effectiveConditions drives the schedule:
+    // drier air → drink sooner.
+    const dry = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 35, tempSignal: false, humiditySignal: true } });
+    const humid = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 65, tempSignal: false, humiditySignal: true } });
+    expect(dry.getTime()).toBeLessThan(humid.getTime());
+  });
+
   it('lengthens during dormancy when reduceInDormancy is set', () => {
     const dormant = computeNextDue({ ...base, season: 'winter' });
     const days = Math.round((dormant.getTime() - base.anchor.getTime()) / 86_400_000);

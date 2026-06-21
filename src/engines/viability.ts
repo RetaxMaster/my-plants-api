@@ -62,7 +62,7 @@ export function assessViability(i: ViabilityInput): ViabilityResult {
 export interface ViabilityPlace {
   indoor: boolean;
   climateControlled: boolean;
-  humidityCharacter: 'DRY' | 'NORMAL' | 'HUMID';
+  humidityCharacter: 'DRY' | 'NORMAL' | 'HUMID' | null;
   indoorTempMinC: number | null;
   indoorTempMaxC: number | null;
   lightType: LightType;
