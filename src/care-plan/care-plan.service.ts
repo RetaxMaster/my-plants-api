@@ -3,8 +3,8 @@ import { parseSpeciesRecord, type SpeciesRecord } from '@retaxmaster/my-plants-s
 import type { Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
-import { effectiveConditions, type EffectiveConditions } from '../engines/indoor-climate.js';
-import { computeCadenceDue, computeFertilizingDue, computeNextDue } from '../engines/scheduling.js';
+import { effectiveConditions, humidityBand, type EffectiveConditions } from '../engines/indoor-climate.js';
+import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue } from '../engines/scheduling.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
@@ -39,9 +39,10 @@ export class CarePlanService {
     const season = seasonForDate(new Date(), hemisphere);
 
     for (const task of SCHEDULED_TASKS) {
-      // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none.
-      if (task === 'ROTATE' && record.maintenance.rotationDays === null) continue;
-      if (task === 'CLEAN_LEAVES' && record.maintenance.leafCleaningDays === null) continue;
+      // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none, clearing any
+      // stale due so a previously-scheduled cadence does not linger after the species loses it.
+      if (task === 'ROTATE' && record.maintenance.rotationDays === null) { await this.clearDue(plantId, task); continue; }
+      if (task === 'CLEAN_LEAVES' && record.maintenance.leafCleaningDays === null) { await this.clearDue(plantId, task); continue; }
 
       const override = plant.overrides.find((o) => o.task === task);
       if (override) {
@@ -64,6 +65,28 @@ export class CarePlanService {
         adjustment,
       });
       await this.upsertDue(plantId, task, due);
+    }
+
+    // Misting (sixth cycle): humidity-graded, may produce no task at all.
+    const mistOverride = plant.overrides.find((o) => o.task === 'MIST');
+    if (mistOverride) {
+      await this.upsertDue(plantId, 'MIST', mistOverride.nextDueOn);
+    } else {
+      const mistAnchor =
+        (await this.prisma.careEvent.findFirst({
+          where: { plantId, task: 'MIST', type: 'DONE' },
+          orderBy: { occurredOn: 'desc' },
+        }))?.occurredOn ?? plant.acquiredOn;
+      const mistAdjustment = plant.adjustments.find((a) => a.task === 'MIST')?.multiplier ?? 1;
+      const mistDue = computeMistingDue({
+        benefit: record.misting.benefit,
+        baseFrequencyDays: record.misting.baseFrequencyDays,
+        band: humidityBand(effective.humidityPct),
+        adjustment: mistAdjustment,
+        anchor: mistAnchor,
+      });
+      if (mistDue === null) await this.clearDue(plantId, 'MIST');
+      else await this.upsertDue(plantId, 'MIST', mistDue);
     }
   }
 
@@ -141,5 +164,9 @@ export class CarePlanService {
       create: { plantId, task, nextDueOn },
       update: { nextDueOn, computedAt: new Date() },
     });
+  }
+
+  private async clearDue(plantId: string, task: Task): Promise<void> {
+    await this.prisma.dueCache.deleteMany({ where: { plantId, task } });
   }
 }

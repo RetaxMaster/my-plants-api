@@ -6,6 +6,7 @@ import {
   computeNextDue,
   type ScheduleInput,
 } from './scheduling.js';
+import { effectiveConditions, humidityBand, type PlaceClimateInput } from './indoor-climate.js';
 
 const base: ScheduleInput = {
   baseIntervalDays: 10,
@@ -165,5 +166,29 @@ describe('computeMistingDue', () => {
   });
   it('avoid → always null', () => {
     expect(computeMistingDue({ ...mistBase, benefit: 'avoid', baseFrequencyDays: null })).toBeNull();
+  });
+});
+
+// Composes the exact decision the care-plan service delegates to (effective humidity → band →
+// misting due) without a DB, so the schedule-vs-clear branch is covered by pure functions. A
+// full Prisma-backed service test (upsert/clearDue wiring) is deferred to the E2E phase, since
+// the repo has no Prisma service-test harness and the brief forbids inventing a brittle one.
+describe('misting band decision (service-equivalent composition)', () => {
+  const dryPlace: PlaceClimateInput = {
+    indoor: true, climateControlled: false, humidityCharacter: 'DRY',
+    indoorTempMinC: null, indoorTempMaxC: null,
+  };
+  const humidPlace: PlaceClimateInput = { ...dryPlace, humidityCharacter: 'HUMID' };
+
+  it('a beneficial species in a DRY place gets a MIST due', () => {
+    const band = humidityBand(effectiveConditions(dryPlace, null).humidityPct);
+    expect(band).toBe('DRY');
+    expect(computeMistingDue({ ...mistBase, band })).not.toBeNull();
+  });
+
+  it('the same species in a HUMID place gets no MIST due (service would clear it)', () => {
+    const band = humidityBand(effectiveConditions(humidPlace, null).humidityPct);
+    expect(band).toBe('HUMID');
+    expect(computeMistingDue({ ...mistBase, band })).toBeNull();
   });
 });
