@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { parseSpeciesRecord, type SpeciesRecord } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName, type SpeciesRecord } from '@retaxmaster/my-plants-species-schema';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { extractCommonNames, type SpeciesBrief } from './species.brief.js';
 
@@ -7,8 +7,13 @@ import { extractCommonNames, type SpeciesBrief } from './species.brief.js';
 export class SpeciesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(): Promise<{ slug: string; scientificName: string }[]> {
-    return this.prisma.species.findMany({ select: { slug: true, scientificName: true } });
+  async list(): Promise<{ slug: string; scientificName: string; commonName: string }[]> {
+    const rows = await this.prisma.species.findMany({ select: { slug: true, scientificName: true, record: true } });
+    return rows.map((r) => ({
+      slug: r.slug,
+      scientificName: r.scientificName,
+      commonName: primaryCommonName(parseSpeciesRecord(r.record)),
+    }));
   }
 
   async record(slug: string): Promise<SpeciesRecord> {

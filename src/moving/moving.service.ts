@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { parseSpeciesRecord } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
@@ -12,6 +12,8 @@ export interface PlantViability extends ViabilityResult {
   plantId: string;
   nickname: string | null;
   speciesSlug: string;
+  speciesScientificName: string;
+  speciesCommonName: string;
 }
 
 @Injectable()
@@ -53,7 +55,14 @@ export class MovingService {
             }
           : null,
       );
-      return { plantId: plant.id, nickname: plant.nickname, speciesSlug: plant.speciesSlug, ...result };
+      return {
+        plantId: plant.id,
+        nickname: plant.nickname,
+        speciesSlug: plant.speciesSlug,
+        speciesScientificName: record.scientificName,
+        speciesCommonName: primaryCommonName(record),
+        ...result,
+      };
     });
   }
 
