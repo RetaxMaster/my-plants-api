@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ClsModule } from 'nestjs-cls';
 import { ConfigModule } from './config/config.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { OwnerModule } from './owner/owner.module.js';
@@ -17,6 +18,9 @@ import { AuthModule } from './auth/auth.module.js';
 
 @Module({
   imports: [
+    // Mounted as middleware so the per-request CLS store exists BEFORE guards run (the
+    // JwtAuthGuard writes the actor into it). `global: true` makes ClsService injectable everywhere.
+    ClsModule.forRoot({ global: true, middleware: { mount: true } }),
     ConfigModule,
     PrismaModule,
     OwnerModule,
