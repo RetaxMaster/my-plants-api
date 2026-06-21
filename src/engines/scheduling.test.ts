@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeCadenceDue,
   computeFertilizingDue,
+  computeMistingDue,
   computeNextDue,
   type ScheduleInput,
 } from './scheduling.js';
@@ -130,5 +131,39 @@ describe('computeFertilizingDue (season-aware)', () => {
       activeSeasons: ['spring', 'summer'], reduceInDormancy: false,
     });
     expect(daysFrom(due)).toBe(42); // INACTIVE factor 2
+  });
+});
+
+const mistBase = {
+  benefit: 'beneficial' as const,
+  baseFrequencyDays: 4,
+  band: 'NORMAL' as const,
+  adjustment: 1,
+  anchor: new Date('2026-06-01'),
+};
+const daysFromMist = (d: Date) =>
+  Math.round((d.getTime() - mistBase.anchor.getTime()) / 86_400_000);
+
+describe('computeMistingDue', () => {
+  it('beneficial + NORMAL → base frequency', () => {
+    expect(daysFromMist(computeMistingDue(mistBase)!)).toBe(4);
+  });
+  it('beneficial + DRY → shortened (more frequent)', () => {
+    expect(daysFromMist(computeMistingDue({ ...mistBase, band: 'DRY' })!)).toBeLessThan(4);
+  });
+  it('beneficial + HUMID → no task', () => {
+    expect(computeMistingDue({ ...mistBase, band: 'HUMID' })).toBeNull();
+  });
+  it('tolerated + DRY → base frequency', () => {
+    expect(daysFromMist(computeMistingDue({ ...mistBase, benefit: 'tolerated', band: 'DRY' })!)).toBe(4);
+  });
+  it('tolerated + NORMAL → no task', () => {
+    expect(computeMistingDue({ ...mistBase, benefit: 'tolerated', band: 'NORMAL' })).toBeNull();
+  });
+  it('tolerated + HUMID → no task', () => {
+    expect(computeMistingDue({ ...mistBase, benefit: 'tolerated', band: 'HUMID' })).toBeNull();
+  });
+  it('avoid → always null', () => {
+    expect(computeMistingDue({ ...mistBase, benefit: 'avoid', baseFrequencyDays: null })).toBeNull();
   });
 });

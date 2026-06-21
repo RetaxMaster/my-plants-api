@@ -1,4 +1,4 @@
-import type { DroughtTolerance, Season, Sensitivity } from '@retaxmaster/my-plants-species-schema';
+import type { DroughtTolerance, MistingBenefit, Season, Sensitivity } from '@retaxmaster/my-plants-species-schema';
 import type { EffectiveConditions } from './indoor-climate.js';
 
 export interface ScheduleInput {
@@ -102,4 +102,27 @@ export function computeFertilizingDue(i: FertilizingInput): Date {
   const active = i.activeSeasons.includes(i.season);
   const factor = active ? 1 : i.reduceInDormancy ? DORMANT_FERTILIZE_FACTOR : INACTIVE_FERTILIZE_FACTOR;
   return addDays(i.anchor, Math.round(i.inSeasonFrequencyDays * i.adjustment * factor));
+}
+
+// Misting: opt-in per species, gated by the place's effective humidity band. Returns null when no
+// misting task should exist (avoid; beneficial in a humid room; tolerated outside a dry room).
+const MIST_DRY_FACTOR = 0.6; // dry air → mist more often
+export interface MistingInput {
+  benefit: MistingBenefit;
+  baseFrequencyDays: number | null;
+  band: 'DRY' | 'NORMAL' | 'HUMID';
+  adjustment: number;
+  anchor: Date;
+}
+export function computeMistingDue(i: MistingInput): Date | null {
+  if (i.benefit === 'avoid' || i.baseFrequencyDays === null) return null;
+  let factor: number | null;
+  if (i.benefit === 'beneficial') {
+    factor = i.band === 'HUMID' ? null : i.band === 'DRY' ? MIST_DRY_FACTOR : 1;
+  } else {
+    // tolerated: only earns a task when the room is dry.
+    factor = i.band === 'DRY' ? 1 : null;
+  }
+  if (factor === null) return null;
+  return addDays(i.anchor, Math.round(i.baseFrequencyDays * i.adjustment * factor));
 }
