@@ -12,6 +12,7 @@ import { CarePlanModule } from './care-plan/care-plan.module.js';
 import { FeedbackModule } from './feedback/feedback.module.js';
 import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
+import { StartupModule } from './startup/startup.module.js';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { NotificationsModule } from './notifications/notifications.module.js';
     FeedbackModule,
     MovingModule,
     NotificationsModule,
+    StartupModule,
   ],
 })
 export class AppModule {}

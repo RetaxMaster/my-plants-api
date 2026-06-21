@@ -9,5 +9,6 @@ import { MovingService } from './moving.service.js';
   imports: [WeatherModule, CarePlanModule],
   controllers: [MovingController],
   providers: [MovingService, MovingCron],
+  exports: [MovingService],
 })
 export class MovingModule {}
