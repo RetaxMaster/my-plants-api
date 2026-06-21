@@ -69,7 +69,7 @@ model Place {
   indoor            Boolean
   lightType         LightType         @map("light_type")
   climateControlled Boolean           @default(false) @map("climate_controlled")
-  humidityCharacter HumidityCharacter @default(NORMAL) @map("humidity_character")
+  humidityCharacter HumidityCharacter? @map("humidity_character")
   indoorTempMinC    Float?            @map("indoor_temp_min_c")
   indoorTempMaxC    Float?            @map("indoor_temp_max_c")
   plants            Plant[]
