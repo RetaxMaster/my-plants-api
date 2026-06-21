@@ -2,14 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { parseArgs, createUser } from './create-user.core.js';
 
 describe('parseArgs', () => {
-  it('parses username/password/role/adopt-default', () => {
-    const a = parseArgs(['--username', 'carlos', '--password', 'secret123', '--role', 'admin', '--adopt-default']);
-    expect(a).toEqual({ username: 'carlos', password: 'secret123', role: 'ADMIN', adoptDefault: true });
+  it('parses username/password/role', () => {
+    const a = parseArgs(['--username', 'carlos', '--password', 'secret123', '--role', 'admin']);
+    expect(a).toEqual({ username: 'carlos', password: 'secret123', role: 'ADMIN' });
   });
-  it('defaults role to USER and adoptDefault false', () => {
+  it('defaults role to USER', () => {
     const a = parseArgs(['--username', 'u', '--password', 'pwpwpwpw']);
     expect(a.role).toBe('USER');
-    expect(a.adoptDefault).toBe(false);
   });
   it('rejects a short password and missing username', () => {
     expect(() => parseArgs(['--username', 'u', '--password', 'short'])).toThrow();
@@ -27,7 +26,7 @@ describe('createUser', () => {
         user: { create: async ({ data }: any) => { created.user = data; return data; } },
       }),
     } as any;
-    const r = await createUser(prisma, { username: 'carlos', password: 'secret123', role: 'ADMIN', adoptDefault: false });
+    const r = await createUser(prisma, { username: 'carlos', password: 'secret123', role: 'ADMIN' });
     expect(r.username).toBe('carlos');
     expect(created.user.passwordHash).not.toBe('secret123'); // hashed
     expect(created.user.role).toBe('ADMIN');
@@ -35,6 +34,6 @@ describe('createUser', () => {
 
   it('rejects a duplicate username', async () => {
     const prisma = { user: { findUnique: async () => ({ id: 'x' }) } } as any;
-    await expect(createUser(prisma, { username: 'carlos', password: 'secret123', role: 'USER', adoptDefault: false })).rejects.toThrow();
+    await expect(createUser(prisma, { username: 'carlos', password: 'secret123', role: 'USER' })).rejects.toThrow();
   });
 });
