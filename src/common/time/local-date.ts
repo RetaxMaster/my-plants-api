@@ -24,3 +24,10 @@ export function startOfTomorrowUtc(timeZone: string, now: Date = new Date()): Da
   const { y, m, d } = localYmd(now, timeZone);
   return new Date(Date.UTC(y, m - 1, d + 1));
 }
+
+// Integer day count between two @db.Date (UTC-midnight) values: round((a - b) / 86_400_000).
+// Signed (a before b → negative). Never uses toISOString — the MariaDB date rule. round() absorbs
+// any sub-day skew (e.g. a value stored a few hours off midnight) into the nearest whole day.
+export function dayDiff(a: Date, b: Date): number {
+  return Math.round((a.getTime() - b.getTime()) / 86_400_000);
+}
