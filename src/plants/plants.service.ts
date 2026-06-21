@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { parseSpeciesRecord } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -19,16 +19,27 @@ export class PlantsService {
     private readonly weather: WeatherService,
   ) {}
 
+  // Flatten the species' human-facing names onto a plant response (single source: primaryCommonName).
+  private withNames<T extends { species: { record: unknown; scientificName: string } }>(plant: T) {
+    const { species, ...rest } = plant;
+    return {
+      ...rest,
+      speciesScientificName: species.scientificName,
+      speciesCommonName: primaryCommonName(parseSpeciesRecord(species.record)),
+    };
+  }
+
   async list() {
     const ownerId = await this.owner.currentOwnerId();
-    return this.prisma.plant.findMany({ where: { ownerId } });
+    const plants = await this.prisma.plant.findMany({ where: { ownerId }, include: { species: true } });
+    return plants.map((p) => this.withNames(p));
   }
 
   async get(id: string) {
     const ownerId = await this.owner.currentOwnerId();
-    const plant = await this.prisma.plant.findFirst({ where: { id, ownerId } });
+    const plant = await this.prisma.plant.findFirst({ where: { id, ownerId }, include: { species: true } });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
-    return plant;
+    return this.withNames(plant);
   }
 
   // Read model for the plant page (spec A.5 / C.2). Phase A returns { plantId, tasks }; Phase C will
