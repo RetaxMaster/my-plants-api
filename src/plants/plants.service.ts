@@ -54,7 +54,10 @@ export class PlantsService {
     tasks: { task: Task; nextDueOn: string; daysUntilDue: number; status: CareStatus }[];
     viability: ViabilityResult;
   }> {
-    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
+    const plant = await this.prisma.plant.findFirst({
+      where: { id, ...this.owner.ownerFilter() },
+      include: { species: true, place: { include: { city: true } } },
+    });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
 
     // If the cache is empty (e.g. plant created before any recompute), recompute on demand so the
@@ -73,10 +76,9 @@ export class PlantsService {
       });
     }
 
-    // Boundary uses the PLANT's owner primary-city timezone (so an ADMIN viewing another owner's
-    // plant gets that owner's local "today", not the admin's).
-    const primary = await this.prisma.city.findFirst({ where: { ownerId: plant.ownerId, isPrimary: true } });
-    const startOfToday = startOfTodayUtc(primary?.timezone ?? 'UTC');
+    // Boundary derives from the plant's place-city timezone (so an ADMIN viewing another owner's
+    // plant gets that plant's local "today", not the admin's).
+    const startOfToday = startOfTodayUtc(plant.place.city.timezone);
 
     const tasks = due.map((d) => {
       const { daysUntilDue, status } = careTaskStatus(d.nextDueOn, startOfToday);
@@ -89,22 +91,18 @@ export class PlantsService {
     });
 
     // Viability of the plant in its CURRENT place, against its own city's weather.
-    const full = await this.prisma.plant.findUniqueOrThrow({
-      where: { id },
-      include: { species: true, place: { include: { city: true } } },
-    });
-    const record = parseSpeciesRecord(full.species.record);
-    const { city } = full.place;
+    const record = parseSpeciesRecord(plant.species.record);
+    const { city } = plant.place;
     const weather = await this.weather.forCity(city.id, city.latitude, city.longitude);
     const viability = buildViability(
       record,
       {
-        indoor: full.place.indoor,
-        climateControlled: full.place.climateControlled,
-        humidityCharacter: full.place.humidityCharacter,
-        indoorTempMinC: full.place.indoorTempMinC,
-        indoorTempMaxC: full.place.indoorTempMaxC,
-        lightType: full.place.lightType,
+        indoor: plant.place.indoor,
+        climateControlled: plant.place.climateControlled,
+        humidityCharacter: plant.place.humidityCharacter,
+        indoorTempMinC: plant.place.indoorTempMinC,
+        indoorTempMaxC: plant.place.indoorTempMaxC,
+        lightType: plant.place.lightType,
       },
       weather
         ? {
