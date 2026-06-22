@@ -159,16 +159,22 @@ export class CarePlanService {
     for (const p of plants) await this.recomputePlant(p.id);
   }
 
-  // "Today" uses the owner's primary-city timezone; due dates are DATE granularity.
-  async todaysTasks(ownerId: string): Promise<{ plantId: string; task: Task; nextDueOn: Date }[]> {
-    const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });
-    const tz = primary?.timezone ?? 'UTC';
-    const end = startOfTomorrowUtc(tz);
-    return this.prisma.dueCache.findMany({
-      where: { nextDueOn: { lt: end }, plant: { ownerId } },
-      select: { plantId: true, task: true, nextDueOn: true },
+  // "Today" derives the day boundary from EACH plant's place-city timezone (not a single primary).
+  // Due dates are DATE granularity; we filter per row with native Date comparisons (MariaDB date rule).
+  async todaysTasks(ownerId: string, now: Date = new Date()): Promise<{ plantId: string; task: Task; nextDueOn: Date }[]> {
+    const rows = await this.prisma.dueCache.findMany({
+      where: { plant: { ownerId } },
+      select: {
+        plantId: true,
+        task: true,
+        nextDueOn: true,
+        plant: { select: { place: { select: { city: { select: { timezone: true } } } } } },
+      },
       orderBy: { nextDueOn: 'asc' },
     });
+    return rows
+      .filter((r) => r.nextDueOn < startOfTomorrowUtc(r.plant.place.city.timezone, now))
+      .map((r) => ({ plantId: r.plantId, task: r.task, nextDueOn: r.nextDueOn }));
   }
 
   private async upsertDue(plantId: string, task: Task, nextDueOn: Date): Promise<void> {
