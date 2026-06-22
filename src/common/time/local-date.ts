@@ -1,4 +1,5 @@
-// All day boundaries use the owner's primary-city timezone. Due dates are DATE granularity,
+// All day boundaries use the timezone of each plant's place-city (Moving still uses the primary
+// flag, but the day cutoff does not). Due dates are DATE granularity,
 // so we represent a local calendar day as that day's UTC-midnight Date (matching how Prisma
 // returns @db.Date columns) and never compare against toISOString() strings of timestamps.
 interface Ymd { y: number; m: number; d: number }
