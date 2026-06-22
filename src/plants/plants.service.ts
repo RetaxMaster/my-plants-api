@@ -9,6 +9,7 @@ import { startOfTodayUtc } from '../common/time/local-date.js';
 import { careTaskStatus, type CareStatus } from './plant-care.js';
 import type { Task } from '@prisma/client';
 import type { CreatePlantDto } from './create-plant.dto.js';
+import type { UpdatePlantDto } from './update-plant.dto.js';
 
 @Injectable()
 export class PlantsService {
@@ -140,6 +141,44 @@ export class PlantsService {
           : undefined,
       },
     });
+  }
+
+  async update(id: string, dto: UpdatePlantDto) {
+    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+
+    const data: { nickname?: string | null; placeId?: string } = {};
+    let recompute = false;
+
+    if (dto.nickname !== undefined) data.nickname = dto.nickname.trim() || null;
+
+    if (dto.placeId !== undefined && dto.placeId !== plant.placeId) {
+      const place = await this.prisma.place.findFirst({ where: { id: dto.placeId, ownerId: plant.ownerId } });
+      if (!place) throw new BadRequestException(`Unknown place: ${dto.placeId}`);
+      data.placeId = dto.placeId;
+      recompute = true;
+    }
+
+    if (Object.keys(data).length > 0) await this.prisma.plant.update({ where: { id }, data });
+    if (recompute) await this.carePlan.recomputePlant(id);
+    return this.get(id);
+  }
+
+  async viabilityPreview(id: string, placeId: string) {
+    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() }, include: { species: true } });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+    const place = await this.prisma.place.findFirst({ where: { id: placeId, ownerId: plant.ownerId }, include: { city: true } });
+    if (!place) throw new BadRequestException(`Unknown place: ${placeId}`);
+    const record = parseSpeciesRecord(plant.species.record);
+    const weather = await this.weather.forCity(place.city.id, place.city.latitude, place.city.longitude);
+    return buildViability(
+      record,
+      {
+        indoor: place.indoor, climateControlled: place.climateControlled, humidityCharacter: place.humidityCharacter,
+        indoorTempMinC: place.indoorTempMinC, indoorTempMaxC: place.indoorTempMaxC, lightType: place.lightType,
+      },
+      weather ? { tempC: weather.tempC, humidityPct: weather.humidityPct, seasonalLowC: weather.seasonalLowC, seasonalHighC: weather.seasonalHighC } : null,
+    );
   }
 }
 
