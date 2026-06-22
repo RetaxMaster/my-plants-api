@@ -119,9 +119,15 @@ export class MovingService {
 
     for (const move of due) {
       await this.prisma.$transaction(async (tx) => {
+        // Resolve the CURRENT primary inside the tx so a chain of due moves repoints the right places
+        // each time: each move only relocates the outdoor places that were at the primary as of that move.
+        const current = await tx.city.findFirst({ where: { ownerId, isPrimary: true } });
+        const placeWhere = current
+          ? { ownerId, indoor: false, cityId: current.id }
+          : { ownerId, indoor: false }; // no-primary fallback: today's behavior (all outdoor places)
         await tx.city.updateMany({ where: { ownerId }, data: { isPrimary: false } });
         await tx.city.update({ where: { id: move.targetCityId }, data: { isPrimary: true } });
-        await tx.place.updateMany({ where: { ownerId, indoor: false }, data: { cityId: move.targetCityId } });
+        await tx.place.updateMany({ where: placeWhere, data: { cityId: move.targetCityId } });
         await tx.scheduledMove.update({ where: { id: move.id }, data: { applied: true } });
       });
     }

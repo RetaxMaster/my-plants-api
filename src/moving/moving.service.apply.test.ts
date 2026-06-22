@@ -15,6 +15,7 @@ function makeService() {
   const txOps: string[] = [];
   const tx = {
     city: {
+      findFirst: vi.fn(async () => null), // no current primary in-tx → no-primary fallback (all outdoor places)
       updateMany: vi.fn(async () => { txOps.push('city.updateMany'); return { count: 0 }; }),
       update: vi.fn(async () => { txOps.push('city.update'); return {}; }),
     },
