@@ -49,7 +49,7 @@ function setup() {
     ],
   };
   const prisma = makeFakePrisma(seed);
-  const svc = new PlacesService(prisma, owner);
+  const svc = new PlacesService(prisma, owner, { recomputePlace: async () => {} } as any);
   const run = <T>(a: any, fn: () => Promise<T>) => cls.run(async () => { cls.set('actor', a); return fn(); });
   return { svc, prisma, run };
 }
