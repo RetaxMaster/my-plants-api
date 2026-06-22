@@ -43,6 +43,7 @@ const plantRow = {
 
 function makeService() {
   const prisma = {
+    city: { findFirst: vi.fn(async () => null) }, // no primary → no-primary fallback (simulate all plants)
     plant: { findMany: vi.fn(async () => [plantRow]) },
   } as unknown as ConstructorParameters<typeof MovingService>[0];
   const owner = {

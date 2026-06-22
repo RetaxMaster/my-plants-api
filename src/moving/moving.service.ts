@@ -31,8 +31,12 @@ export class MovingService {
   async simulate(latitude: number, longitude: number): Promise<PlantViability[]> {
     const ownerId = this.owner.currentOwnerId();
     const weather = await this.weather.forLocation(`${latitude},${longitude}`, latitude, longitude);
+    // Scope to the plants actually at the current (primary) city — plants in other cities are not
+    // "with you". No-primary fallback: simulate all owner plants (today's backward-compatible behavior).
+    const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });
+    const where = primary ? { ownerId, place: { cityId: primary.id } } : { ownerId };
     const plants = await this.prisma.plant.findMany({
-      where: { ownerId },
+      where,
       include: { species: true, place: true },
     });
 
