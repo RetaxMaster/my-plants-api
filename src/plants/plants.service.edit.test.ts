@@ -41,7 +41,7 @@ function setup() {
   const prisma = {
     plant: {
       findFirst: async ({ where }: any) => seed.plants.find((p) => matches(p, where)) ?? null,
-      update: async ({ where, data }: any) => { const p = seed.plants.find((x) => x.id === where.id); Object.assign(p, data); return p; },
+      update: async ({ where, data }: any) => { const p = seed.plants.find((x) => x.id === where.id); Object.assign(p!, data); return p; },
     },
     place: { findFirst: async ({ where }: any) => seed.places.find((p) => matches(p, where)) ?? null },
   } as any;
@@ -58,14 +58,14 @@ describe('PlantsService.update', () => {
   it('nickname-only change does not recompute and clears empty to null', async () => {
     const { svc, run, recomputed, seed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('pl-own', { nickname: '  ' }); });
-    expect(seed.plants.find((p) => p.id === 'pl-own').nickname).toBeNull();
+    expect(seed.plants.find((p) => p.id === 'pl-own')!.nickname).toBeNull();
     expect(recomputed).toEqual([]);
   });
 
   it('place change persists and recomputes', async () => {
     const { svc, run, recomputed, seed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('pl-own', { placeId: 'place-b' }); });
-    expect(seed.plants.find((p) => p.id === 'pl-own').placeId).toBe('place-b');
+    expect(seed.plants.find((p) => p.id === 'pl-own')!.placeId).toBe('place-b');
     expect(recomputed).toEqual(['pl-own']);
   });
 
@@ -89,7 +89,7 @@ describe('PlantsService.update', () => {
       // pl-other belongs to owner-2; place-y also belongs to owner-2 → allowed.
       await svc.update('pl-other', { placeId: 'place-y' });
     });
-    expect(seed.plants.find((p) => p.id === 'pl-other').placeId).toBe('place-y');
+    expect(seed.plants.find((p) => p.id === 'pl-other')!.placeId).toBe('place-y');
     expect(recomputed).toEqual(['pl-other']);
   });
 });

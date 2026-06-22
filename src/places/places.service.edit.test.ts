@@ -14,7 +14,7 @@ function setup() {
   const prisma = {
     place: {
       findFirst: async ({ where }: any) => seed.places.find((p) => matches(p, where)) ?? null,
-      update: async ({ where, data }: any) => { const p = seed.places.find((x) => x.id === where.id); Object.assign(p, data); return p; },
+      update: async ({ where, data }: any) => { const p = seed.places.find((x) => x.id === where.id); Object.assign(p!, data); return p; },
     },
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
@@ -29,14 +29,14 @@ describe('PlacesService.update', () => {
   it('name-only change does not recompute', async () => {
     const { svc, run, recomputed, seed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { name: 'Estudio' }); });
-    expect(seed.places.find((p) => p.id === 'p1').name).toBe('Estudio');
+    expect(seed.places.find((p) => p.id === 'p1')!.name).toBe('Estudio');
     expect(recomputed).toEqual([]);
   });
 
   it('climateControlled change recomputes the place', async () => {
     const { svc, run, recomputed, seed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { climateControlled: true }); });
-    expect(seed.places.find((p) => p.id === 'p1').climateControlled).toBe(true);
+    expect(seed.places.find((p) => p.id === 'p1')!.climateControlled).toBe(true);
     expect(recomputed).toEqual(['p1']);
   });
 
