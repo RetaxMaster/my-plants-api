@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { CreatePlaceDto } from './create-place.dto.js';
+import { UpdatePlaceDto } from './update-place.dto.js';
 import { PlacesService } from './places.service.js';
 
 @Controller('places')
@@ -9,4 +10,7 @@ export class PlacesController {
   @Get() list() { return this.places.list(); }
   @Post() create(@Body() dto: CreatePlaceDto) { return this.places.create(dto); }
   @Get(':id') get(@Param('id') id: string) { return this.places.get(id); }
+  @Patch(':id') update(@Param('id') id: string, @Body() dto: UpdatePlaceDto) {
+    return this.places.update(id, dto);
+  }
 }
