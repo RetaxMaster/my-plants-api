@@ -24,6 +24,12 @@ export class AuthController {
   me(@Req() req: any) {
     const p = req.user;
     if (!p) throw new UnauthorizedException();
-    return { username: p.username, role: p.role }; // username now travels in the JWT/actor
+    // Authoritative impersonation state the API actually resolved (id-only). The frontend banner is
+    // driven by the BFF session me (which also carries a human label); these stay consistent.
+    return {
+      username: p.username,
+      role: p.role,
+      actingAs: p.actingAsOwnerId ? { ownerId: p.actingAsOwnerId } : null,
+    };
   }
 }
