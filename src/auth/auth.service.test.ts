@@ -8,6 +8,7 @@ function makePrismaFake() {
   return {
     revoked,
     user: { findUnique: async ({ where }: any) => (globalThis as any).__user?.username === where.username ? (globalThis as any).__user : null },
+    owner: { findUnique: async ({ where }: any) => (where.id === 'o1' ? { id: 'o1' } : null) },
     revokedToken: {
       findUnique: async ({ where }: any) => revoked.get(where.jti) ?? null,
       create: async ({ data }: any) => { revoked.set(data.jti, data); return data; },
@@ -53,5 +54,10 @@ describe('AuthService', () => {
     const payload = await svc.verify(r.token);
     await svc.logout(payload.jti, payload.exp);
     await expect(svc.verify(r.token)).rejects.toThrow();
+  });
+
+  it('ownerExists returns true for a known owner and false otherwise', async () => {
+    expect(await svc.ownerExists('o1')).toBe(true);
+    expect(await svc.ownerExists('nope')).toBe(false);
   });
 });

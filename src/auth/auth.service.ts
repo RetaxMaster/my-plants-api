@@ -48,6 +48,13 @@ export class AuthService {
     return payload;
   }
 
+  // Cheap PK existence check used by the guard before honoring an X-Act-As-Owner header, so a bogus
+  // target fails early with a controlled 403 instead of a Prisma FK error / 500 on the next write.
+  async ownerExists(id: string): Promise<boolean> {
+    const owner = await this.prisma.owner.findUnique({ where: { id }, select: { id: true } });
+    return owner !== null;
+  }
+
   async logout(jti: string, exp: number): Promise<void> {
     // exp is seconds-since-epoch from the JWT; bind a native Date (MariaDB date rule).
     try {
