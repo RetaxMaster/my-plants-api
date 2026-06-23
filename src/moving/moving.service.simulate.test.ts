@@ -38,6 +38,7 @@ const plantRow = {
     indoorTempMinC: 18,
     indoorTempMaxC: 26,
     lightType: 'bright-indirect',
+    city: { id: 'c1', name: 'Anytown' },
   },
 };
 

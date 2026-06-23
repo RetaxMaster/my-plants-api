@@ -14,6 +14,8 @@ export interface PlantViability extends ViabilityResult {
   speciesSlug: string;
   speciesScientificName: string;
   speciesCommonName: string;
+  placeCityName: string;   // the plant's place-city name (for the off-primary warning)
+  inPrimaryCity: boolean;  // false → "not in your current city" (drives the UI warning)
 }
 
 @Injectable()
@@ -34,11 +36,16 @@ export class MovingService {
     // Scope to the plants actually at the current (primary) city — plants in other cities are not
     // "with you". No-primary fallback: simulate all owner plants (today's backward-compatible behavior).
     const primary = await this.prisma.city.findFirst({ where: { ownerId, isPrimary: true } });
-    const where = primary ? { ownerId, place: { cityId: primary.id } } : { ownerId };
-    const plants = await this.prisma.plant.findMany({
-      where,
-      include: { species: true, place: true },
+    const include = { species: true, place: { include: { city: true } } } as const;
+    let plants = await this.prisma.plant.findMany({
+      where: primary ? { ownerId, place: { cityId: primary.id } } : { ownerId },
+      include,
     });
+    // Empty-primary fallback (bug B8): a primary city holding none of the owner's plants would yield
+    // []. Fall back to ALL owner plants; off-primary ones are flagged so the UI can warn per plant.
+    if (primary && plants.length === 0) {
+      plants = await this.prisma.plant.findMany({ where: { ownerId }, include });
+    }
 
     return plants.map((plant) => {
       const record = parseSpeciesRecord(plant.species.record);
@@ -67,6 +74,8 @@ export class MovingService {
         speciesSlug: plant.speciesSlug,
         speciesScientificName: record.scientificName,
         speciesCommonName: primaryCommonName(record),
+        placeCityName: plant.place.city.name,
+        inPrimaryCity: primary ? plant.place.cityId === primary.id : true,
         ...result,
       };
     });
