@@ -33,7 +33,7 @@ describe('AuthService', () => {
 
   it('login returns a token + user for correct credentials', async () => {
     const r = await svc.login('carlos', 'secret');
-    expect(r.user).toEqual({ username: 'carlos', role: 'ADMIN' });
+    expect(r.user).toEqual({ username: 'carlos', ownerId: 'o1', role: 'ADMIN' });
     const payload = await svc.verify(r.token);
     expect(payload.sub).toBe('u1');
     expect(payload.ownerId).toBe('o1');

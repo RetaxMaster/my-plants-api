@@ -21,7 +21,7 @@ export class AuthService {
   async login(
     username: string,
     password: string,
-  ): Promise<{ token: string; user: { username: string; role: 'USER' | 'ADMIN' } }> {
+  ): Promise<{ token: string; user: { username: string; ownerId: string; role: 'USER' | 'ADMIN' } }> {
     const user = await this.prisma.user.findUnique({ where: { username } });
     const ok = user && (await bcrypt.compare(password, user.passwordHash));
     if (!user || !ok) throw new UnauthorizedException('Invalid credentials'); // generic — no user enumeration
@@ -33,7 +33,7 @@ export class AuthService {
       role: user.role,
       jti: randomUUID(),
     });
-    return { token, user: { username: user.username, role: user.role } };
+    return { token, user: { username: user.username, ownerId: user.ownerId, role: user.role } };
   }
 
   async verify(token: string): Promise<JwtPayload> {
