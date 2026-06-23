@@ -146,8 +146,9 @@ export class CarePlanService {
     for (const p of plants) await this.recomputePlant(p.id);
   }
 
-  // Recompute only one owner's plants — the USER-scoped form of recomputeAll (the controller gates
-  // which one runs by role).
+  // Recompute only one owner's plants — the owner-scoped form of recomputeAll. The HTTP recompute
+  // endpoint always uses this (scoped to the effective owner); recomputeAll is system-jobs only
+  // (cron/startup/moving), never reachable over HTTP.
   async recomputeOwner(ownerId: string): Promise<void> {
     const plants = await this.prisma.plant.findMany({ where: { ownerId }, select: { id: true } });
     for (const p of plants) await this.recomputePlant(p.id);
