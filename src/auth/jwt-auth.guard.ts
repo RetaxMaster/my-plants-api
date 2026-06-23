@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ClsService } from 'nestjs-cls';
 import { AuthService } from './auth.service.js';
@@ -36,6 +36,16 @@ export class JwtAuthGuard implements CanActivate {
       jti: payload.jti,
       exp: payload.exp,
     };
+    // Acting As: honor X-Act-As-Owner ONLY for an ADMIN (a USER's header is ignored — no escalation).
+    // Validate existence here so a bogus target fails with a controlled 403 instead of a later FK/500.
+    const actAs = req.headers?.['x-act-as-owner'];
+    if (actor.role === 'ADMIN' && typeof actAs === 'string' && actAs.trim().length > 0) {
+      const target = actAs.trim();
+      if (!(await this.auth.ownerExists(target))) {
+        throw new ForbiddenException('Unknown act-as owner');
+      }
+      actor.actingAsOwnerId = target;
+    }
     this.cls.set(ACTOR_KEY, actor);
     req.user = actor;
     return true;
