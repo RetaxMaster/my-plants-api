@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { OwnerModule } from './owner/owner.module.js';
 import { SpeciesModule } from './species/species.module.js';
 import { CitiesModule } from './cities/cities.module.js';
+import { OwnersModule } from './owners/owners.module.js';
 import { PlacesModule } from './places/places.module.js';
 import { PlantsModule } from './plants/plants.module.js';
 import { WeatherModule } from './weather/weather.module.js';
@@ -27,6 +28,7 @@ import { AuthModule } from './auth/auth.module.js';
     ScheduleModule.forRoot(),
     SpeciesModule,
     CitiesModule,
+    OwnersModule,
     PlacesModule,
     PlantsModule,
     WeatherModule,
