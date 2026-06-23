@@ -37,12 +37,27 @@ describe('OwnerService (actor-aware)', () => {
     });
   });
 
-  it('ownerFilter is {} for ADMIN and {ownerId} for USER', async () => {
-    await withActor(cls, { ownerId: 'o1', role: 'ADMIN' }, () => {
-      expect(svc.ownerFilter()).toEqual({});
-    });
+  it('ownerFilter is {ownerId} for USER and for ADMIN (no more {} bypass)', async () => {
     await withActor(cls, { ownerId: 'o1', role: 'USER' }, () => {
       expect(svc.ownerFilter()).toEqual({ ownerId: 'o1' });
+    });
+    await withActor(cls, { ownerId: 'oAdmin', role: 'ADMIN' }, () => {
+      expect(svc.ownerFilter()).toEqual({ ownerId: 'oAdmin' });
+    });
+  });
+
+  it('acting-as: an ADMIN with actingAsOwnerId scopes to the target for filter and currentOwnerId', async () => {
+    await withActor(cls, { ownerId: 'oAdmin', role: 'ADMIN', actingAsOwnerId: 'oTarget' }, () => {
+      expect(svc.ownerFilter()).toEqual({ ownerId: 'oTarget' });
+      expect(svc.currentOwnerId()).toBe('oTarget');
+      expect(svc.currentRole()).toBe('ADMIN'); // role is the REAL role, unaffected by acting-as
+      expect(svc.currentActingAsOwnerId()).toBe('oTarget');
+    });
+  });
+
+  it('currentActingAsOwnerId is null when not impersonating', async () => {
+    await withActor(cls, { ownerId: 'o1', role: 'ADMIN' }, () => {
+      expect(svc.currentActingAsOwnerId()).toBeNull();
     });
   });
 

@@ -6,6 +6,9 @@ export interface Actor {
   username: string;
   ownerId: string;
   role: 'USER' | 'ADMIN';
+  // The impersonation target, set by the guard ONLY when role === 'ADMIN' and a valid
+  // X-Act-As-Owner header is present. OwnerService trusts this: a USER actor never carries it.
+  actingAsOwnerId?: string;
   jti: string;
   exp: number;
 }

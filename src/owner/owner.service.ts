@@ -18,21 +18,31 @@ export class OwnerService {
     return a;
   }
 
-  // Synchronous now (Phase 3): reads CLS instead of hitting the DB. The actor's ownerId is the
-  // single owner a write must be stamped against and a USER's reads must be scoped to.
+  // The effective owner = the impersonation target when an ADMIN is acting-as, else the actor's
+  // own owner. Trusting actor.actingAsOwnerId here is safe: the guard sets it ONLY for an ADMIN.
+  private effectiveOwnerId(): string {
+    const a = this.require();
+    return a.actingAsOwnerId ?? a.ownerId;
+  }
+
+  // Synchronous (reads CLS). The single owner a write is stamped against and reads are scoped to.
   currentOwnerId(): string {
-    return this.require().ownerId;
+    return this.effectiveOwnerId();
   }
 
   currentRole(): 'USER' | 'ADMIN' {
     return this.require().role;
   }
 
-  // Prisma `where` fragment for owner scoping by operation: a USER sees only their own rows; an
-  // ADMIN sees every owner's rows ({} = no owner constraint). Use this for READS and for the
-  // access check of single-row mutations — NOT for creation (creation always stamps currentOwnerId).
-  ownerFilter(): { ownerId: string } | Record<string, never> {
-    const a = this.require();
-    return a.role === 'ADMIN' ? {} : { ownerId: a.ownerId };
+  // Prisma `where` fragment for owner scoping. Always constrains by the EFFECTIVE owner — there is
+  // no longer an unconstrained ADMIN branch (that was bug B7). Admin reach across owners now comes
+  // ONLY from impersonation (actingAsOwnerId), never from a blanket {}.
+  ownerFilter(): { ownerId: string } {
+    return { ownerId: this.effectiveOwnerId() };
+  }
+
+  // The impersonation target, or null when not acting-as (for GET /auth/me).
+  currentActingAsOwnerId(): string | null {
+    return this.currentActor()?.actingAsOwnerId ?? null;
   }
 }
