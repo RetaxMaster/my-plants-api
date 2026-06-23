@@ -64,13 +64,19 @@ describe('PlacesService ownership', () => {
     });
   });
 
-  it('an ADMIN can read any owner row', async () => {
+  it('an ADMIN defaults to own-scope (cannot read another owner row)', async () => {
     const { svc, run } = setup();
     await run(actor('owner-1', 'ADMIN'), async () => {
-      const place = await svc.get('p-other');
-      expect(place.id).toBe('p-other');
-      const list = await svc.list();
-      expect(list.map((p: any) => p.id).sort()).toEqual(['p-other', 'p-own']);
+      await expect(svc.get('p-other')).rejects.toBeInstanceOf(NotFoundException);
+      expect((await svc.list()).map((p: any) => p.id)).toEqual(['p-own']);
+    });
+  });
+
+  it('an ADMIN acting-as another owner reads that owner rows', async () => {
+    const { svc, run } = setup();
+    await run({ ...actor('owner-1', 'ADMIN'), actingAsOwnerId: 'owner-2' }, async () => {
+      expect((await svc.get('p-other')).id).toBe('p-other');
+      expect((await svc.list()).map((p: any) => p.id)).toEqual(['p-other']);
     });
   });
 

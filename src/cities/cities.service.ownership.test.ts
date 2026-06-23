@@ -65,22 +65,28 @@ describe('CitiesService ownership', () => {
     });
   });
 
-  it('an ADMIN can read any owner city', async () => {
+  it('an ADMIN defaults to own-scope and cannot read another owner city', async () => {
     const { svc, run } = setup();
     await run(actor('owner-1', 'ADMIN'), async () => {
+      await expect(svc.get('o2-a')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  it('an ADMIN acting-as another owner can read that owner city', async () => {
+    const { svc, run } = setup();
+    await run({ ...actor('owner-1', 'ADMIN'), actingAsOwnerId: 'owner-2' }, async () => {
       expect((await svc.get('o2-a')).id).toBe('o2-a');
     });
   });
 
-  it('makePrimary as ADMIN on another owner city scopes the reset to THAT owner only', async () => {
+  it('makePrimary while acting-as scopes the reset to the TARGET owner only', async () => {
     const { svc, cities, run } = setup();
-    await run(actor('owner-1', 'ADMIN'), async () => {
+    await run({ ...actor('owner-1', 'ADMIN'), actingAsOwnerId: 'owner-2' }, async () => {
       await svc.makePrimary('o2-b');
     });
-    // owner-2's primary moved b←a; owner-1's primary is UNTOUCHED.
     expect(cities.find((c) => c.id === 'o2-b')!.isPrimary).toBe(true);
     expect(cities.find((c) => c.id === 'o2-a')!.isPrimary).toBe(false);
-    expect(cities.find((c) => c.id === 'o1-a')!.isPrimary).toBe(true);
+    expect(cities.find((c) => c.id === 'o1-a')!.isPrimary).toBe(true); // owner-1 untouched
   });
 
   it('creation stamps the acting actor ownerId and scopes the isPrimary reset to that owner', async () => {

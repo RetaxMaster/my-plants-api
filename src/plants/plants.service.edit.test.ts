@@ -83,9 +83,9 @@ describe('PlantsService.update', () => {
     });
   });
 
-  it('an ADMIN can edit another owner plant, validating the target place against the PLANT owner', async () => {
+  it('an ADMIN acting-as another owner can edit that owner plant, validating the target place against the PLANT owner', async () => {
     const { svc, run, recomputed, seed } = setup();
-    await run(actor('owner-1', 'ADMIN'), async () => {
+    await run({ ...actor('owner-1', 'ADMIN'), actingAsOwnerId: 'owner-2' }, async () => {
       // pl-other belongs to owner-2; place-y also belongs to owner-2 → allowed.
       await svc.update('pl-other', { placeId: 'place-y' });
     });

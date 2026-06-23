@@ -71,11 +71,19 @@ describe('PlantsService ownership', () => {
     });
   });
 
-  it('an ADMIN can read any owner plant', async () => {
+  it('an ADMIN defaults to own-scope (cannot read another owner plant)', async () => {
     const { svc, run } = setup();
     await run(actor('owner-1', 'ADMIN'), async () => {
+      await expect(svc.get('pl-other')).rejects.toBeInstanceOf(NotFoundException);
+      expect((await svc.list()).map((p: any) => p.id)).toEqual(['pl-own']);
+    });
+  });
+
+  it('an ADMIN acting-as another owner reads that owner plant', async () => {
+    const { svc, run } = setup();
+    await run({ ...actor('owner-1', 'ADMIN'), actingAsOwnerId: 'owner-2' }, async () => {
       expect((await svc.get('pl-other')).id).toBe('pl-other');
-      expect((await svc.list()).map((p: any) => p.id).sort()).toEqual(['pl-other', 'pl-own']);
+      expect((await svc.list()).map((p: any) => p.id)).toEqual(['pl-other']);
     });
   });
 
