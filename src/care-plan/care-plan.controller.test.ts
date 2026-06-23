@@ -18,19 +18,25 @@ function setup() {
   return { ctrl, recomputeAll, recomputeOwner, todaysTasks, run };
 }
 
-describe('CarePlanController.recompute role gating', () => {
-  it('ADMIN recomputes the whole system', async () => {
-    const { ctrl, recomputeAll, recomputeOwner, run } = setup();
-    await run(actor('owner-1', 'ADMIN'), () => ctrl.recompute());
-    expect(recomputeAll).toHaveBeenCalledTimes(1);
-    expect(recomputeOwner).not.toHaveBeenCalled();
-  });
-
-  it('USER recomputes only their own garden', async () => {
+describe('CarePlanController.recompute (effective-owner scoping)', () => {
+  it('a USER recomputes their own garden', async () => {
     const { ctrl, recomputeAll, recomputeOwner, run } = setup();
     await run(actor('owner-1', 'USER'), () => ctrl.recompute());
     expect(recomputeOwner).toHaveBeenCalledWith('owner-1');
     expect(recomputeAll).not.toHaveBeenCalled();
+  });
+
+  it('an ADMIN recomputes their OWN garden by default (no all-owners recompute over HTTP)', async () => {
+    const { ctrl, recomputeAll, recomputeOwner, run } = setup();
+    await run(actor('owner-admin', 'ADMIN'), () => ctrl.recompute());
+    expect(recomputeOwner).toHaveBeenCalledWith('owner-admin');
+    expect(recomputeAll).not.toHaveBeenCalled();
+  });
+
+  it('an ADMIN acting-as recomputes the TARGET owner', async () => {
+    const { ctrl, recomputeOwner, run } = setup();
+    await run({ ...actor('owner-admin', 'ADMIN'), actingAsOwnerId: 'owner-2' }, () => ctrl.recompute());
+    expect(recomputeOwner).toHaveBeenCalledWith('owner-2');
   });
 
   it('today is scoped to the acting actor owner', async () => {

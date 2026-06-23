@@ -11,11 +11,11 @@ export class CarePlanController {
     return this.carePlan.todaysTasks(this.owner.currentOwnerId());
   }
 
-  // Role-gated: an ADMIN recomputes the whole system; a USER recomputes only their own garden.
+  // Scopes to the EFFECTIVE owner (own by default; the target when acting-as). The all-owners
+  // recompute remains available only via the startup/cron job, never over HTTP.
   @Post('recompute')
   async recompute() {
-    if (this.owner.currentRole() === 'ADMIN') await this.carePlan.recomputeAll();
-    else await this.carePlan.recomputeOwner(this.owner.currentOwnerId());
+    await this.carePlan.recomputeOwner(this.owner.currentOwnerId());
     return { ok: true };
   }
 }
