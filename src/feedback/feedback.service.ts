@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type CareEventType, type Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
@@ -25,6 +25,10 @@ export class FeedbackService {
     postponeToOn?: Date;
     payload?: unknown;
   }): Promise<void> {
+    // Defense in depth: PROGRESS is never a feedback event (the DTO already rejects it). Progress is
+    // recorded only by ProgressService, which writes the DONE PROGRESS CareEvent directly.
+    if (input.task === 'PROGRESS') throw new BadRequestException('PROGRESS is not a valid feedback task');
+
     // Owner-scope the write: a feedback event mutates the plant's history, schedule, overrides and
     // adaptation, so reject any plant the actor may not touch (mirrors the read path on
     // GET /plants/:id/care) before mutating. Single-row mutation: resolve { id, ...ownerFilter() }
