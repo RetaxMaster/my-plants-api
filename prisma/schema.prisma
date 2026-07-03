@@ -113,15 +113,57 @@ model Place {
 }
 
 model Species {
-  slug           String  @id
-  scientificName String  @unique @map("scientific_name")
+  slug           String    @id
+  scientificName String    @unique @map("scientific_name")
   record         Json
-  // Human-readable Markdown brief (the "blogpost"), persisted in the DB in both languages.
-  briefEn        String? @map("brief_en") @db.Text
-  briefEs        String? @map("brief_es") @db.Text
+  blogpost       Blogpost? // 1:1 back-relation (business rule: every species has exactly one)
   plants         Plant[]
 
   @@map("species")
+}
+
+model Blogpost {
+  slug                String    @id                          // == speciesSlug for species guides; derived from titleEs for free-form
+  status              Int       @default(0)                   // 0 = DRAFT, 1 = PUBLISHED (BlogpostStatus)
+  speciesSlug         String?   @unique @map("species_slug")  // 1:1 with Species; null = free-form post
+  species             Species?  @relation(fields: [speciesSlug], references: [slug], onDelete: SetNull, onUpdate: Cascade)
+
+  titleEs             String    @map("title_es")
+  titleEn             String?   @map("title_en")
+  excerptEs           String    @map("excerpt_es") @db.Text
+  excerptEn           String?   @map("excerpt_en") @db.Text
+  bodyEs              String    @map("body_es") @db.Text
+  bodyEn              String?   @map("body_en") @db.Text
+
+  coverImageUrl       String?   @map("cover_image_url")
+  coverImageObjectKey String?   @map("cover_image_object_key") // R2 key, kept for later deletion
+  youtubeUrl          String?   @map("youtube_url")
+  ctaLink             String?   @map("cta_link")
+  ctaLabelEs          String?   @map("cta_label_es")
+  ctaLabelEn          String?   @map("cta_label_en")
+
+  createdByUserId     String?   @map("created_by_user_id")    // provenance only, NOT an access boundary
+  publishedAt         DateTime? @map("published_at")          // set when status first becomes PUBLISHED
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, publishedAt])
+  @@map("blogposts")
+}
+
+model MediaAsset {
+  id              String   @id @default(cuid())
+  imageUrl        String   @map("image_url")
+  imageObjectKey  String   @map("image_object_key") // R2 key, for deletion
+  filename        String                            // original client filename (display only)
+  sizeBytes       Int      @map("size_bytes")        // stored (compressed webp) size
+  width           Int?
+  height          Int?
+  createdByUserId String?  @map("created_by_user_id") // provenance only
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("media_assets")
 }
 
 model Plant {
