@@ -4,7 +4,7 @@ import { MediaService } from './media.service.js';
 
 function makeService(
   row: Record<string, unknown> | null,
-  opts: { createImpl?: () => Promise<unknown> } = {},
+  opts: { createImpl?: (args: { data: Record<string, unknown> }) => Promise<unknown> } = {},
 ) {
   const order: string[] = [];
   const prisma = {
