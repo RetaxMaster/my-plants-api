@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { Public } from './public.decorator.js';
+import { LoginDto } from './login.dto.js';
 
 @Controller('auth')
 export class AuthController {
@@ -8,7 +9,7 @@ export class AuthController {
 
   @Public()
   @Post('login')
-  login(@Body() body: { username: string; password: string }) {
+  login(@Body() body: LoginDto) {
     return this.auth.login(body.username, body.password);
   }
 
