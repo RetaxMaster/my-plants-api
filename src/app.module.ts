@@ -19,6 +19,7 @@ import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
 import { ImageUploadModule } from './storage/image-upload.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { KnowledgeChatModule } from './knowledge-chat/knowledge-chat.module.js';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { AuthModule } from './auth/auth.module.js';
     StartupModule,
     ImageUploadModule,
     AuthModule,
+    KnowledgeChatModule,
   ],
 })
 export class AppModule {}
