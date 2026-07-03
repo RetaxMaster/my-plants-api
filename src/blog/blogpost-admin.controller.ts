@@ -1,4 +1,6 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { imageUploadMulterOptions } from '../storage/multipart.config.js';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { OwnerService } from '../owner/owner.service.js';
@@ -50,5 +52,11 @@ export class BlogpostAdminController {
   @Delete(':slug')
   remove(@Param('slug') slug: string) {
     return this.blog.remove(slug);
+  }
+
+  @Post(':slug/cover')
+  @UseInterceptors(FileInterceptor('cover', imageUploadMulterOptions))
+  setCover(@Param('slug') slug: string, @UploadedFile() file: Express.Multer.File) {
+    return this.blog.setCover(slug, file);
   }
 }

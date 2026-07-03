@@ -23,7 +23,17 @@ function makeService(overrides: Record<string, unknown> = {}) {
   const owner = { currentActor: () => ({ userId: 'admin-1' }) } as unknown as ConstructorParameters<
     typeof BlogService
   >[1];
-  return { service: new BlogService(prisma, owner), store, prisma };
+  const images = {
+    upload: vi.fn(async () => ({
+      imageUrl: 'https://cdn.test/cover.webp',
+      imageObjectKey: 'blog/covers/cover.webp',
+      sizeBytes: 123,
+      width: 800,
+      height: 600,
+    })),
+    delete: vi.fn(async () => {}),
+  } as unknown as ConstructorParameters<typeof BlogService>[2];
+  return { service: new BlogService(prisma, owner, images), store, prisma };
 }
 
 const base = {

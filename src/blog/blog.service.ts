@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { BlogpostStatus, toBlogpostSlug } from '@retaxmaster/my-plants-species-schema';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
+import { ImageUploadService } from '../storage/image-upload.service.js';
 import {
   toAdminDetail,
   toAdminRow,
@@ -33,6 +34,7 @@ export class BlogService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly owner: OwnerService,
+    private readonly images: ImageUploadService,
   ) {}
 
   // ---- Public (published only) ----
@@ -189,8 +191,30 @@ export class BlogService {
       });
     }
     await this.prisma.blogpost.delete({ where: { slug } });
-    // NOTE: best-effort cover-object cleanup is added in Phase 4 (needs ImageUploadService).
+    await this.images.delete(existing.coverImageObjectKey); // best-effort: never blocks the delete
     return { ok: true };
+  }
+
+  async setCover(slug: string, file: Express.Multer.File | undefined): Promise<BlogpostAdminDetail> {
+    if (!file) throw new BadRequestException('a cover file (field "cover") is required');
+    const existing = await this.prisma.blogpost.findUnique({ where: { slug } });
+    if (!existing) throw new NotFoundException(`Unknown blogpost: ${slug}`);
+
+    const stored = await this.images.upload({ buffer: file.buffer, keyPrefix: 'blog/covers' });
+    let post;
+    try {
+      post = await this.prisma.blogpost.update({
+        where: { slug },
+        data: { coverImageUrl: stored.imageUrl, coverImageObjectKey: stored.imageObjectKey },
+      });
+    } catch (err) {
+      // The DB write failed after the upload -> delete the just-uploaded object so it isn't orphaned.
+      await this.images.delete(stored.imageObjectKey);
+      throw err;
+    }
+    // Replace succeeded: best-effort delete of the PREVIOUS cover object (never blocks the response).
+    await this.images.delete(existing.coverImageObjectKey);
+    return toAdminDetail(post);
   }
 
   private async resolveFreeSlug(base: string): Promise<string> {
