@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
@@ -139,6 +139,9 @@ export class KnowledgeChatService {
   // the run FAILED immediately AND clear activeKey (never leave it stuck QUEUED / holding the slot).
   private async launch(runId: string, prompt: string, resumeSessionId: string | null): Promise<string> {
     const logPath = this.logPath(runId);
+    // Own the write precondition: ensure the host-owned log dir exists (idempotent). The engine's
+    // onModuleInit also creates it, but the service must not depend on that lifecycle running first.
+    await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
     await writeFile(logPath, ''); // host creates/truncates; claude fills it via the engine's redirect
     const ticket = await this.tickets.mint(runId);
     try {
