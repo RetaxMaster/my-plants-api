@@ -250,3 +250,60 @@ model ScheduledMove {
   @@index([ownerId])
   @@map("scheduled_moves")
 }
+
+enum KnowledgeChatRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model KnowledgeChatSession {
+  id              String   @id @default(cuid())
+  claudeSessionId String?  @unique @map("claude_session_id") // Claude's UUID; null until first run inits
+  title           String // first ~160 chars of the first prompt
+  createdByUserId String?  @map("created_by_user_id") // provenance only, NOT an access boundary
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  runs            KnowledgeChatRun[]
+
+  @@map("knowledge_chat_sessions")
+}
+
+model KnowledgeChatRun {
+  id            String                 @id @default(cuid())
+  sessionId     String                 @map("session_id")
+  session       KnowledgeChatSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  prompt        String                 @db.Text // raw user prompt
+  status        KnowledgeChatRunStatus @default(QUEUED)
+  // 'ACTIVE' while the run is non-terminal; null once terminal. With @@unique([sessionId, activeKey])
+  // and MySQL/MariaDB's null-exempt unique semantics, this DB-enforces "at most ONE active run per
+  // session" atomically — a concurrent second active insert hits a unique violation (→ 409). The
+  // service/orchestrator clear it to null on every terminal transition, freeing the slot.
+  activeKey     String?                @map("active_key")
+  pid           Int?
+  procStartTime String?                @map("proc_start_time")
+  exitCode      Int?                   @map("exit_code")
+  error         String?                @db.Text
+  startedAt     DateTime?              @map("started_at")
+  finishedAt    DateTime?              @map("finished_at")
+  createdAt     DateTime               @default(now()) @map("created_at")
+  tickets       KnowledgeChatTicket[]
+
+  @@unique([sessionId, activeKey])
+  @@index([sessionId])
+  @@map("knowledge_chat_runs")
+}
+
+model KnowledgeChatTicket {
+  id         String           @id @default(cuid())
+  runId      String           @map("run_id")
+  run        KnowledgeChatRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tokenHash  String           @unique @map("token_hash") // sha256(raw); raw returned once
+  expiresAt  DateTime         @map("expires_at")
+  consumedAt DateTime?        @map("consumed_at")
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@map("knowledge_chat_tickets")
+}
