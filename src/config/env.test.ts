@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { loadEnv, loadDbEnv } from './env.js';
 
 const DB = { DB_HOST: 'h', DB_PORT: '3306', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'n' };
+// The engine vars that have no default and must be present for loadEnv() to succeed.
+const ENGINE = { KNOWLEDGE_CHAT_ENGINE_SECRET: 'x'.repeat(16), KNOWLEDGE_ENGINE_CWD: '/tmp/knowledge-engine' };
+const FULL = { ...DB, JWT_SECRET: 'x'.repeat(32), ...ENGINE };
 
 describe('loadDbEnv', () => {
   it('parses DB vars without requiring JWT secrets', () => {
@@ -12,17 +15,38 @@ describe('loadDbEnv', () => {
 
 describe('loadEnv', () => {
   it('requires JWT_SECRET (min 32 chars)', () => {
-    expect(() => loadEnv({ ...DB } as NodeJS.ProcessEnv)).toThrow();
-    const ok = loadEnv({ ...DB, JWT_SECRET: 'x'.repeat(32) } as NodeJS.ProcessEnv);
+    expect(() => loadEnv({ ...DB, ...ENGINE } as NodeJS.ProcessEnv)).toThrow();
+    const ok = loadEnv({ ...FULL } as NodeJS.ProcessEnv);
     expect(ok.JWT_EXPIRES_IN).toBe('30d'); // default
+  });
+
+  it('requires KNOWLEDGE_CHAT_ENGINE_SECRET and KNOWLEDGE_ENGINE_CWD', () => {
+    const { KNOWLEDGE_CHAT_ENGINE_SECRET: _s, ...noSecret } = FULL;
+    const { KNOWLEDGE_ENGINE_CWD: _c, ...noCwd } = FULL;
+    expect(() => loadEnv(noSecret as NodeJS.ProcessEnv)).toThrow();
+    expect(() => loadEnv(noCwd as NodeJS.ProcessEnv)).toThrow();
+  });
+
+  it('applies sensible defaults for the optional engine vars', () => {
+    const env = loadEnv({ ...FULL } as NodeJS.ProcessEnv);
+    expect(env.KNOWLEDGE_CHAT_ENGINE_PORT).toBe(8010);
+    expect(env.KNOWLEDGE_CHAT_ENGINE_ENABLED).toBe(true);
+    expect(env.KNOWLEDGE_CHAT_LOG_DIR).toBe('storage/knowledge-chat');
+    expect(env.CLAUDE_BIN).toBe('claude');
+    expect(env.KNOWLEDGE_CHAT_RUN_TIMEOUT_MS).toBe(1_800_000);
+    expect(env.KNOWLEDGE_CHAT_RUN_BUFFER_MS).toBe(120_000);
+    expect(env.KNOWLEDGE_CHAT_TICKET_TTL_MS).toBe(60_000);
+    expect(env.WEB_ORIGIN).toBe('http://localhost:8001');
+  });
+
+  it('parses KNOWLEDGE_CHAT_ENGINE_ENABLED=false as a boolean false', () => {
+    const env = loadEnv({ ...FULL, KNOWLEDGE_CHAT_ENGINE_ENABLED: 'false' } as NodeJS.ProcessEnv);
+    expect(env.KNOWLEDGE_CHAT_ENGINE_ENABLED).toBe(false);
   });
 });
 
 describe('loadEnv — R2 image storage (optional feature)', () => {
-  const base = {
-    DB_HOST: 'h', DB_PORT: '3306', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'n',
-    JWT_SECRET: 'x'.repeat(32),
-  };
+  const base = { ...FULL };
 
   it('defaults all six R2 vars to empty when unset (API boots without R2)', () => {
     const env = loadEnv({ ...base } as NodeJS.ProcessEnv);

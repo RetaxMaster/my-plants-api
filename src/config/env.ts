@@ -13,6 +13,10 @@ export const envSchema = dbSchema.extend({
   DEFAULT_CITY_TZ: z.string().min(1).default('America/Mexico_City'),
   JWT_SECRET: z.string().min(32),
   JWT_EXPIRES_IN: z.string().min(1).default('30d'),
+  // Browser origin allowed by CORS (web app) — also the engine's Socket.IO corsOrigins. Homing it
+  // here (main.ts historically read it straight off process.env) lets the engine derive corsOrigins
+  // from the typed env.
+  WEB_ORIGIN: z.string().min(1).default('http://localhost:8001'),
   // R2 image storage (spec 2026-07-02). ALL OPTIONAL: the API boots without them; only an actual
   // upload fails (typed r2_not_configured → 503, added in Phase 2). `.default('')` keeps every
   // parsed value a string so downstream code never handles `undefined`.
@@ -22,6 +26,18 @@ export const envSchema = dbSchema.extend({
   R2_SECRET_ACCESS_KEY: z.string().default(''),
   R2_BUCKET: z.string().default(''),
   R2_PUBLIC_BASE_URL: z.string().default(''),
+
+  // Knowledge-engine admin chat (spec §8): the embedded realtime engine + isolated claude cwd.
+  KNOWLEDGE_CHAT_ENGINE_PORT: z.coerce.number().int().positive().default(8010),
+  KNOWLEDGE_CHAT_ENGINE_SECRET: z.string().min(16), // required — gates the engine's /execute
+  // Lets the full-app boot skip binding/listening (hermetic e2e / CI). Default on.
+  KNOWLEDGE_CHAT_ENGINE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  KNOWLEDGE_CHAT_LOG_DIR: z.string().min(1).default('storage/knowledge-chat'),
+  KNOWLEDGE_ENGINE_CWD: z.string().min(1), // required — isolated knowledge-engine checkout
+  CLAUDE_BIN: z.string().min(1).default('claude'),
+  KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
+  KNOWLEDGE_CHAT_RUN_BUFFER_MS: z.coerce.number().int().positive().default(120_000),
+  KNOWLEDGE_CHAT_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 export type DbEnv = z.infer<typeof dbSchema>;
