@@ -55,12 +55,10 @@ export class ImageUploadService {
     this.s3Client = deps.s3;
   }
 
-  // Explicit R2_ENDPOINT wins; otherwise derive it from the account id (Cloudflare's S3 endpoint).
+  // The S3 endpoint is derived from the Cloudflare account id (there is no separate R2_ENDPOINT env
+  // var — it would only ever duplicate this value).
   private endpoint(): string {
-    return (
-      this.env.R2_ENDPOINT ||
-      (this.env.R2_ACCOUNT_ID ? `https://${this.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : '')
-    );
+    return this.env.R2_ACCOUNT_ID ? `https://${this.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : '';
   }
 
   // Optional-feature guard (spec §3.2): fail fast with a typed 503 when R2 isn't configured on this

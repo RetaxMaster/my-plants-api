@@ -22,7 +22,6 @@ export const envSchema = dbSchema.extend({
   // upload fails (typed r2_not_configured → 503, added in Phase 2). `.default('')` keeps every
   // parsed value a string so downstream code never handles `undefined`.
   R2_ACCOUNT_ID: z.string().default(''),
-  R2_ENDPOINT: z.string().default(''),
   R2_ACCESS_KEY_ID: z.string().default(''),
   R2_SECRET_ACCESS_KEY: z.string().default(''),
   R2_BUCKET: z.string().default(''),

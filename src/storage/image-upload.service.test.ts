@@ -8,14 +8,14 @@ import type { Env } from '../config/env.js';
 // A fully-configured R2 env (fake values). Trailing slash on the public base URL is intentional —
 // it exercises the trailing-slash trim in the returned URL.
 const CONFIGURED = {
-  R2_ACCOUNT_ID: 'acc', R2_ENDPOINT: '', R2_ACCESS_KEY_ID: 'k',
+  R2_ACCOUNT_ID: 'acc', R2_ACCESS_KEY_ID: 'k',
   R2_SECRET_ACCESS_KEY: 's', R2_BUCKET: 'bucket', R2_PUBLIC_BASE_URL: 'https://cdn.example.com/',
 } as unknown as Env;
 
 // Every R2 var empty → the optional-feature guard must fire. Passed as an object, so this path
 // NEVER reads process.env → env-hermetic by construction (no delete/restore of ambient vars needed).
 const UNCONFIGURED = {
-  R2_ACCOUNT_ID: '', R2_ENDPOINT: '', R2_ACCESS_KEY_ID: '',
+  R2_ACCOUNT_ID: '', R2_ACCESS_KEY_ID: '',
   R2_SECRET_ACCESS_KEY: '', R2_BUCKET: '', R2_PUBLIC_BASE_URL: '',
 } as unknown as Env;
 

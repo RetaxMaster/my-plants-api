@@ -61,10 +61,9 @@ describe('loadEnv', () => {
 describe('loadEnv — R2 image storage (optional feature)', () => {
   const base = { ...FULL };
 
-  it('defaults all six R2 vars to empty when unset (API boots without R2)', () => {
+  it('defaults all five R2 vars to empty when unset (API boots without R2)', () => {
     const env = loadEnv({ ...base } as NodeJS.ProcessEnv);
     expect(env.R2_ACCOUNT_ID).toBe('');
-    expect(env.R2_ENDPOINT).toBe('');
     expect(env.R2_ACCESS_KEY_ID).toBe('');
     expect(env.R2_SECRET_ACCESS_KEY).toBe('');
     expect(env.R2_BUCKET).toBe('');
