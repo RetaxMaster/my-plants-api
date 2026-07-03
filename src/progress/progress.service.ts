@@ -8,6 +8,14 @@ import { startOfTodayUtc, ymdToUtcDate, ymdFromUtcDate } from '../common/time/lo
 import { PROGRESS_TAGS, parseProgressTags, resolveProgressTags } from './progress-catalog.js';
 import type { CreateProgressDto } from './progress.dto.js';
 
+// The six species-scheduled care tasks. PROGRESS is intentionally excluded — it is the richer
+// 'progress' item, not an action note. Single source for the history action allowlist.
+const CARE_ACTION_TASKS = ['WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES', 'MIST'] as const;
+type CareActionTask = (typeof CARE_ACTION_TASKS)[number];
+
+// Cap the merged feed (documented, never a silent truncation). Latest 100 by date.
+const HISTORY_CAP = 100;
+
 @Injectable()
 export class ProgressService {
   private readonly logger = new Logger(ProgressService.name);
@@ -117,6 +125,58 @@ export class ProgressService {
       tags: resolveProgressTags(tagKeys),
       photos: entry.photos.map((p) => ({ id: p.id, imageUrl: p.imageUrl, sortOrder: p.sortOrder })),
     };
+  }
+
+  // A single merged, reverse-chronological feed of two kinds: progress entries (clickable → detail)
+  // and completed care actions (read-only info notes). Owner-scoped. The web renders relative phrasing
+  // ("Watered 3 days ago") from occurredOn + today.
+  async history(plantId: string) {
+    const owned = await this.prisma.plant.findFirst({
+      where: { id: plantId, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException(`Unknown plant: ${plantId}`);
+
+    const [entries, events] = await Promise.all([
+      this.prisma.plantProgressEntry.findMany({
+        where: { plantId },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        take: HISTORY_CAP,
+        include: { _count: { select: { photos: true } } },
+      }),
+      this.prisma.careEvent.findMany({
+        where: { plantId, type: 'DONE', task: { in: [...CARE_ACTION_TASKS] } },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        take: HISTORY_CAP,
+      }),
+    ]);
+
+    const items = [
+      ...entries.map((e) => ({
+        kind: 'progress' as const,
+        entryId: e.id,
+        occurredOn: ymdFromUtcDate(e.occurredOn),
+        health: e.health,
+        photoCount: e._count.photos,
+        tagCount: Array.isArray(e.tags) ? e.tags.length : 0,
+        _sortDate: e.occurredOn.getTime(),
+        _sortCreated: e.createdAt.getTime(),
+      })),
+      ...events.map((ev) => ({
+        kind: 'action' as const,
+        task: ev.task as CareActionTask,
+        type: 'DONE' as const,
+        occurredOn: ymdFromUtcDate(ev.occurredOn),
+        _sortDate: ev.occurredOn.getTime(),
+        _sortCreated: ev.createdAt.getTime(),
+      })),
+    ];
+
+    // occurredOn desc, then createdAt desc as a stable tiebreak.
+    items.sort((a, b) => b._sortDate - a._sortDate || b._sortCreated - a._sortCreated);
+
+    // Strip the private sort keys; cap the merged length.
+    return items.slice(0, HISTORY_CAP).map(({ _sortDate, _sortCreated, ...item }) => item);
   }
 
   // Best-effort R2 cleanup for a failed create (delete never throws into the caller — spec 1).

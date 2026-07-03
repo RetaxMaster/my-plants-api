@@ -29,4 +29,9 @@ export class ProgressController {
   entry(@Param('id') id: string, @Param('entryId') entryId: string) {
     return this.progress.getEntry(id, entryId);
   }
+
+  @Get('plants/:id/history')
+  history(@Param('id') id: string) {
+    return this.progress.history(id);
+  }
 }
