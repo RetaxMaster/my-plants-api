@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
+import { WeatherService } from '../src/weather/weather.service.js';
 
 // Requires a running MariaDB with migrations applied and >=1 species row (inserted by the
 // knowledge engine's db:insert).
@@ -25,7 +26,13 @@ describe('MyPlants API (e2e)', () => {
   let userId: string;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      // Hermetic boot: the startup recompute (onApplicationBootstrap → recomputeAll) fans out live
+      // Open-Meteo calls (8s timeout each), which overruns the 30s hook when the dev DB holds several
+      // cities/plants. Stub WeatherService so boot needs no network — the suite never asserts weather.
+      .overrideProvider(WeatherService)
+      .useValue({ forLocation: async () => null, forCity: async () => null })
+      .compile();
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true })); // mirror main.ts
     await app.init();

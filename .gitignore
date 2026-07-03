@@ -5,3 +5,5 @@ dist/
 prisma/.env
 *.tgz
 .playwright-cli/
+# Host-owned knowledge-chat NDJSON transcripts (runtime artifacts, never committed)
+storage/knowledge-chat/
