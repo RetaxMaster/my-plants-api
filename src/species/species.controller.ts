@@ -6,8 +6,9 @@ import { Public } from '../auth/public.decorator.js';
 export class SpeciesController {
   constructor(private readonly species: SpeciesService) {}
 
-  // Public reference data: the catalog list and the human-readable brief are not owner-scoped, so
-  // the web app can show them before/without a session. The full record (`one`) stays protected.
+  // Public reference data: the catalog list is not owner-scoped, so the web app can show it
+  // before/without a session. The full record (`one`) stays protected. (The blog is now served by
+  // GET /blog and GET /blog/:slug — the old GET /species/:slug/brief is removed.)
   @Public()
   @Get()
   list() {
@@ -17,11 +18,5 @@ export class SpeciesController {
   @Get(':slug')
   one(@Param('slug') slug: string) {
     return this.species.record(slug);
-  }
-
-  @Public()
-  @Get(':slug/brief')
-  brief(@Param('slug') slug: string) {
-    return this.species.brief(slug);
   }
 }
