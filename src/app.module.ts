@@ -13,6 +13,7 @@ import { WeatherModule } from './weather/weather.module.js';
 import { CarePlanModule } from './care-plan/care-plan.module.js';
 import { FeedbackModule } from './feedback/feedback.module.js';
 import { ProgressModule } from './progress/progress.module.js';
+import { FrequencyModule } from './frequency/frequency.module.js';
 import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
@@ -37,6 +38,7 @@ import { AuthModule } from './auth/auth.module.js';
     CarePlanModule,
     FeedbackModule,
     ProgressModule,
+    FrequencyModule,
     MovingModule,
     NotificationsModule,
     StartupModule,
