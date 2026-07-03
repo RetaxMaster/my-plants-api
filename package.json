@@ -27,6 +27,7 @@
     "@nestjs/platform-express": "^10.4.4",
     "@nestjs/schedule": "^4.1.1",
     "@prisma/client": "^5.20.0",
+    "@retaxmaster/claude-realtime-server": "github:RetaxMaster/claude-realtime-server#v0.2.0",
     "@retaxmaster/my-plants-species-schema": "file:../my-plants-species-schema/retaxmaster-my-plants-species-schema-0.4.0.tgz",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
