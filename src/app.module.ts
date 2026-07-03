@@ -12,6 +12,7 @@ import { PlantsModule } from './plants/plants.module.js';
 import { WeatherModule } from './weather/weather.module.js';
 import { CarePlanModule } from './care-plan/care-plan.module.js';
 import { FeedbackModule } from './feedback/feedback.module.js';
+import { ProgressModule } from './progress/progress.module.js';
 import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
@@ -35,6 +36,7 @@ import { AuthModule } from './auth/auth.module.js';
     WeatherModule,
     CarePlanModule,
     FeedbackModule,
+    ProgressModule,
     MovingModule,
     NotificationsModule,
     StartupModule,
