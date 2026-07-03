@@ -110,6 +110,21 @@ describe('KnowledgeChatOrchestrator.runFinished', () => {
     expect(run.error).toBe('boom');
   });
 
+  it('FAILED with NO stderr → synthesizes an actionable diagnostic (not a bare error)', async () => {
+    const run = mk(); const prisma = makePrismaFake([run], []);
+    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: null });
+    expect(run.status).toBe('FAILED');
+    // The diagnostic must name the likely cause + the knob to check (spawn/redirection, log dir).
+    expect(run.error).toMatch(/KNOWLEDGE_CHAT_LOG_DIR/);
+    expect(run.error).toMatch(/spawn\/redirection failure/);
+  });
+
+  it('FAILED with blank/whitespace stderr also gets the diagnostic (not an empty error)', async () => {
+    const run = mk(); const prisma = makePrismaFake([run], []);
+    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 2, stopped: false, stderrTail: '   ' });
+    expect(run.error).toMatch(/KNOWLEDGE_CHAT_LOG_DIR/);
+  });
+
   it('is a single-winner: a second finalize of an already-terminal run is a no-op', async () => {
     const run = mk('SUCCEEDED'); const prisma = makePrismaFake([run], []);
     await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'late' });

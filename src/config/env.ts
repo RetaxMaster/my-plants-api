@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { z } from 'zod';
 
 const dbSchema = z.object({
@@ -32,7 +33,12 @@ export const envSchema = dbSchema.extend({
   KNOWLEDGE_CHAT_ENGINE_SECRET: z.string().min(16), // required — gates the engine's /execute
   // Lets the full-app boot skip binding/listening (hermetic e2e / CI). Default on.
   KNOWLEDGE_CHAT_ENGINE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
-  KNOWLEDGE_CHAT_LOG_DIR: z.string().min(1).default('storage/knowledge-chat'),
+  // MUST end up ABSOLUTE: the engine spawns `claude` with cwd = KNOWLEDGE_ENGINE_CWD (the isolated
+  // checkout) and the supervisor redirects stdout/stderr to this path via a shell — a RELATIVE value
+  // would resolve against the spawned shell's cwd (the checkout, which has no such dir) and the
+  // redirection fails before claude runs. Resolve to absolute here so no relative env value can ever
+  // reintroduce that bug, regardless of which process (API vs spawned shell) touches the path.
+  KNOWLEDGE_CHAT_LOG_DIR: z.string().min(1).default('storage/knowledge-chat').transform((v) => resolve(v)),
   KNOWLEDGE_ENGINE_CWD: z.string().min(1), // required — isolated knowledge-engine checkout
   CLAUDE_BIN: z.string().min(1).default('claude'),
   KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),

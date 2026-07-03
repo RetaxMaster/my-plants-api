@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isAbsolute, resolve } from 'node:path';
 import { loadEnv, loadDbEnv } from './env.js';
 
 const DB = { DB_HOST: 'h', DB_PORT: '3306', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'n' };
@@ -31,7 +32,7 @@ describe('loadEnv', () => {
     const env = loadEnv({ ...FULL } as NodeJS.ProcessEnv);
     expect(env.KNOWLEDGE_CHAT_ENGINE_PORT).toBe(8010);
     expect(env.KNOWLEDGE_CHAT_ENGINE_ENABLED).toBe(true);
-    expect(env.KNOWLEDGE_CHAT_LOG_DIR).toBe('storage/knowledge-chat');
+    expect(env.KNOWLEDGE_CHAT_LOG_DIR).toBe(resolve('storage/knowledge-chat'));
     expect(env.CLAUDE_BIN).toBe('claude');
     expect(env.KNOWLEDGE_CHAT_RUN_TIMEOUT_MS).toBe(1_800_000);
     expect(env.KNOWLEDGE_CHAT_RUN_BUFFER_MS).toBe(120_000);
@@ -42,6 +43,18 @@ describe('loadEnv', () => {
   it('parses KNOWLEDGE_CHAT_ENGINE_ENABLED=false as a boolean false', () => {
     const env = loadEnv({ ...FULL, KNOWLEDGE_CHAT_ENGINE_ENABLED: 'false' } as NodeJS.ProcessEnv);
     expect(env.KNOWLEDGE_CHAT_ENGINE_ENABLED).toBe(false);
+  });
+
+  it('always resolves KNOWLEDGE_CHAT_LOG_DIR to an ABSOLUTE path (a relative value is a spawn-cwd bug)', () => {
+    // A RELATIVE value must never survive: the engine spawns claude in the isolated checkout and
+    // redirects the log via a shell, so a relative path would resolve against the wrong cwd and fail.
+    const rel = loadEnv({ ...FULL, KNOWLEDGE_CHAT_LOG_DIR: 'storage/knowledge-chat' } as NodeJS.ProcessEnv);
+    expect(isAbsolute(rel.KNOWLEDGE_CHAT_LOG_DIR)).toBe(true);
+    expect(rel.KNOWLEDGE_CHAT_LOG_DIR).toBe(resolve('storage/knowledge-chat'));
+
+    // An already-absolute value passes through unchanged.
+    const abs = loadEnv({ ...FULL, KNOWLEDGE_CHAT_LOG_DIR: '/var/lib/myplants/kchat' } as NodeJS.ProcessEnv);
+    expect(abs.KNOWLEDGE_CHAT_LOG_DIR).toBe('/var/lib/myplants/kchat');
   });
 });
 

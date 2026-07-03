@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { join } from 'node:path';
 import type { Orchestrator, ActiveRun } from '@retaxmaster/claude-realtime-server';
 import { PrismaService } from '../../prisma/prisma.service.js';
@@ -12,6 +12,8 @@ const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 // (retaxmaster's Node↔Laravel HTTP callback layer disappears). No network, no retry: direct DB writes.
 @Injectable()
 export class KnowledgeChatOrchestrator implements Orchestrator {
+  private readonly logger = new Logger(KnowledgeChatOrchestrator.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly tickets: KnowledgeChatTicketService,
@@ -53,17 +55,37 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
   // `activeKey` to null is what frees the session's single-active-run slot (the @@unique constraint).
   async runFinished(runId: string, info: { exitCode: number; stopped: boolean; stderrTail: string | null }): Promise<void> {
     const status = info.stopped ? 'CANCELLED' : info.exitCode === 0 ? 'SUCCEEDED' : 'FAILED';
-    await this.prisma.knowledgeChatRun.updateMany({
+    // Observability: a FAILED run must never be reduced to a bare error with nothing actionable. When
+    // the engine captured a stderr tail we persist it; when it is ABSENT (e.g. the shell redirection
+    // itself failed before claude ran — a missing/unwritable log dir), we synthesize a diagnostic that
+    // names the most likely cause and the knob to check, so the next spawn/redirection failure is
+    // debuggable from the run's `error` alone.
+    const error =
+      status !== 'FAILED'
+        ? null
+        : info.stderrTail && info.stderrTail.trim()
+          ? info.stderrTail.slice(0, 1000)
+          : `claude exited ${info.exitCode} with no stderr captured — likely a spawn/redirection failure ` +
+            `(check KNOWLEDGE_CHAT_LOG_DIR is an absolute, writable directory; the engine runs claude in ` +
+            `KNOWLEDGE_ENGINE_CWD, so a relative or missing log dir makes the shell redirect fail before claude runs).`;
+    const { count } = await this.prisma.knowledgeChatRun.updateMany({
       where: { id: runId, status: { in: [...ACTIVE] } },
       data: {
         status,
         exitCode: info.exitCode,
         pid: null,
         finishedAt: new Date(),
-        error: status === 'FAILED' ? (info.stderrTail?.slice(0, 1000) ?? null) : null,
+        error,
         activeKey: null, // terminal → release the unique active slot
       },
     });
+    // Log at the appropriate level (secret-safe: we log the exit code + whether stderr was present, not
+    // its content). count===0 means someone already finalized (single-winner) — nothing to report.
+    if (count > 0 && status === 'FAILED') {
+      this.logger.warn(
+        `Knowledge-chat run ${runId} FAILED (exitCode=${info.exitCode}, stderr ${info.stderrTail?.trim() ? 'captured' : 'ABSENT'}).`,
+      );
+    }
   }
 
   // Boot re-adoption: still-RUNNING children survive a NestJS restart (spawned under setsid). Return
