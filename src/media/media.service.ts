@@ -28,17 +28,28 @@ export class MediaService {
     if (!file) throw new BadRequestException('an image file (field "image") is required');
     // One shared pipeline; size/dimensions come from the upload result (no second decode).
     const stored = await this.images.upload({ buffer: file.buffer, keyPrefix: 'blog/media' });
-    const row = await this.prisma.mediaAsset.create({
-      data: {
-        imageUrl: stored.imageUrl,
-        imageObjectKey: stored.imageObjectKey,
-        filename: file.originalname,
-        sizeBytes: stored.sizeBytes,
-        width: stored.width,
-        height: stored.height,
-        createdByUserId: this.owner.currentActor()?.userId ?? null,
-      },
-    });
+    // `filename` is display-only metadata stored in a VARCHAR(191); cap it so an overlong original
+    // filename can never fail the insert AFTER the object is already in R2 (which would orphan it).
+    const filename = (file.originalname ?? '').slice(0, 191);
+    let row;
+    try {
+      row = await this.prisma.mediaAsset.create({
+        data: {
+          imageUrl: stored.imageUrl,
+          imageObjectKey: stored.imageObjectKey,
+          filename,
+          sizeBytes: stored.sizeBytes,
+          width: stored.width,
+          height: stored.height,
+          createdByUserId: this.owner.currentActor()?.userId ?? null,
+        },
+      });
+    } catch (err) {
+      // The DB write failed after the upload -> delete the just-uploaded object so it isn't orphaned
+      // (mirrors the cover-upload compensating cleanup in BlogService.setCover).
+      await this.images.delete(stored.imageObjectKey);
+      throw err;
+    }
     return toMediaView(row);
   }
 
