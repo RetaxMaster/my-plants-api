@@ -63,6 +63,20 @@ describe('ImageUploadService.upload', () => {
       .rejects.toMatchObject({ code: 'image_decode_failed' });
   });
 
+  it('rejects a truncated image whose header decodes but body fails to re-encode with image_decode_failed', async () => {
+    // A real 200x200 PNG cut to 100 bytes: metadata() parses the IHDR (format=png) but the pixel
+    // data (IDAT) is incomplete, so the resize/encode pipeline rejects. This must map to the typed
+    // image_decode_failed (422), never a raw 500 — the re-encode step is inside its own try/catch.
+    const png = await sharp({ create: { width: 200, height: 200, channels: 3, background: { r: 10, g: 120, b: 40 } } }).png().toBuffer();
+    const truncated = png.subarray(0, 100);
+    const { s3 } = fakeS3();
+    const svc = new ImageUploadService(CONFIGURED, { s3, PutObjectCommand, DeleteObjectCommand });
+    await expect(svc.upload({ buffer: truncated, keyPrefix: 'x' }))
+      .rejects.toMatchObject({ code: 'image_decode_failed' });
+    // The upload must be rejected before any PutObject is attempted (no orphaned object).
+    expect(s3.send).not.toHaveBeenCalled();
+  });
+
   it('rejects a non-allowlisted still format (GIF) with image_unsupported_format', async () => {
     const svc = new ImageUploadService(CONFIGURED, { s3: fakeS3().s3 });
     await expect(svc.upload({ buffer: STILL_GIF, keyPrefix: 'x' }))

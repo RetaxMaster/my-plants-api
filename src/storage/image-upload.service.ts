@@ -107,11 +107,20 @@ export class ImageUploadService {
       throw new ImageUploadError('image_animated', 'unsupported image: animated/multi-page not allowed');
     }
 
-    const out = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
-      .rotate() // bake EXIF orientation into pixels; EXIF is then dropped on re-encode
-      .resize({ width: MAX_BOX, height: MAX_BOX, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: WEBP_QUALITY })
-      .toBuffer();
+    // Re-encode can still reject even after metadata() succeeded: a truncated/corrupt body (e.g. a
+    // JPEG/PNG whose header parses but whose pixel data is incomplete) fails during the actual decode
+    // inside this pipeline. That rejection must NOT escape as a raw 500 — it is a known-bad image, so
+    // map it to the same typed image_decode_failed → 422 contract as a metadata() failure (spec §4.2).
+    let out: Buffer;
+    try {
+      out = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+        .rotate() // bake EXIF orientation into pixels; EXIF is then dropped on re-encode
+        .resize({ width: MAX_BOX, height: MAX_BOX, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: WEBP_QUALITY })
+        .toBuffer();
+    } catch {
+      throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode/re-encode');
+    }
 
     // Immutable random-UUID key (NOT content-addressed). Always `.webp`.
     const key = `${input.keyPrefix.replace(/\/$/, '')}/${randomUUID()}.webp`;
