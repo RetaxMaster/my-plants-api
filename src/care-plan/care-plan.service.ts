@@ -4,7 +4,7 @@ import type { Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
 import { effectiveConditions, humidityBand, type EffectiveConditions } from '../engines/indoor-climate.js';
-import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue } from '../engines/scheduling.js';
+import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue, computeProgressDue } from '../engines/scheduling.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
@@ -19,7 +19,7 @@ export class CarePlanService {
   async recomputePlant(plantId: string): Promise<void> {
     const plant = await this.prisma.plant.findUniqueOrThrow({
       where: { id: plantId },
-      include: { species: true, place: { include: { city: true } }, adjustments: true, overrides: true },
+      include: { species: true, place: { include: { city: true } }, adjustments: true, overrides: true, frequencies: true },
     });
     const record = parseSpeciesRecord(plant.species.record);
     const { place } = plant;
@@ -57,13 +57,17 @@ export class CarePlanService {
       const anchor = lastDone?.occurredOn ?? plant.acquiredOn;
       const adjustment = plant.adjustments.find((a) => a.task === task)?.multiplier ?? 1;
 
+      // PlantTaskFrequency override — replaces the species base interval at this seam. The ROTATE/
+      // CLEAN_LEAVES skip/clear checks already `continue` above, so an override on a skipped optional
+      // task never reaches here (it stays inert — spec §4.5). It tunes how often, never whether.
+      const frequencyDays = plant.frequencies.find((f) => f.task === task)?.intervalDays;
       const due = this.dueForTask(task, record, {
         effective,
         placeLightRank: placeLightRank(place.lightType),
         season,
         anchor,
         adjustment,
-      });
+      }, frequencyDays);
       await this.upsertDue(plantId, task, due);
     }
 
@@ -78,16 +82,43 @@ export class CarePlanService {
           orderBy: { occurredOn: 'desc' },
         }))?.occurredOn ?? plant.acquiredOn;
       const mistAdjustment = plant.adjustments.find((a) => a.task === 'MIST')?.multiplier ?? 1;
-      const mistDue = computeMistingDue({
+      const band = humidityBand(effective.humidityPct);
+      // Species-based decision FIRST: null here means misting is skipped for this plant/place, so any
+      // MIST frequency override is inert (it tunes how often, never whether).
+      const speciesMistDue = computeMistingDue({
         benefit: record.misting.benefit,
         baseFrequencyDays: record.misting.baseFrequencyDays,
-        band: humidityBand(effective.humidityPct),
+        band,
         adjustment: mistAdjustment,
         anchor: mistAnchor,
       });
-      if (mistDue === null) await this.clearDue(plantId, 'MIST');
-      else await this.upsertDue(plantId, 'MIST', mistDue);
+      if (speciesMistDue === null) {
+        await this.clearDue(plantId, 'MIST');
+      } else {
+        const mistFreq = plant.frequencies.find((f) => f.task === 'MIST')?.intervalDays;
+        const mistDue = mistFreq
+          ? computeMistingDue({
+              benefit: record.misting.benefit,
+              baseFrequencyDays: mistFreq, // substitute only once the task is known to be active
+              band,
+              adjustment: mistAdjustment,
+              anchor: mistAnchor,
+            })
+          : speciesMistDue;
+        await this.upsertDue(plantId, 'MIST', mistDue ?? speciesMistDue);
+      }
     }
+
+    // Progress (seventh cycle): fixed weekly Monday cadence. ALWAYS present — never skipped, never
+    // species-gated. Deliberately does NOT read overrides, adjustments, modulators, or the frequency
+    // seam above (its cadence is a plain rule; a stray Postpone must never pin it). Anchor = last DONE
+    // PROGRESS occurredOn, else acquiredOn (same anchor rule as every other task).
+    const progressAnchor =
+      (await this.prisma.careEvent.findFirst({
+        where: { plantId, task: 'PROGRESS', type: 'DONE' },
+        orderBy: { occurredOn: 'desc' },
+      }))?.occurredOn ?? plant.acquiredOn;
+    await this.upsertDue(plantId, 'PROGRESS', computeProgressDue(progressAnchor));
   }
 
   private dueForTask(
@@ -100,10 +131,11 @@ export class CarePlanService {
       anchor: Date;
       adjustment: number;
     },
+    frequencyDays?: number, // PlantTaskFrequency override — replaces the species base interval
   ): Date {
     if (task === 'WATER') {
       return computeNextDue({
-        baseIntervalDays: record.watering.baseIntervalDays,
+        baseIntervalDays: frequencyDays ?? record.watering.baseIntervalDays,
         droughtTolerance: record.watering.droughtTolerance,
         temperatureSensitivity: record.watering.temperatureSensitivity,
         lightSensitivity: record.watering.lightSensitivity,
@@ -123,7 +155,7 @@ export class CarePlanService {
     }
     if (task === 'FERTILIZE') {
       return computeFertilizingDue({
-        inSeasonFrequencyDays: record.fertilizing.inSeasonFrequencyDays,
+        inSeasonFrequencyDays: frequencyDays ?? record.fertilizing.inSeasonFrequencyDays,
         adjustment: ctx.adjustment,
         anchor: ctx.anchor,
         season: ctx.season,
@@ -131,13 +163,14 @@ export class CarePlanService {
         reduceInDormancy: record.fertilizing.reduceInDormancy,
       });
     }
-    // REPOT / ROTATE / CLEAN_LEAVES: pure cadence.
+    // REPOT / ROTATE / CLEAN_LEAVES: pure cadence. The override replaces the species cadenceDays.
     const cadenceDays =
-      task === 'REPOT'
+      frequencyDays ??
+      (task === 'REPOT'
         ? record.repotting.typicalIntervalMonths * 30
         : task === 'ROTATE'
           ? (record.maintenance.rotationDays as number)
-          : (record.maintenance.leafCleaningDays as number);
+          : (record.maintenance.leafCleaningDays as number));
     return computeCadenceDue({ cadenceDays, adjustment: ctx.adjustment, anchor: ctx.anchor });
   }
 
