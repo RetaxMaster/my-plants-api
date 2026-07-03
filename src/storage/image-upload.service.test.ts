@@ -53,6 +53,11 @@ describe('ImageUploadService.upload', () => {
     expect(out.imageObjectKey).toMatch(/^plants\/p1\/progress\/[0-9a-f-]{36}\.webp$/);
     // Trailing slash on R2_PUBLIC_BASE_URL is trimmed; the key is appended once.
     expect(out.imageUrl).toBe(`https://cdn.example.com/${out.imageObjectKey}`);
+    // Additive return fields: exact stored byte length + post-resize dimensions (no second decode).
+    expect(out.sizeBytes).toBeGreaterThan(0);
+    expect(out.sizeBytes).toBe((calls[0].input.Body as Buffer).length);
+    expect(out.width).toBe(4); // 4x4 source, withoutEnlargement -> unchanged
+    expect(out.height).toBe(4);
     // The uploaded body is a real WebP (re-encoded, not the original PNG bytes).
     expect((await sharp(calls[0].input.Body as Buffer).metadata()).format).toBe('webp');
   });

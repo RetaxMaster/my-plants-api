@@ -20,6 +20,9 @@ type SharpMetadata = Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
 export interface StoredImage {
   imageUrl: string;
   imageObjectKey: string;
+  sizeBytes: number; // exact byte length of the stored (compressed webp) buffer
+  width: number;     // post-resize width
+  height: number;    // post-resize height
 }
 
 // Narrow structural type for the only S3 capability we use: `send`. We do NOT use
@@ -110,12 +113,21 @@ export class ImageUploadService {
     // inside this pipeline. That rejection must NOT escape as a raw 500 — it is a known-bad image, so
     // map it to the same typed image_decode_failed → 422 contract as a metadata() failure (spec §4.2).
     let out: Buffer;
+    let outWidth: number;
+    let outHeight: number;
+    let outSize: number;
     try {
-      out = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+      // resolveWithObject gives us the encoded buffer AND its info (byte size + post-resize
+      // dimensions) from the SAME pass — no second decode, no forked resize.
+      const { data, info } = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
         .rotate() // bake EXIF orientation into pixels; EXIF is then dropped on re-encode
         .resize({ width: MAX_BOX, height: MAX_BOX, fit: 'inside', withoutEnlargement: true })
         .webp({ quality: WEBP_QUALITY })
-        .toBuffer();
+        .toBuffer({ resolveWithObject: true });
+      out = data;
+      outWidth = info.width;
+      outHeight = info.height;
+      outSize = info.size;
     } catch {
       throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode/re-encode');
     }
@@ -134,7 +146,13 @@ export class ImageUploadService {
     );
 
     const base = this.env.R2_PUBLIC_BASE_URL.replace(/\/$/, '');
-    return { imageUrl: `${base}/${key}`, imageObjectKey: key };
+    return {
+      imageUrl: `${base}/${key}`,
+      imageObjectKey: key,
+      sizeBytes: outSize,
+      width: outWidth,
+      height: outHeight,
+    };
   }
 
   // Best-effort delete used when an owning row is removed/replaced. No-op on an empty key; never
