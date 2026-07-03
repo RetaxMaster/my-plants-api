@@ -32,3 +32,20 @@ export function startOfTomorrowUtc(timeZone: string, now: Date = new Date()): Da
 export function dayDiff(a: Date, b: Date): number {
   return Math.round((a.getTime() - b.getTime()) / 86_400_000);
 }
+
+// Parse a YYYY-MM-DD (a journal/care date) into the UTC-midnight Date that a @db.Date column stores.
+// Binds a NATIVE Date — never an ISO/toISOString string (the MariaDB date rule). The ORM stringifies
+// this in the connection timezone; UTC-midnight keeps DATE granularity stable.
+export function ymdToUtcDate(ymd: string): Date {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+// Render a @db.Date (UTC-midnight) as YYYY-MM-DD from its UTC calendar parts. Single source: reused
+// by plants + progress responses (no per-service fork).
+export function ymdFromUtcDate(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}

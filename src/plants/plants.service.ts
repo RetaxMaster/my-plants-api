@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { WeatherService } from '../weather/weather.service.js';
 import { buildViability, type ViabilityResult } from '../engines/viability.js';
-import { startOfTodayUtc } from '../common/time/local-date.js';
+import { startOfTodayUtc, ymdFromUtcDate } from '../common/time/local-date.js';
 import { careTaskStatus, type CareStatus } from './plant-care.js';
 import type { Task } from '@prisma/client';
 import type { CreatePlantDto } from './create-plant.dto.js';
@@ -84,7 +84,7 @@ export class PlantsService {
       const { daysUntilDue, status } = careTaskStatus(d.nextDueOn, startOfToday);
       return {
         task: d.task,
-        nextDueOn: formatYmd(d.nextDueOn),
+        nextDueOn: ymdFromUtcDate(d.nextDueOn),
         daysUntilDue,
         status,
       };
@@ -184,12 +184,4 @@ export class PlantsService {
       weather ? { tempC: weather.tempC, humidityPct: weather.humidityPct, seasonalLowC: weather.seasonalLowC, seasonalHighC: weather.seasonalHighC } : null,
     );
   }
-}
-
-// Render a @db.Date (UTC-midnight) as YYYY-MM-DD from its UTC calendar parts.
-function formatYmd(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
 }
