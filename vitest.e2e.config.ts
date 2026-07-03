@@ -10,6 +10,11 @@ export default defineConfig({
     include: ['test/**/*.e2e-spec.ts'],
     globals: true,
     hookTimeout: 30000,
+    // Boot the full app ONE file at a time. Each e2e file boots its own AppModule, whose startup
+    // recompute (onApplicationBootstrap → recomputeAll) writes shared rows (e.g. due_caches). Two
+    // boots in parallel race on those writes and MariaDB rejects one (error 1020, "record has
+    // changed since last read"). Production boots a single app, so serial files mirror reality.
+    fileParallelism: false,
     // Keep the full-app boot hermetic: satisfy the required engine vars with dummies and keep the
     // realtime engine inert (no port binding, no claude spawn) during e2e. Vitest sets these before
     // load-env-file runs, and dotenv does not override already-set vars.
