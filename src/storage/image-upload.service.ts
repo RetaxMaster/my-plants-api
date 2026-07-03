@@ -11,6 +11,12 @@ const WEBP_QUALITY = 82;
 const MAX_INPUT_PIXELS = 24_000_000; // 24 MP decompression-bomb guard.
 const ALLOWED_FORMATS = ['jpeg', 'png', 'webp'] as const;
 
+// `sharp` uses `export = sharp` with `Metadata` living in the `sharp` namespace. Under the API's
+// strict `tsc` build the default-imported binding is a value, so `sharp.Metadata` as a type resolves
+// to TS2503 ("Cannot find namespace 'sharp'"). Deriving the type from `.metadata()`'s return keeps
+// it namespace-free and correct across sharp versions.
+type SharpMetadata = Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
+
 export interface StoredImage {
   imageUrl: string;
   imageObjectKey: string;
@@ -88,7 +94,7 @@ export class ImageUploadService {
     this.assertConfigured();
 
     // Never trust the client-declared MIME: decode and inspect the REAL metadata.
-    let meta: sharp.Metadata;
+    let meta: SharpMetadata;
     try {
       meta = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
     } catch {

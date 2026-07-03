@@ -15,6 +15,7 @@ import { FeedbackModule } from './feedback/feedback.module.js';
 import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
+import { ImageUploadModule } from './storage/image-upload.module.js';
 import { AuthModule } from './auth/auth.module.js';
 
 @Module({
@@ -37,6 +38,7 @@ import { AuthModule } from './auth/auth.module.js';
     MovingModule,
     NotificationsModule,
     StartupModule,
+    ImageUploadModule,
     AuthModule,
   ],
 })
