@@ -108,6 +108,16 @@ describe('KnowledgeChatService.createSession', () => {
     expect(r.status).toBe('FAILED');
     expect(r.activeKey).toBeNull(); // slot freed so the session isn't permanently blocked
   });
+
+  it('also frees the slot when a PRE-/execute step fails (e.g. ticket mint throws) — never stuck QUEUED', async () => {
+    const { svc, run, tickets, engine, runs } = setup();
+    tickets.mint.mockRejectedValueOnce(new Error('mint failed'));
+    await expect(run(() => svc.createSession('boom'))).rejects.toThrow();
+    const r = [...runs.values()][0];
+    expect(r.status).toBe('FAILED');
+    expect(r.activeKey).toBeNull();
+    expect(engine.execute).not.toHaveBeenCalled(); // failed before ever reaching /execute
+  });
 });
 
 describe('KnowledgeChatService.resume', () => {

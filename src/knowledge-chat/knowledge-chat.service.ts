@@ -139,21 +139,24 @@ export class KnowledgeChatService {
   // the run FAILED immediately AND clear activeKey (never leave it stuck QUEUED / holding the slot).
   private async launch(runId: string, prompt: string, resumeSessionId: string | null): Promise<string> {
     const logPath = this.logPath(runId);
-    // Own the write precondition: ensure the host-owned log dir exists (idempotent). The engine's
-    // onModuleInit also creates it, but the service must not depend on that lifecycle running first.
-    await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
-    await writeFile(logPath, ''); // host creates/truncates; claude fills it via the engine's redirect
-    const ticket = await this.tickets.mint(runId);
+    // The ENTIRE launch is guarded: any failure — log-dir mkdir, file truncate, ticket mint, or the
+    // /execute call — must mark the run FAILED and clear activeKey, so a launch error never leaves the
+    // run stuck QUEUED holding the session's single-active slot (which would 409 resume/delete until
+    // the stale window elapses). Own the write precondition too: ensure the host-owned log dir exists
+    // (idempotent) rather than depend on the engine's onModuleInit having run first.
     try {
+      await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
+      await writeFile(logPath, ''); // host creates/truncates; claude fills it via the engine's redirect
+      const ticket = await this.tickets.mint(runId);
       await this.engine.execute({ runId, prompt, logPath, resumeSessionId });
+      return ticket;
     } catch (err) {
       await this.prisma.knowledgeChatRun.updateMany({
         where: { id: runId, status: { in: [...ACTIVE] } },
-        data: { status: 'FAILED', finishedAt: new Date(), error: `Engine execute failed: ${(err as Error).message}`, activeKey: null },
+        data: { status: 'FAILED', finishedAt: new Date(), error: `Launch failed: ${(err as Error).message}`, activeKey: null },
       });
       throw err;
     }
-    return ticket;
   }
 
   async deleteSession(id: string): Promise<{ ok: true }> {
