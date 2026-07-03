@@ -14,12 +14,20 @@ enum Task {
   ROTATE
   CLEAN_LEAVES
   MIST
+  PROGRESS
 }
 
 enum CareEventType {
   DONE
   POSTPONED
   SYMPTOM
+}
+
+enum ProgressHealth {
+  SICK      // "Enferma"
+  POOR      // "Mal"
+  GOOD      // "Buena"
+  EXCELLENT // "Excelente"
 }
 
 enum LightType {
@@ -128,10 +136,12 @@ model Plant {
   acquiredOn  DateTime @db.Date @map("acquired_on")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  events      CareEvent[]
-  adjustments PlantTaskAdjustment[]
-  overrides   TaskOverride[]
-  dueCache    DueCache[]
+  events          CareEvent[]
+  adjustments     PlantTaskAdjustment[]
+  overrides       TaskOverride[]
+  dueCache        DueCache[]
+  progressEntries PlantProgressEntry[]
+  frequencies     PlantTaskFrequency[]
 
   @@index([ownerId])
   @@index([placeId])
@@ -185,6 +195,48 @@ model DueCache {
 
   @@unique([plantId, task])
   @@map("due_caches")
+}
+
+model PlantProgressEntry {
+  id           String         @id @default(cuid())
+  plantId      String         @map("plant_id")
+  plant        Plant          @relation(fields: [plantId], references: [id])
+  occurredOn   DateTime       @db.Date @map("occurred_on") // the journal date (can backdate)
+  health       ProgressHealth
+  observations String?        @db.Text
+  sizeCm       Int?           @map("size_cm")
+  tags         Json?          // string[] of catalog keys (validated at the DTO/service, Phase 3)
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  photos       PlantProgressPhoto[]
+
+  @@index([plantId, occurredOn])
+  @@map("plant_progress_entries")
+}
+
+model PlantProgressPhoto {
+  id             String             @id @default(cuid())
+  entryId        String             @map("entry_id")
+  entry          PlantProgressEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  imageUrl       String             @map("image_url")
+  imageObjectKey String             @map("image_object_key") // R2 key, persisted for later deletion
+  sortOrder      Int                @default(0) @map("sort_order")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  @@index([entryId])
+  @@map("plant_progress_photos")
+}
+
+model PlantTaskFrequency {
+  id           String   @id @default(cuid())
+  plantId      String   @map("plant_id")
+  plant        Plant    @relation(fields: [plantId], references: [id])
+  task         Task
+  intervalDays Int      @map("interval_days") // explicit base interval, replaces the species value
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([plantId, task])
+  @@map("plant_task_frequencies")
 }
 
 model ScheduledMove {
