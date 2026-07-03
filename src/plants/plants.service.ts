@@ -118,6 +118,12 @@ export class PlantsService {
   }
 
   async create(dto: CreatePlantDto) {
+    // Defense in depth: PROGRESS is written only by ProgressService (the DTO already rejects it in
+    // lastDone). Never seed a DONE PROGRESS CareEvent from plant creation.
+    if (dto.lastDone?.some((e) => e.task === 'PROGRESS')) {
+      throw new BadRequestException('PROGRESS cannot be a lastDone entry');
+    }
+
     // Create: stamp the acting actor's ownerId and validate the parent place belongs to that same
     // owner (NOT ownerFilter — even an ADMIN creates a plant under their own owner).
     const ownerId = this.owner.currentOwnerId();
