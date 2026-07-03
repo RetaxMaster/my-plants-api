@@ -126,3 +126,16 @@ export function computeMistingDue(i: MistingInput): Date | null {
   if (factor === null) return null;
   return addDays(i.anchor, Math.round(i.baseFrequencyDays * i.adjustment * factor));
 }
+
+// Progress is due every Monday: the next Monday STRICTLY AFTER the anchor date. Pure DATE arithmetic
+// in UTC (matching @db.Date storage), so there is no timezone off-by-one. Anchor = the last DONE
+// PROGRESS occurredOn, else the plant's acquiredOn (resolved by the caller). No weather/season/place
+// inputs — Progress is a fixed weekly cadence, independent of species/place/climate.
+export function computeProgressDue(anchor: Date): Date {
+  const due = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate()));
+  // getUTCDay(): Sun=0, Mon=1 … Days until the next Monday: ((1 - dow + 7) % 7). If the anchor is
+  // itself a Monday that yields 0, so push a full week to keep it STRICTLY after the anchor.
+  const add = (1 - due.getUTCDay() + 7) % 7 || 7;
+  due.setUTCDate(due.getUTCDate() + add);
+  return due;
+}
