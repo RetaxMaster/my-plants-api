@@ -21,6 +21,7 @@ import { ImageUploadModule } from './storage/image-upload.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { KnowledgeChatModule } from './knowledge-chat/knowledge-chat.module.js';
 import { BlogModule } from './blog/blog.module.js';
+import { MediaModule } from './media/media.module.js';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { BlogModule } from './blog/blog.module.js';
     AuthModule,
     KnowledgeChatModule,
     BlogModule,
+    MediaModule,
   ],
 })
 export class AppModule {}
