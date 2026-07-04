@@ -36,6 +36,9 @@ export class CreateBlogpostDto {
   @IsOptional() @IsString() @MinLength(1)
   coverImageObjectKey?: string | null;
 
+  @IsOptional() @IsString() @MinLength(1)
+  coverImagePrompt?: string | null;
+
   @IsOptional() @IsUrl()
   youtubeUrl?: string | null;
 
