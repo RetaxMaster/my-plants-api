@@ -18,4 +18,12 @@ describe('blogpost prisma client surface', () => {
     expect(fields).not.toContain('briefEn');
     expect(fields).toContain('blogpost'); // 1:1 back-relation
   });
+
+  it('exposes the coverImagePrompt field on Blogpost (mapped to cover_image_prompt)', () => {
+    const blogpost = Prisma.dmmf.datamodel.models.find((m) => m.name === 'Blogpost')!;
+    const field = blogpost.fields.find((f) => f.name === 'coverImagePrompt');
+    expect(field).toBeDefined();
+    expect(field!.dbName).toBe('cover_image_prompt');
+    expect(field!.isRequired).toBe(false); // nullable
+  });
 });

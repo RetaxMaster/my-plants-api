@@ -137,6 +137,7 @@ model Blogpost {
 
   coverImageUrl       String?   @map("cover_image_url")
   coverImageObjectKey String?   @map("cover_image_object_key") // R2 key, kept for later deletion
+  coverImagePrompt    String?   @db.Text @map("cover_image_prompt") // OG/cover generation prompt (engine-authored, admin-only)
   youtubeUrl          String?   @map("youtube_url")
   ctaLink             String?   @map("cta_link")
   ctaLabelEs          String?   @map("cta_label_es")
