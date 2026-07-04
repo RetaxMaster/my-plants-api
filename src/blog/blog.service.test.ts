@@ -17,6 +17,12 @@ function makeService(overrides: Record<string, unknown> = {}) {
         store.delete(where.slug);
         return {};
       }),
+      update: vi.fn(async ({ where, data }: { where: { slug: string }; data: Record<string, unknown> }) => {
+        const cur = store.get(where.slug) ?? {};
+        const next = { ...cur, ...data };
+        store.set(where.slug, next);
+        return next;
+      }),
       ...(overrides.blogpost ?? {}),
     },
   } as unknown as ConstructorParameters<typeof BlogService>[0];
@@ -65,6 +71,38 @@ describe('BlogService.create', () => {
     await service.create({ ...base }, 'admin-1');
     const second = await service.create({ ...base }, 'admin-1');
     expect(second.slug).toBe('como-cuidar-tu-pothos-2');
+  });
+});
+
+describe('BlogService.create — coverImagePrompt', () => {
+  it('writes coverImagePrompt when provided', async () => {
+    const { service } = makeService();
+    const post = await service.create({ ...base, coverImagePrompt: 'a cover prompt' }, 'admin-1');
+    expect(post.coverImagePrompt).toBe('a cover prompt');
+  });
+
+  it('defaults coverImagePrompt to null when omitted', async () => {
+    const { service } = makeService();
+    const post = await service.create({ ...base }, 'admin-1');
+    expect(post.coverImagePrompt).toBeNull();
+  });
+});
+
+describe('BlogService.update — coverImagePrompt', () => {
+  it('updates coverImagePrompt when defined and clears it when null', async () => {
+    const { service, store } = makeService();
+    store.set('free-1', { slug: 'free-1', speciesSlug: null, coverImagePrompt: 'old', publishedAt: null });
+    const updated = await service.update('free-1', { coverImagePrompt: 'new' });
+    expect(updated.coverImagePrompt).toBe('new');
+    const cleared = await service.update('free-1', { coverImagePrompt: null });
+    expect(cleared.coverImagePrompt).toBeNull();
+  });
+
+  it('leaves coverImagePrompt unchanged when the key is omitted (write-when-defined)', async () => {
+    const { service, store } = makeService();
+    store.set('free-1', { slug: 'free-1', speciesSlug: null, coverImagePrompt: 'keep', publishedAt: null });
+    const updated = await service.update('free-1', { titleEs: 'renamed' });
+    expect(updated.coverImagePrompt).toBe('keep');
   });
 });
 

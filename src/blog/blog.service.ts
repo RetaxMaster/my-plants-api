@@ -125,6 +125,7 @@ export class BlogService {
         bodyEn: dto.bodyEn ?? null,
         coverImageUrl: dto.coverImageUrl ?? null,
         coverImageObjectKey: dto.coverImageObjectKey ?? null,
+        coverImagePrompt: dto.coverImagePrompt ?? null,
         youtubeUrl: dto.youtubeUrl ?? null,
         ctaLink: dto.ctaLink ?? null,
         ctaLabelEs: dto.ctaLabelEs ?? null,
@@ -149,7 +150,7 @@ export class BlogService {
     const data: Record<string, unknown> = {};
     const editable = [
       'titleEs', 'titleEn', 'excerptEs', 'excerptEn', 'bodyEs', 'bodyEn',
-      'coverImageUrl', 'coverImageObjectKey', 'youtubeUrl', 'ctaLink', 'ctaLabelEs', 'ctaLabelEn',
+      'coverImageUrl', 'coverImageObjectKey', 'coverImagePrompt', 'youtubeUrl', 'ctaLink', 'ctaLabelEs', 'ctaLabelEn',
     ] as const;
     for (const field of editable) {
       if (dto[field] !== undefined) data[field] = dto[field];
