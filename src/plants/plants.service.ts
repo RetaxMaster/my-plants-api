@@ -50,7 +50,46 @@ export class PlantsService {
       include: { species: true },
     });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
-    return this.withNames(plant);
+
+    // Care-basis reads (all owner-safe: the plant is already owner-scoped above). latestProgress and
+    // heightCm are SEPARATE reads — heightCm filters to entries WITH a size and takes the most recent of
+    // THOSE, so a later note-only entry never blanks a real height. All three share the canonical
+    // occurredOn desc, createdAt desc tiebreak.
+    const [profileRow, latest, latestSized, lastRepot] = await Promise.all([
+      this.prisma.plantProfile.findUnique({ where: { plantId: id } }),
+      this.prisma.plantProgressEntry.findFirst({
+        where: { plantId: id },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        select: { id: true, occurredOn: true, health: true, observations: true },
+      }),
+      this.prisma.plantProgressEntry.findFirst({
+        where: { plantId: id, sizeCm: { not: null } },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        select: { sizeCm: true },
+      }),
+      this.prisma.careEvent.findFirst({
+        where: { plantId: id, task: 'REPOT', type: 'DONE' },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        select: { occurredOn: true },
+      }),
+    ]);
+
+    return {
+      ...this.withNames(plant),
+      profile: this.toProfileView(profileRow),
+      latestProgress: latest
+        ? {
+            entryId: latest.id,
+            occurredOn: ymdFromUtcDate(latest.occurredOn),
+            health: latest.health,
+            observations: latest.observations,
+          }
+        : null,
+      derived: {
+        heightCm: latestSized?.sizeCm ?? null,
+        lastRepottedOn: lastRepot ? ymdFromUtcDate(lastRepot.occurredOn) : null,
+      },
+    };
   }
 
   // Read model for the plant page (spec A.5 / C.2). Phase A returns { plantId, tasks }; Phase C will
@@ -231,6 +270,40 @@ export class PlantsService {
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
     const row = await this.prisma.plantProfile.findUnique({ where: { plantId: id } });
     return this.toProfileView(row);
+  }
+
+  // GET /plants/:id/photos — every PlantProgressPhoto for the plant, flattened newest-first. A new READ
+  // over existing rows (no new photo storage). Entries are ordered occurredOn desc, createdAt desc; the
+  // photos within an entry keep their sortOrder asc. Each item carries the owning entryId so the web can
+  // open that progress entry.
+  async getPhotos(id: string): Promise<
+    { id: string; imageUrl: string; entryId: string; occurredOn: string; sortOrder: number }[]
+  > {
+    const plant = await this.prisma.plant.findFirst({
+      where: { id, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+
+    const entries = await this.prisma.plantProgressEntry.findMany({
+      where: { plantId: id },
+      orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        id: true,
+        occurredOn: true,
+        photos: { orderBy: { sortOrder: 'asc' }, select: { id: true, imageUrl: true, sortOrder: true } },
+      },
+    });
+
+    return entries.flatMap((entry) =>
+      entry.photos.map((photo) => ({
+        id: photo.id,
+        imageUrl: photo.imageUrl,
+        entryId: entry.id,
+        occurredOn: ymdFromUtcDate(entry.occurredOn),
+        sortOrder: photo.sortOrder,
+      })),
+    );
   }
 
   // PATCH /plants/:id/profile — partial merge (absent key = unchanged, explicit null = clear). The body

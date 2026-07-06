@@ -44,6 +44,9 @@ function setup() {
       update: async ({ where, data }: any) => { const p = seed.plants.find((x) => x.id === where.id); Object.assign(p!, data); return p; },
     },
     place: { findFirst: async ({ where }: any) => seed.places.find((p) => matches(p, where)) ?? null },
+    plantProfile: { findUnique: async () => null },
+    plantProgressEntry: { findFirst: async () => null },
+    careEvent: { findFirst: async () => null },
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
   const owner = new OwnerService(cls);

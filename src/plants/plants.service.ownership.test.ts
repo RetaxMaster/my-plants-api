@@ -37,6 +37,9 @@ function makeFakePrisma(seed: { plants: any[]; places: any[]; species: any[] }) 
     },
     place: { findFirst: async ({ where }: any = {}) => seed.places.find((p) => matches(p, where)) ?? null },
     species: { findUnique: async ({ where }: any = {}) => seed.species.find((s) => s.slug === where.slug) ?? null },
+    plantProfile: { findUnique: async () => null },
+    plantProgressEntry: { findFirst: async () => null },
+    careEvent: { findFirst: async () => null },
   } as any;
 }
 

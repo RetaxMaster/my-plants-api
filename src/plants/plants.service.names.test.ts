@@ -34,6 +34,9 @@ function makeService(plants: Array<Record<string, unknown>>) {
       findMany: vi.fn(async () => plants),
       findFirst: vi.fn(async () => plants[0] ?? null),
     },
+    plantProfile: { findUnique: vi.fn(async () => null) },
+    plantProgressEntry: { findFirst: vi.fn(async () => null) },
+    careEvent: { findFirst: vi.fn(async () => null) },
   } as unknown as ConstructorParameters<typeof PlantsService>[0];
   const owner = {
     currentOwnerId: () => 'owner-1',
