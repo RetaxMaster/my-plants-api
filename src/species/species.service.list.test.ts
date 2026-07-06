@@ -4,7 +4,8 @@ import { SpeciesService } from './species.service.js';
 // A complete VALID species record (re-validated by parseSpeciesRecord on read).
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEn: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEs: ['Lengua de suegra'],
   watering: {
     baseIntervalDays: 14,
     soilDrynessBeforeWatering: 'mostly-dry',
@@ -42,7 +43,8 @@ describe('SpeciesService.list', () => {
     expect(s).toEqual({
       slug: 'dracaena-trifasciata',
       scientificName: 'Dracaena trifasciata',
-      commonName: 'Snake plant',
+      commonNameEs: 'Lengua de suegra',
+      commonNameEn: 'Snake plant',
     });
   });
 });

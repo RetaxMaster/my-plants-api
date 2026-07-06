@@ -6,7 +6,8 @@ import { PlantsService } from './plants.service.js';
 // Source of truth for the shape: @retaxmaster/my-plants-species-schema.
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEn: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEs: ['Lengua de suegra', 'Lengua de tigre'],
   watering: {
     baseIntervalDays: 14,
     soilDrynessBeforeWatering: 'mostly-dry',
@@ -62,7 +63,8 @@ describe('PlantsService name enrichment', () => {
     const service = makeService([plantRow]);
     const [p] = await service.list();
     expect(p.speciesScientificName).toBe('Dracaena trifasciata');
-    expect(p.speciesCommonName).toBe('Snake plant');
+    expect(p.speciesCommonNameEn).toBe('Snake plant');
+    expect(p.speciesCommonNameEs).toBe('Lengua de suegra');
     // the raw nested species object is flattened away
     expect((p as Record<string, unknown>).species).toBeUndefined();
   });
@@ -71,6 +73,7 @@ describe('PlantsService name enrichment', () => {
     const service = makeService([plantRow]);
     const p = await service.get('plant-1');
     expect(p.speciesScientificName).toBe('Dracaena trifasciata');
-    expect(p.speciesCommonName).toBe('Snake plant');
+    expect(p.speciesCommonNameEn).toBe('Snake plant');
+    expect(p.speciesCommonNameEs).toBe('Lengua de suegra');
   });
 });

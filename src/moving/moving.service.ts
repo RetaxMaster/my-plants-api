@@ -13,7 +13,8 @@ export interface PlantViability extends ViabilityResult {
   nickname: string | null;
   speciesSlug: string;
   speciesScientificName: string;
-  speciesCommonName: string;
+  speciesCommonNameEs: string | null;
+  speciesCommonNameEn: string | null;
   placeCityName: string;   // the plant's place-city name (for the off-primary warning)
   inPrimaryCity: boolean;  // false → "not in your current city" (drives the UI warning)
 }
@@ -73,7 +74,8 @@ export class MovingService {
         nickname: plant.nickname,
         speciesSlug: plant.speciesSlug,
         speciesScientificName: record.scientificName,
-        speciesCommonName: primaryCommonName(record),
+        speciesCommonNameEs: primaryCommonName(record, 'es'),
+        speciesCommonNameEn: primaryCommonName(record, 'en'),
         placeCityName: plant.place.city.name,
         inPrimaryCity: primary ? plant.place.cityId === primary.id : true,
         ...result,

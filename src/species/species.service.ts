@@ -6,13 +6,19 @@ import { PrismaService } from '../prisma/prisma.service.js';
 export class SpeciesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(): Promise<{ slug: string; scientificName: string; commonName: string }[]> {
+  async list(): Promise<
+    { slug: string; scientificName: string; commonNameEs: string | null; commonNameEn: string | null }[]
+  > {
     const rows = await this.prisma.species.findMany({ select: { slug: true, scientificName: true, record: true } });
-    return rows.map((r) => ({
-      slug: r.slug,
-      scientificName: r.scientificName,
-      commonName: primaryCommonName(parseSpeciesRecord(r.record)),
-    }));
+    return rows.map((r) => {
+      const record = parseSpeciesRecord(r.record);
+      return {
+        slug: r.slug,
+        scientificName: r.scientificName,
+        commonNameEs: primaryCommonName(record, 'es'),
+        commonNameEn: primaryCommonName(record, 'en'),
+      };
+    });
   }
 
   async record(slug: string): Promise<SpeciesRecord> {

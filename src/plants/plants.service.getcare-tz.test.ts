@@ -8,7 +8,7 @@ import { PlantsService } from './plants.service.js';
 // parseSpeciesRecord on the read path).
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant'],
+  commonNamesEn: ['Snake plant'],
   watering: { baseIntervalDays: 14, soilDrynessBeforeWatering: 'mostly-dry', droughtTolerance: 'high', temperatureSensitivity: 'low', lightSensitivity: 'low', reduceInDormancy: true },
   light: { minimum: 'low', ideal: 'bright-indirect', maximum: 'direct' },
   temperature: { survivalMinC: 5, idealMinC: 18, idealMaxC: 27, survivalMaxC: 35 },

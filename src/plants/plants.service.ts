@@ -29,10 +29,12 @@ export class PlantsService {
     T extends { species: { record: unknown; scientificName: string }; coverImageObjectKey?: string | null },
   >(plant: T) {
     const { species, coverImageObjectKey: _internalKey, ...rest } = plant;
+    const record = parseSpeciesRecord(species.record);
     return {
       ...rest,
       speciesScientificName: species.scientificName,
-      speciesCommonName: primaryCommonName(parseSpeciesRecord(species.record)),
+      speciesCommonNameEs: primaryCommonName(record, 'es'),
+      speciesCommonNameEn: primaryCommonName(record, 'en'),
     };
   }
 

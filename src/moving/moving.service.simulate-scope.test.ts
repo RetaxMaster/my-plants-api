@@ -7,7 +7,7 @@ import { MovingService } from './moving.service.js';
 // A complete VALID species record (re-validated by parseSpeciesRecord).
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEn: ['Snake plant', 'Mother-in-law tongue'],
   watering: { baseIntervalDays: 14, soilDrynessBeforeWatering: 'mostly-dry', droughtTolerance: 'high', temperatureSensitivity: 'low', lightSensitivity: 'low', reduceInDormancy: true },
   light: { minimum: 'low', ideal: 'bright-indirect', maximum: 'direct' },
   temperature: { survivalMinC: 5, idealMinC: 18, idealMaxC: 27, survivalMaxC: 35 },

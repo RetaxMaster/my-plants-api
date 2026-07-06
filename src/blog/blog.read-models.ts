@@ -38,7 +38,8 @@ export interface BlogpostCard {
   readingMinutes: number;
   speciesSlug: string | null;
   speciesScientificName: string | null;
-  speciesCommonName: string | null;
+  speciesCommonNameEs: string | null;
+  speciesCommonNameEn: string | null;
   difficulty: string | null;
 }
 
@@ -73,12 +74,15 @@ function difficultyFromSpecies(_species: { record: unknown } | null | undefined)
 
 function speciesNames(species: { scientificName: string; record: unknown } | null | undefined): {
   scientificName: string | null;
-  commonName: string | null;
+  commonNameEs: string | null;
+  commonNameEn: string | null;
 } {
-  if (!species) return { scientificName: null, commonName: null };
+  if (!species) return { scientificName: null, commonNameEs: null, commonNameEn: null };
+  const record = parseSpeciesRecord(species.record);
   return {
     scientificName: species.scientificName,
-    commonName: primaryCommonName(parseSpeciesRecord(species.record)),
+    commonNameEs: primaryCommonName(record, 'es'),
+    commonNameEn: primaryCommonName(record, 'en'),
   };
 }
 
@@ -95,7 +99,8 @@ export function toCard(row: BlogpostRow): BlogpostCard {
     readingMinutes: readingMinutes(row.bodyEs),
     speciesSlug: row.speciesSlug,
     speciesScientificName: names.scientificName,
-    speciesCommonName: names.commonName,
+    speciesCommonNameEs: names.commonNameEs,
+    speciesCommonNameEn: names.commonNameEn,
     difficulty: difficultyFromSpecies(row.species ?? null),
   };
 }

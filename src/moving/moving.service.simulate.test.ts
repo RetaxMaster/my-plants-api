@@ -4,7 +4,8 @@ import { MovingService } from './moving.service.js';
 // A complete VALID species record (re-validated by parseSpeciesRecord).
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEn: ['Snake plant', 'Mother-in-law tongue'],
+  commonNamesEs: ['Lengua de suegra'],
   watering: {
     baseIntervalDays: 14,
     soilDrynessBeforeWatering: 'mostly-dry',
@@ -65,7 +66,8 @@ describe('MovingService.simulate', () => {
     const [r] = await svc.simulate(20.6668, -103.3918);
     expect(r.plantId).toBe('plant-1');
     expect(r.speciesScientificName).toBe('Dracaena trifasciata');
-    expect(r.speciesCommonName).toBe('Snake plant');
+    expect(r.speciesCommonNameEn).toBe('Snake plant');
+    expect(r.speciesCommonNameEs).toBe('Lengua de suegra');
     expect(r.level).toBeDefined();
     expect(Array.isArray(r.reasons)).toBe(true);
   });

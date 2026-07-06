@@ -11,7 +11,7 @@ const d = (ymd: string) => new Date(`${ymd}T00:00:00.000Z`);
 // Do NOT hand-trim this: a partial/miscased record fails Zod .parse and the test throws before asserting.
 const record = {
   scientificName: 'Dracaena trifasciata',
-  commonNames: ['Snake plant'],
+  commonNamesEn: ['Snake plant'],
   watering: { baseIntervalDays: 14, soilDrynessBeforeWatering: 'mostly-dry', droughtTolerance: 'high', temperatureSensitivity: 'low', lightSensitivity: 'low', reduceInDormancy: true },
   light: { minimum: 'low', ideal: 'bright-indirect', maximum: 'direct' },
   temperature: { survivalMinC: 5, idealMinC: 18, idealMaxC: 27, survivalMaxC: 35 },
