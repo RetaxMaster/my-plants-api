@@ -56,7 +56,7 @@ function setup() {
     species: [{ slug: 'dracaena-trifasciata' }],
   };
   const prisma = makeFakePrisma(seed);
-  const svc = new PlantsService(prisma, owner, {} as any, {} as any);
+  const svc = new PlantsService(prisma, owner, {} as any, {} as any, {} as any);
   const run = <T>(a: any, fn: () => Promise<T>) => cls.run(async () => { cls.set('actor', a); return fn(); });
   return { svc, prisma, run };
 }

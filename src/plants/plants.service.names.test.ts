@@ -42,7 +42,7 @@ function makeService(plants: Array<Record<string, unknown>>) {
   } as unknown as ConstructorParameters<typeof PlantsService>[1];
   const carePlan = {} as ConstructorParameters<typeof PlantsService>[2];
   const weather = {} as ConstructorParameters<typeof PlantsService>[3];
-  return new PlantsService(prisma, owner, carePlan, weather);
+  return new PlantsService(prisma, owner, carePlan, weather, {} as any);
 }
 
 const plantRow = {

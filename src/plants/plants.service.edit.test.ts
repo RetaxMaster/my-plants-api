@@ -49,7 +49,7 @@ function setup() {
   const owner = new OwnerService(cls);
   const carePlan = { recomputePlant: async (id: string) => { recomputed.push(id); } } as any;
   const weather = { forCity: async () => ({ tempC: 20, humidityPct: 50, seasonalLowC: 10, seasonalHighC: 30 }) } as any;
-  const svc = new PlantsService(prisma, owner, carePlan, weather);
+  const svc = new PlantsService(prisma, owner, carePlan, weather, {} as any);
   const run = <T>(a: any, fn: () => Promise<T>) => cls.run(async () => { cls.set('actor', a); return fn(); });
   return { svc, run, recomputed, seed };
 }

@@ -4,6 +4,7 @@ import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { WeatherService } from '../weather/weather.service.js';
+import { ImageUploadService } from '../storage/image-upload.service.js';
 import { buildViability, type ViabilityResult } from '../engines/viability.js';
 import { startOfTodayUtc, ymdFromUtcDate } from '../common/time/local-date.js';
 import { careTaskStatus, type CareStatus } from './plant-care.js';
@@ -18,6 +19,7 @@ export class PlantsService {
     private readonly owner: OwnerService,
     private readonly carePlan: CarePlanService,
     private readonly weather: WeatherService,
+    private readonly images: ImageUploadService,
   ) {}
 
   // Flatten the species' human-facing names onto a plant response (single source: primaryCommonName).

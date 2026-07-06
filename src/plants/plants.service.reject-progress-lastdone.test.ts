@@ -37,7 +37,7 @@ describe('PlantsService.create — PROGRESS lastDone guard (defense in depth)', 
     } as any;
     const cls = new ClsService(new AsyncLocalStorage());
     const owner = new OwnerService(cls);
-    const svc = new PlantsService(prisma, owner, { recomputePlant: async () => {} } as any, {} as any);
+    const svc = new PlantsService(prisma, owner, { recomputePlant: async () => {} } as any, {} as any, {} as any);
     await cls.run(async () => {
       cls.set('actor', { userId: 'u', username: 'n', ownerId: 'owner-1', role: 'USER', jti: 'j', exp: 9e9 });
       await expect(

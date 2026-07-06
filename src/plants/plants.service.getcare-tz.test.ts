@@ -35,7 +35,7 @@ const runGetCare = (timezone: string) => {
   const cls = new ClsService(new AsyncLocalStorage());
   const owner = new OwnerService(cls);
   const weather = { forCity: async () => ({ tempC: 20, humidityPct: 50, seasonalLowC: 10, seasonalHighC: 30 }) } as any;
-  const svc = new PlantsService(prisma, owner, {} as any, weather);
+  const svc = new PlantsService(prisma, owner, {} as any, weather, {} as any);
   return cls.run(async () => { cls.set('actor', { userId: 'u', username: 'n', ownerId: 'owner-1', role: 'USER', jti: 'j', exp: 9e9 }); return svc.getCare('p1'); });
 };
 
