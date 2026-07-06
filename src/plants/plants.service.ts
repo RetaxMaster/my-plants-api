@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { parseSpeciesRecord, primaryCommonName } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName, type PlantProfile } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -22,9 +22,13 @@ export class PlantsService {
     private readonly images: ImageUploadService,
   ) {}
 
-  // Flatten the species' human-facing names onto a plant response (single source: primaryCommonName).
-  private withNames<T extends { species: { record: unknown; scientificName: string } }>(plant: T) {
-    const { species, ...rest } = plant;
+  // Flatten the species' human-facing names onto a plant response and drop the internal R2 object key
+  // (coverImageUrl is public; coverImageObjectKey is internal cleanup state). Single source for names:
+  // primaryCommonName.
+  private withNames<
+    T extends { species: { record: unknown; scientificName: string }; coverImageObjectKey?: string | null },
+  >(plant: T) {
+    const { species, coverImageObjectKey: _internalKey, ...rest } = plant;
     return {
       ...rest,
       speciesScientificName: species.scientificName,
@@ -134,7 +138,7 @@ export class PlantsService {
     const species = await this.prisma.species.findUnique({ where: { slug: dto.speciesSlug } });
     if (!species) throw new BadRequestException(`Unknown species: ${dto.speciesSlug}`);
 
-    return this.prisma.plant.create({
+    const created = await this.prisma.plant.create({
       data: {
         ownerId,
         placeId: dto.placeId,
@@ -147,6 +151,10 @@ export class PlantsService {
           : undefined,
       },
     });
+    // Strip the internal R2 object key from the created view (coverImageUrl is public; the object key
+    // is internal cleanup state and must not leak). The web's createPlant only reads `.id`.
+    const { coverImageObjectKey: _omit, ...view } = created;
+    return view;
   }
 
   async update(id: string, dto: UpdatePlantDto) {
@@ -185,5 +193,96 @@ export class PlantsService {
       },
       weather ? { tempC: weather.tempC, humidityPct: weather.humidityPct, seasonalLowC: weather.seasonalLowC, seasonalHighC: weather.seasonalHighC } : null,
     );
+  }
+
+  // Map a plant_profiles row (or its absence) to the 9-field, all-nullable Spec-1 profile shape. The
+  // enum columns store validated slugs, so the string->enum-union cast is sound.
+  private toProfileView(row: {
+    windowDistance: string | null;
+    growLight: boolean | null;
+    potType: string | null;
+    potSizeCm: number | null;
+    hasDrainage: boolean | null;
+    soilMix: string | null;
+    growthHabit: string | null;
+    ageMonths: number | null;
+    nearHeater: boolean | null;
+  } | null): PlantProfile {
+    return {
+      windowDistance: (row?.windowDistance ?? null) as PlantProfile['windowDistance'],
+      growLight: row?.growLight ?? null,
+      potType: (row?.potType ?? null) as PlantProfile['potType'],
+      potSizeCm: row?.potSizeCm ?? null,
+      hasDrainage: row?.hasDrainage ?? null,
+      soilMix: (row?.soilMix ?? null) as PlantProfile['soilMix'],
+      growthHabit: (row?.growthHabit ?? null) as PlantProfile['growthHabit'],
+      ageMonths: row?.ageMonths ?? null,
+      nearHeater: row?.nearHeater ?? null,
+    };
+  }
+
+  // GET /plants/:id/profile — owner-scoped; returns the all-null shape when no row exists yet (never
+  // 404 for a plant the owner owns).
+  async getProfile(id: string): Promise<PlantProfile> {
+    const plant = await this.prisma.plant.findFirst({
+      where: { id, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+    const row = await this.prisma.plantProfile.findUnique({ where: { plantId: id } });
+    return this.toProfileView(row);
+  }
+
+  // PATCH /plants/:id/profile — partial merge (absent key = unchanged, explicit null = clear). The body
+  // is ALREADY validated by ZodValidationPipe(plantProfileUpdateSchema) at the route, so `patch` here
+  // is a trusted, partial, in-vocabulary object.
+  async updateProfile(id: string, patch: Partial<PlantProfile>): Promise<PlantProfile> {
+    const plant = await this.prisma.plant.findFirst({
+      where: { id, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+    const row = await this.prisma.plantProfile.upsert({
+      where: { plantId: id },
+      create: { plantId: id, ...patch },
+      update: { ...patch },
+    });
+    return this.toProfileView(row);
+  }
+
+  // PUT /plants/:id/cover-photo — upload-then-DB, orphan-safe (mirrors blog.service setCover). On a DB
+  // failure the just-uploaded object is deleted; on success the PREVIOUS object is best-effort deleted.
+  // Setting a cover writes NO progress entry (this method never touches PlantProgressEntry).
+  async setCover(id: string, file: Express.Multer.File | undefined) {
+    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+    if (!file) throw new BadRequestException('a photo file (field "photo") is required');
+
+    const stored = await this.images.upload({ buffer: file.buffer, keyPrefix: `plants/${id}/cover` });
+    try {
+      await this.prisma.plant.update({
+        where: { id },
+        data: { coverImageUrl: stored.imageUrl, coverImageObjectKey: stored.imageObjectKey },
+      });
+    } catch (err) {
+      await this.images.delete(stored.imageObjectKey); // DB write failed -> don't orphan the object
+      throw err;
+    }
+    await this.images.delete(plant.coverImageObjectKey); // best-effort: remove the replaced object
+    return this.get(id);
+  }
+
+  // DELETE /plants/:id/cover-photo — clears both columns + best-effort deletes the object. Idempotent.
+  async deleteCover(id: string) {
+    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
+    if (plant.coverImageUrl || plant.coverImageObjectKey) {
+      await this.prisma.plant.update({
+        where: { id },
+        data: { coverImageUrl: null, coverImageObjectKey: null },
+      });
+      await this.images.delete(plant.coverImageObjectKey);
+    }
+    return this.get(id);
   }
 }
