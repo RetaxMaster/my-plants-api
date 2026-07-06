@@ -46,6 +46,11 @@ export class PlantsController {
     return this.plants.getProfile(id);
   }
 
+  @Get(':id/photos')
+  getPhotos(@Param('id') id: string) {
+    return this.plants.getPhotos(id);
+  }
+
   @Patch(':id/profile')
   updateProfile(
     @Param('id') id: string,
