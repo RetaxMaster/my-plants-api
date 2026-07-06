@@ -24,9 +24,9 @@ enum CareEventType {
 }
 
 enum ProgressHealth {
-  SICK      // "Enferma"
-  POOR      // "Mal"
-  GOOD      // "Buena"
+  SICK // "Enferma"
+  POOR // "Mal"
+  GOOD // "Buena"
   EXCELLENT // "Excelente"
 }
 
@@ -56,12 +56,14 @@ model User {
   ownerId      String   @unique @map("owner_id")
   owner        Owner    @relation(fields: [ownerId], references: [id])
   createdAt    DateTime @default(now()) @map("created_at")
+
   @@map("users")
 }
 
 model RevokedToken {
   jti       String   @id
   expiresAt DateTime @map("expires_at")
+
   @@index([expiresAt])
   @@map("revoked_tokens")
 }
@@ -93,18 +95,18 @@ model City {
 }
 
 model Place {
-  id                String            @id @default(cuid())
-  ownerId           String            @map("owner_id")
-  owner             Owner             @relation(fields: [ownerId], references: [id])
-  cityId            String            @map("city_id")
-  city              City              @relation(fields: [cityId], references: [id])
+  id                String             @id @default(cuid())
+  ownerId           String             @map("owner_id")
+  owner             Owner              @relation(fields: [ownerId], references: [id])
+  cityId            String             @map("city_id")
+  city              City               @relation(fields: [cityId], references: [id])
   name              String
   indoor            Boolean
-  lightType         LightType         @map("light_type")
-  climateControlled Boolean           @default(false) @map("climate_controlled")
+  lightType         LightType          @map("light_type")
+  climateControlled Boolean            @default(false) @map("climate_controlled")
   humidityCharacter HumidityCharacter? @map("humidity_character")
-  indoorTempMinC    Float?            @map("indoor_temp_min_c")
-  indoorTempMaxC    Float?            @map("indoor_temp_max_c")
+  indoorTempMinC    Float?             @map("indoor_temp_min_c")
+  indoorTempMaxC    Float?             @map("indoor_temp_max_c")
   plants            Plant[]
 
   @@index([ownerId])
@@ -123,30 +125,30 @@ model Species {
 }
 
 model Blogpost {
-  slug                String    @id                          // == speciesSlug for species guides; derived from titleEs for free-form
-  status              Int       @default(0)                   // 0 = DRAFT, 1 = PUBLISHED (BlogpostStatus)
-  speciesSlug         String?   @unique @map("species_slug")  // 1:1 with Species; null = free-form post
-  species             Species?  @relation(fields: [speciesSlug], references: [slug], onDelete: SetNull, onUpdate: Cascade)
+  slug        String   @id // == speciesSlug for species guides; derived from titleEs for free-form
+  status      Int      @default(0) // 0 = DRAFT, 1 = PUBLISHED (BlogpostStatus)
+  speciesSlug String?  @unique @map("species_slug") // 1:1 with Species; null = free-form post
+  species     Species? @relation(fields: [speciesSlug], references: [slug], onDelete: SetNull, onUpdate: Cascade)
 
-  titleEs             String    @map("title_es")
-  titleEn             String?   @map("title_en")
-  excerptEs           String    @map("excerpt_es") @db.Text
-  excerptEn           String?   @map("excerpt_en") @db.Text
-  bodyEs              String    @map("body_es") @db.Text
-  bodyEn              String?   @map("body_en") @db.Text
+  titleEs   String  @map("title_es")
+  titleEn   String? @map("title_en")
+  excerptEs String  @map("excerpt_es") @db.Text
+  excerptEn String? @map("excerpt_en") @db.Text
+  bodyEs    String  @map("body_es") @db.Text
+  bodyEn    String? @map("body_en") @db.Text
 
-  coverImageUrl       String?   @map("cover_image_url")
-  coverImageObjectKey String?   @map("cover_image_object_key") // R2 key, kept for later deletion
-  coverImagePrompt    String?   @db.Text @map("cover_image_prompt") // OG/cover generation prompt (engine-authored, admin-only)
-  youtubeUrl          String?   @map("youtube_url")
-  ctaLink             String?   @map("cta_link")
-  ctaLabelEs          String?   @map("cta_label_es")
-  ctaLabelEn          String?   @map("cta_label_en")
+  coverImageUrl       String? @map("cover_image_url")
+  coverImageObjectKey String? @map("cover_image_object_key") // R2 key, kept for later deletion
+  coverImagePrompt    String? @map("cover_image_prompt") @db.Text // OG/cover generation prompt (engine-authored, admin-only)
+  youtubeUrl          String? @map("youtube_url")
+  ctaLink             String? @map("cta_link")
+  ctaLabelEs          String? @map("cta_label_es")
+  ctaLabelEn          String? @map("cta_label_en")
 
-  createdByUserId     String?   @map("created_by_user_id")    // provenance only, NOT an access boundary
-  publishedAt         DateTime? @map("published_at")          // set when status first becomes PUBLISHED
-  createdAt           DateTime  @default(now()) @map("created_at")
-  updatedAt           DateTime  @updatedAt @map("updated_at")
+  createdByUserId String?   @map("created_by_user_id") // provenance only, NOT an access boundary
+  publishedAt     DateTime? @map("published_at") // set when status first becomes PUBLISHED
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
   @@index([status, publishedAt])
   @@map("blogposts")
@@ -156,8 +158,8 @@ model MediaAsset {
   id              String   @id @default(cuid())
   imageUrl        String   @map("image_url")
   imageObjectKey  String   @map("image_object_key") // R2 key, for deletion
-  filename        String                            // original client filename (display only)
-  sizeBytes       Int      @map("size_bytes")        // stored (compressed webp) size
+  filename        String // original client filename (display only)
+  sizeBytes       Int      @map("size_bytes") // stored (compressed webp) size
   width           Int?
   height          Int?
   createdByUserId String?  @map("created_by_user_id") // provenance only
@@ -176,8 +178,11 @@ model Plant {
   speciesSlug String   @map("species_slug")
   species     Species  @relation(fields: [speciesSlug], references: [slug])
   nickname    String?
-  acquiredOn  DateTime @db.Date @map("acquired_on")
+  acquiredOn  DateTime @map("acquired_on") @db.Date
   createdAt   DateTime @default(now()) @map("created_at")
+
+  coverImageUrl       String? @map("cover_image_url")
+  coverImageObjectKey String? @map("cover_image_object_key") // R2 key, kept for replace/delete
 
   events          CareEvent[]
   adjustments     PlantTaskAdjustment[]
@@ -185,10 +190,32 @@ model Plant {
   dueCache        DueCache[]
   progressEntries PlantProgressEntry[]
   frequencies     PlantTaskFrequency[]
+  profile         PlantProfile?
 
   @@index([ownerId])
   @@index([placeId])
   @@map("plants")
+}
+
+// A plant's optional physical profile — a 1:1 side table (one row per plant, created lazily on the
+// first PATCH). Enum-valued columns store the Spec-1 slug as a plain String: the Zod enum in
+// @retaxmaster/my-plants-species-schema is the single source of truth, so the DB never re-declares
+// the vocabulary. Cascade-deletes with its plant.
+model PlantProfile {
+  plantId        String   @id @map("plant_id")
+  windowDistance String?  @map("window_distance") // windowDistanceEnum slug
+  growLight      Boolean? @map("grow_light")
+  potType        String?  @map("pot_type") // potTypeEnum slug
+  potSizeCm      Int?     @map("pot_size_cm")
+  hasDrainage    Boolean? @map("has_drainage")
+  soilMix        String?  @map("soil_mix") // soilMixEnum slug
+  growthHabit    String?  @map("growth_habit") // growthHabitEnum slug
+  ageMonths      Int?     @map("age_months")
+  nearHeater     Boolean? @map("near_heater")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  plant          Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+
+  @@map("plant_profiles")
 }
 
 model CareEvent {
@@ -197,7 +224,7 @@ model CareEvent {
   plant      Plant         @relation(fields: [plantId], references: [id])
   task       Task
   type       CareEventType
-  occurredOn DateTime      @db.Date @map("occurred_on")
+  occurredOn DateTime      @map("occurred_on") @db.Date
   payload    Json?
   createdAt  DateTime      @default(now()) @map("created_at")
 
@@ -222,7 +249,7 @@ model TaskOverride {
   plantId   String   @map("plant_id")
   plant     Plant    @relation(fields: [plantId], references: [id])
   task      Task
-  nextDueOn DateTime @db.Date @map("next_due_on")
+  nextDueOn DateTime @map("next_due_on") @db.Date
 
   @@unique([plantId, task])
   @@map("task_overrides")
@@ -233,7 +260,7 @@ model DueCache {
   plantId    String   @map("plant_id")
   plant      Plant    @relation(fields: [plantId], references: [id])
   task       Task
-  nextDueOn  DateTime @db.Date @map("next_due_on")
+  nextDueOn  DateTime @map("next_due_on") @db.Date
   computedAt DateTime @default(now()) @map("computed_at")
 
   @@unique([plantId, task])
@@ -244,14 +271,14 @@ model PlantProgressEntry {
   id           String         @id @default(cuid())
   plantId      String         @map("plant_id")
   plant        Plant          @relation(fields: [plantId], references: [id])
-  occurredOn   DateTime       @db.Date @map("occurred_on") // the journal date (can backdate)
+  occurredOn   DateTime       @map("occurred_on") @db.Date // the journal date (can backdate)
   health       ProgressHealth
   observations String?        @db.Text
   sizeCm       Int?           @map("size_cm")
-  tags         Json?          // string[] of catalog keys (validated at the DTO/service, Phase 3)
+  tags         Json? // string[] of catalog keys (validated at the DTO/service, Phase 3)
   createdAt    DateTime       @default(now()) @map("created_at")
 
-  photos       PlantProgressPhoto[]
+  photos PlantProgressPhoto[]
 
   @@index([plantId, occurredOn])
   @@map("plant_progress_entries")
@@ -286,7 +313,7 @@ model ScheduledMove {
   id           String   @id @default(cuid())
   ownerId      String   @map("owner_id")
   targetCityId String   @map("target_city_id")
-  moveOn       DateTime @db.Date @map("move_on")
+  moveOn       DateTime @map("move_on") @db.Date
   applied      Boolean  @default(false)
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -303,12 +330,12 @@ enum KnowledgeChatRunStatus {
 }
 
 model KnowledgeChatSession {
-  id              String   @id @default(cuid())
-  claudeSessionId String?  @unique @map("claude_session_id") // Claude's UUID; null until first run inits
+  id              String             @id @default(cuid())
+  claudeSessionId String?            @unique @map("claude_session_id") // Claude's UUID; null until first run inits
   title           String // first ~160 chars of the first prompt
-  createdByUserId String?  @map("created_by_user_id") // provenance only, NOT an access boundary
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  createdByUserId String?            @map("created_by_user_id") // provenance only, NOT an access boundary
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
   runs            KnowledgeChatRun[]
 
   @@map("knowledge_chat_sessions")
