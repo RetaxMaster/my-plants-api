@@ -13,7 +13,8 @@ async function bootstrap(): Promise<void> {
   // kept as a defensive allowance — harmless under the BFF, useful for local direct calls.
   app.enableCors({ origin: [process.env.WEB_ORIGIN ?? 'http://localhost:8001'] });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-  await app.listen(loadEnv().PORT);
+  const env = loadEnv();
+  await app.listen(env.PORT, env.HOST);
 }
 
 void bootstrap();

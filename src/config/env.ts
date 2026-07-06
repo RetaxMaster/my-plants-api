@@ -11,6 +11,11 @@ const dbSchema = z.object({
 
 export const envSchema = dbSchema.extend({
   PORT: z.coerce.number().int().positive().default(3000),
+  // Network interface the HTTP server binds to. Defaults to 0.0.0.0 (all interfaces) so local dev and
+  // the e2e harness keep working unchanged. In production it is pinned to 127.0.0.1 so the API is
+  // reachable ONLY by the co-located web BFF (Nitro proxies to it over localhost) and never exposed to
+  // the internet — the browser talks to the web app, never to this API directly.
+  HOST: z.string().min(1).default('0.0.0.0'),
   DEFAULT_CITY_TZ: z.string().min(1).default('America/Mexico_City'),
   JWT_SECRET: z.string().min(32),
   JWT_EXPIRES_IN: z.string().min(1).default('30d'),
