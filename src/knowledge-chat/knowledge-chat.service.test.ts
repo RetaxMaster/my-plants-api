@@ -58,7 +58,7 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
       },
       findUnique: async ({ where }: any) => runs.get(where.id) ?? null,
       findMany: async ({ where }: any) => [...runs.values()].filter((r) => (where?.sessionId ? r.sessionId === where.sessionId : true) && (where?.activeKey !== undefined ? r.activeKey === where.activeKey : true)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
-      update: async ({ where, data }: any) => { const r = runs.get(where.id); Object.assign(r, data); return r; },
+      update: async ({ where, data }: any) => { const r = runs.get(where.id); if (!r) throw new Error(`run not found: ${where.id}`); Object.assign(r, data); return r; },
       updateMany: async ({ where, data }: any) => { let count = 0; for (const r of runs.values()) { const active = where.status?.in ? where.status.in.includes(r.status) : true; if ((where.id ? r.id === where.id : where.sessionId ? r.sessionId === where.sessionId : true) && active) { Object.assign(r, data); count++; } } return { count }; },
     },
   } as any;
