@@ -10,6 +10,9 @@ export interface Actor {
   // X-Act-As-Owner header is present. OwnerService trusts this: a USER actor never carries it.
   actingAsOwnerId?: string;
   jti: string;
+  // Session-start anchor (epoch seconds) carried forward across refreshes to enforce the absolute
+  // cap. Resolved from the token's `sst`, or `iat` for legacy tokens minted before the feature.
+  sst: number;
   exp: number;
 }
 

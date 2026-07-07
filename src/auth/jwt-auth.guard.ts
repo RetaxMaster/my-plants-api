@@ -34,6 +34,7 @@ export class JwtAuthGuard implements CanActivate {
       ownerId: payload.ownerId,
       role: payload.role,
       jti: payload.jti,
+      sst: payload.sst ?? payload.iat,
       exp: payload.exp,
     };
     // Acting As: honor X-Act-As-Owner ONLY for an ADMIN (a USER's header is ignored — no escalation).
