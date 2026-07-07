@@ -1,8 +1,10 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { ENV } from '../config/config.module.js';
+import type { Env } from '../config/env.js';
 
 export interface JwtPayload {
   sub: string;
@@ -10,13 +12,26 @@ export interface JwtPayload {
   ownerId: string;
   role: 'USER' | 'ADMIN';
   jti: string;
+  // Session-start anchor (epoch seconds), set at first login and preserved across refreshes.
+  // Absent on legacy tokens minted before this feature — verify() falls back to iat for those.
+  sst?: number;
   iat: number;
   exp: number;
 }
 
+// Pure, dependency-free cap check so the age math is unit-testable without minting/backdating JWTs.
+// All args in epoch SECONDS except maxDays. anchor = the session-start time (sst, or iat for legacy).
+export function sessionAgeExceeded(anchorSec: number, nowSec: number, maxDays: number): boolean {
+  return nowSec - anchorSec > maxDays * 86400;
+}
+
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService, private readonly jwt: JwtService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
+    @Inject(ENV) private readonly env: Env,
+  ) {}
 
   async login(
     username: string,
@@ -32,6 +47,7 @@ export class AuthService {
       ownerId: user.ownerId,
       role: user.role,
       jti: randomUUID(),
+      sst: Math.floor(Date.now() / 1000),
     });
     return { token, user: { username: user.username, ownerId: user.ownerId, role: user.role } };
   }
@@ -45,6 +61,10 @@ export class AuthService {
     }
     const revoked = await this.prisma.revokedToken.findUnique({ where: { jti: payload.jti } });
     if (revoked) throw new UnauthorizedException('Token revoked');
+    const anchor = payload.sst ?? payload.iat;
+    if (sessionAgeExceeded(anchor, Math.floor(Date.now() / 1000), this.env.SESSION_ABSOLUTE_MAX_DAYS)) {
+      throw new UnauthorizedException('Session expired');
+    }
     return payload;
   }
 
