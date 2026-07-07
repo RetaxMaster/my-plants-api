@@ -52,6 +52,34 @@ export class AuthService {
     return { token, user: { username: user.username, ownerId: user.ownerId, role: user.role } };
   }
 
+  // Mint a fresh 30-day token for an already-authenticated actor, preserving the session-start
+  // anchor so the absolute cap keeps counting from the FIRST login. Revokes the old jti (idempotent)
+  // to shrink the window where two tokens are valid. Refuses past the absolute cap (defensive — the
+  // guard's verify() already rejects such a token before this runs).
+  async refresh(actor: {
+    userId: string;
+    username: string;
+    ownerId: string;
+    role: 'USER' | 'ADMIN';
+    jti: string;
+    sst: number;
+    exp: number;
+  }): Promise<{ token: string }> {
+    if (sessionAgeExceeded(actor.sst, Math.floor(Date.now() / 1000), this.env.SESSION_ABSOLUTE_MAX_DAYS)) {
+      throw new UnauthorizedException('Session expired');
+    }
+    const token = await this.jwt.signAsync({
+      sub: actor.userId,
+      username: actor.username,
+      ownerId: actor.ownerId,
+      role: actor.role,
+      jti: randomUUID(),
+      sst: actor.sst,
+    });
+    await this.logout(actor.jti, actor.exp); // revoke the superseded token
+    return { token };
+  }
+
   async verify(token: string): Promise<JwtPayload> {
     let payload: JwtPayload;
     try {

@@ -13,6 +13,16 @@ export class AuthController {
     return this.auth.login(body.username, body.password);
   }
 
+  @Post('refresh')
+  async refresh(@Req() req: any) {
+    const a = req.user; // the current Actor, set by the guard
+    if (!a) throw new UnauthorizedException();
+    return this.auth.refresh({
+      userId: a.userId, username: a.username, ownerId: a.ownerId,
+      role: a.role, jti: a.jti, sst: a.sst, exp: a.exp,
+    });
+  }
+
   @Post('logout')
   async logout(@Req() req: any) {
     const p = req.user; // set by the guard in Phase 3

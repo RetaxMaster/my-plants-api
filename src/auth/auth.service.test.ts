@@ -83,4 +83,29 @@ describe('AuthService', () => {
     expect(sessionAgeExceeded(nowSec - 89 * 86400, nowSec, 90)).toBe(false);
     expect(sessionAgeExceeded(nowSec - 91 * 86400, nowSec, 90)).toBe(true);
   });
+
+  it('refresh mints a new token preserving sst, with a fresh jti, and revokes the old jti', async () => {
+    const login = await svc.login('carlos', 'secret');
+    const p0 = await svc.verify(login.token);
+
+    const { token: token1 } = await svc.refresh({
+      userId: 'u1', username: 'carlos', ownerId: 'o1', role: 'ADMIN',
+      jti: p0.jti, sst: p0.sst!, exp: p0.exp,
+    });
+
+    const p1 = await svc.verify(token1);
+    expect(p1.sst).toBe(p0.sst);
+    expect(p1.jti).not.toBe(p0.jti);
+    await expect(svc.verify(login.token)).rejects.toThrow();
+  });
+
+  it('refresh refuses once the session is past the absolute cap', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await expect(
+      svc.refresh({
+        userId: 'u1', username: 'carlos', ownerId: 'o1', role: 'ADMIN',
+        jti: 'j-old', sst: nowSec - 100 * 86400, exp: nowSec + 86400,
+      }),
+    ).rejects.toThrow();
+  });
 });
