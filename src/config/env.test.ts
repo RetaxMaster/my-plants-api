@@ -56,6 +56,13 @@ describe('loadEnv', () => {
     const abs = loadEnv({ ...FULL, KNOWLEDGE_CHAT_LOG_DIR: '/var/lib/myplants/kchat' } as NodeJS.ProcessEnv);
     expect(abs.KNOWLEDGE_CHAT_LOG_DIR).toBe('/var/lib/myplants/kchat');
   });
+
+  it('defaults SESSION_ABSOLUTE_MAX_DAYS to 90 and coerces overrides', () => {
+    expect(loadEnv({ ...FULL } as NodeJS.ProcessEnv).SESSION_ABSOLUTE_MAX_DAYS).toBe(90);
+    expect(
+      loadEnv({ ...FULL, SESSION_ABSOLUTE_MAX_DAYS: '180' } as NodeJS.ProcessEnv).SESSION_ABSOLUTE_MAX_DAYS,
+    ).toBe(180);
+  });
 });
 
 describe('loadEnv — R2 image storage (optional feature)', () => {

@@ -19,6 +19,10 @@ export const envSchema = dbSchema.extend({
   DEFAULT_CITY_TZ: z.string().min(1).default('America/Mexico_City'),
   JWT_SECRET: z.string().min(32),
   JWT_EXPIRES_IN: z.string().min(1).default('30d'),
+  // Hard absolute cap (days) on a session's total lifetime, measured from the FIRST login (the JWT's
+  // `sst` anchor, preserved across refreshes). Once exceeded, `verify()` rejects and `/auth/refresh`
+  // refuses — forcing a fresh login regardless of activity. Bounds the worst case of a leaked token.
+  SESSION_ABSOLUTE_MAX_DAYS: z.coerce.number().int().positive().default(90),
   // Browser origin allowed by CORS (web app) — also the engine's Socket.IO corsOrigins. Homing it
   // here (main.ts historically read it straight off process.env) lets the engine derive corsOrigins
   // from the typed env.
