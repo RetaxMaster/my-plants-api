@@ -107,8 +107,10 @@ export class AuthService {
     // exp is seconds-since-epoch from the JWT; bind a native Date (MariaDB date rule).
     try {
       await this.prisma.revokedToken.create({ data: { jti, expiresAt: new Date(exp * 1000) } });
-    } catch {
-      /* already revoked — idempotent */
+    } catch (err) {
+      // Idempotent ONLY for a duplicate jti (already revoked). Any other failure is real and must
+      // surface — refresh() depends on this revocation actually happening.
+      if ((err as { code?: string })?.code !== 'P2002') throw err;
     }
   }
 

@@ -84,6 +84,23 @@ describe('AuthService', () => {
     expect(sessionAgeExceeded(nowSec - 91 * 86400, nowSec, 90)).toBe(true);
   });
 
+  it('verify uses iat as the cap anchor for legacy tokens without sst', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const rawJwt = new JwtService({ secret: 'x'.repeat(32) }); // no expiresIn → can set iat/exp
+    const within = await rawJwt.signAsync({
+      sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'ADMIN', jti: 'leg-ok',
+      iat: nowSec - 10 * 86400, exp: nowSec + 86400,
+    });
+    const p = await svc.verify(within);
+    expect(p.sub).toBe('u1'); // no sst present, iat within cap → verifies
+
+    const past = await rawJwt.signAsync({
+      sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'ADMIN', jti: 'leg-old',
+      iat: nowSec - 91 * 86400, exp: nowSec + 86400,
+    });
+    await expect(svc.verify(past)).rejects.toThrow(); // iat past the 90d cap → rejected
+  });
+
   it('refresh mints a new token preserving sst, with a fresh jti, and revokes the old jti', async () => {
     const login = await svc.login('carlos', 'secret');
     const p0 = await svc.verify(login.token);

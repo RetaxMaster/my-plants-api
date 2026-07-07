@@ -9,6 +9,10 @@ const authSvc = {
   verify: async (t: string) => {
     if (t === 'good') return { sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', jti: 'j', exp: 9999999999 };
     if (t === 'admin') return { sub: 'a1', username: 'root', ownerId: 'oAdmin', role: 'ADMIN', jti: 'j', exp: 9999999999 };
+    // Token that carries an explicit sst anchor (the current-format token).
+    if (t === 'withSst') return { sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', jti: 'j', sst: 1700000000, iat: 1699000000, exp: 9999999999 };
+    // Legacy token minted before the feature: no sst, only iat → the guard falls back to iat.
+    if (t === 'legacy') return { sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', jti: 'j', iat: 1699000000, exp: 9999999999 };
     throw new Error('bad');
   },
   ownerExists: async (id: string) => id === 'oTarget',
@@ -56,6 +60,35 @@ describe('JwtAuthGuard', () => {
       expect((cls.get('actor') as any).ownerId).toBe('o1');
       expect((cls.get('actor') as any).username).toBe('carlos');
       expect(req.user.ownerId).toBe('o1');
+    });
+  });
+
+  it('carries the token sst onto req.user', async () => {
+    const g = new JwtAuthGuard(reflector(false), authSvc, cls);
+    await cls.run(async () => {
+      const req = { headers: { authorization: 'Bearer withSst' } } as any;
+      const context = {
+        getHandler: () => ({}),
+        getClass: () => ({}),
+        switchToHttp: () => ({ getRequest: () => req }),
+      } as any;
+      expect(await g.canActivate(context)).toBe(true);
+      expect(req.user.sst).toBe(1700000000);
+      expect((cls.get('actor') as any).sst).toBe(1700000000);
+    });
+  });
+
+  it('falls back to iat for a legacy token without sst', async () => {
+    const g = new JwtAuthGuard(reflector(false), authSvc, cls);
+    await cls.run(async () => {
+      const req = { headers: { authorization: 'Bearer legacy' } } as any;
+      const context = {
+        getHandler: () => ({}),
+        getClass: () => ({}),
+        switchToHttp: () => ({ getRequest: () => req }),
+      } as any;
+      expect(await g.canActivate(context)).toBe(true);
+      expect(req.user.sst).toBe(1699000000); // iat used as the anchor
     });
   });
 
