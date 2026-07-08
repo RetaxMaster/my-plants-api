@@ -9,7 +9,10 @@ const actor = (ownerId: string, role: 'USER' | 'ADMIN') => ({ userId: 'u', usern
 
 function setup() {
   const matches = (row: any, where: any = {}) => Object.entries(where).every(([k, v]) => v === undefined || row[k] === v);
-  const seed = { places: [{ id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false, airflow: null }, { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false, airflow: null }] };
+  const seed = { places: [
+    { id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null },
+    { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null },
+  ] };
   const recomputed: string[] = [];
   const prisma = {
     place: {
@@ -56,6 +59,32 @@ describe('PlacesService.update', () => {
   it('setting airflow to its current value does not recompute', async () => {
     const { svc, run, recomputed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { airflow: null }); });
+    expect(recomputed).toEqual([]);
+  });
+
+  it('lightType change recomputes the place (light is an always-on watering factor)', async () => {
+    const { svc, run, recomputed, seed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { lightType: 'LOW' }); });
+    expect(seed.places.find((p) => p.id === 'p1')!.lightType).toBe('LOW');
+    expect(recomputed).toEqual(['p1']);
+  });
+
+  it('setting lightType to its current value does not recompute', async () => {
+    const { svc, run, recomputed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { lightType: 'BRIGHT_INDIRECT' }); });
+    expect(recomputed).toEqual([]);
+  });
+
+  it('humidityCharacter change recomputes the place (humidity feeds indoor-climate VPD)', async () => {
+    const { svc, run, recomputed, seed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { humidityCharacter: 'HUMID' }); });
+    expect(seed.places.find((p) => p.id === 'p1')!.humidityCharacter).toBe('HUMID');
+    expect(recomputed).toEqual(['p1']);
+  });
+
+  it('setting humidityCharacter to its current value (null) does not recompute', async () => {
+    const { svc, run, recomputed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { humidityCharacter: null }); });
     expect(recomputed).toEqual([]);
   });
 

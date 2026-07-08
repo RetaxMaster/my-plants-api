@@ -43,17 +43,30 @@ export class PlacesService {
     return place;
   }
 
-  // Edit name/climateControlled. USER own-only, ADMIN any. A climateControlled change recomputes
-  // every plant in the place (they share its climate); a name-only change does not.
+  // Edit name/climateControlled/lightType/humidityCharacter/airflow. USER own-only, ADMIN any. Any change
+  // that feeds the care engine (climateControlled, lightType, humidityCharacter, airflow — they define the
+  // place's climate + watering center, shared by every plant in it) recomputes the whole place; a name-only
+  // change does not.
   async update(id: string, dto: UpdatePlaceDto) {
     const place = await this.prisma.place.findFirst({ where: { id, ...this.owner.ownerFilter() } });
     if (!place) throw new NotFoundException(`Unknown place: ${id}`);
-    const data: { name?: string; climateControlled?: boolean; airflow?: Airflow | null } = {};
+    const data: {
+      name?: string; climateControlled?: boolean; lightType?: LightType;
+      humidityCharacter?: HumidityCharacter | null; airflow?: Airflow | null;
+    } = {};
     let recompute = false;
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.climateControlled !== undefined && dto.climateControlled !== place.climateControlled) {
       data.climateControlled = dto.climateControlled;
       recompute = true;
+    }
+    if (dto.lightType !== undefined && dto.lightType !== place.lightType) {
+      data.lightType = dto.lightType;
+      recompute = true; // light level is an always-on watering factor → re-schedule
+    }
+    if (dto.humidityCharacter !== undefined && dto.humidityCharacter !== place.humidityCharacter) {
+      data.humidityCharacter = dto.humidityCharacter;
+      recompute = true; // humidity feeds indoor-climate VPD → re-schedule
     }
     if (dto.airflow !== undefined && dto.airflow !== place.airflow) {
       data.airflow = dto.airflow;
