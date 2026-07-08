@@ -1,0 +1,23 @@
+-- 0012_place_airflow (hand-authored, additive, forward-only).
+--
+-- Adds a nullable `airflow` column to `places`: the room/spot's air-movement character (still|some|
+-- breezy), fed to the watering engine's airflowFactor (spec A §3.1/§5.1). Enum-valued: stores the
+-- VALIDATED slug as a plain string — the Zod airflowEnum in @retaxmaster/my-plants-species-schema is the
+-- single source of truth, so no DB enum duplicates it.
+--
+-- Purely additive: one ADD COLUMN, NULL default. No data transform, no backfill (existing places read as
+-- `null` = neutral airflow). This feature adds NO new date-threshold query, so the MariaDB date/time rule
+-- has no new surface here.
+--
+-- Authoring: generated with `prisma migrate diff --from-url "$DATABASE_URL"
+-- --to-schema-datamodel prisma/schema.prisma --script` and reviewed by hand (the repo cannot run
+-- `migrate dev` — the shadow DB is denied for the local user; see memory
+-- api-migrations-hand-authored-deploy). The diff also emitted benign foreign-key drop/re-add churn (a
+-- known Prisma MySQL introspection artifact — `migrate status` confirms 0001–0011 are applied with no
+-- real drift), normalized away to the single additive statement below. Applied with
+-- `npm run prisma:migrate` (prisma migrate deploy).
+--
+-- NOT trivially reversible via this file: dropping the `airflow` column reverses it; down-migration is
+-- prose per the repo's forward-only migrate-deploy history.
+
+ALTER TABLE `places` ADD COLUMN `airflow` VARCHAR(191) NULL;

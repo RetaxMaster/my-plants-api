@@ -107,6 +107,7 @@ model Place {
   humidityCharacter HumidityCharacter? @map("humidity_character")
   indoorTempMinC    Float?             @map("indoor_temp_min_c")
   indoorTempMaxC    Float?             @map("indoor_temp_max_c")
+  airflow           String?            @map("airflow") // airflowEnum slug (still|some|breezy); null = neutral
   plants            Plant[]
 
   @@index([ownerId])
