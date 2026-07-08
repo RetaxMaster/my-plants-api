@@ -9,7 +9,7 @@ const actor = (ownerId: string, role: 'USER' | 'ADMIN') => ({ userId: 'u', usern
 
 function setup() {
   const matches = (row: any, where: any = {}) => Object.entries(where).every(([k, v]) => v === undefined || row[k] === v);
-  const seed = { places: [{ id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false }, { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false }] };
+  const seed = { places: [{ id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false, airflow: null }, { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false, airflow: null }] };
   const recomputed: string[] = [];
   const prisma = {
     place: {
@@ -43,6 +43,19 @@ describe('PlacesService.update', () => {
   it('setting climateControlled to its current value does not recompute', async () => {
     const { svc, run, recomputed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { climateControlled: false }); });
+    expect(recomputed).toEqual([]);
+  });
+
+  it('airflow change recomputes the place', async () => {
+    const { svc, run, recomputed, seed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { airflow: 'breezy' }); });
+    expect(seed.places.find((p) => p.id === 'p1')!.airflow).toBe('breezy');
+    expect(recomputed).toEqual(['p1']);
+  });
+
+  it('setting airflow to its current value does not recompute', async () => {
+    const { svc, run, recomputed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { airflow: null }); });
     expect(recomputed).toEqual([]);
   });
 

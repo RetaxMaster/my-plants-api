@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import type { HumidityCharacter, LightType } from '@prisma/client';
+import type { Airflow } from '@retaxmaster/my-plants-species-schema';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -14,6 +15,7 @@ export interface PlaceInput {
   humidityCharacter?: HumidityCharacter;
   indoorTempMinC?: number | null;
   indoorTempMaxC?: number | null;
+  airflow?: Airflow | null;
 }
 
 @Injectable()
@@ -46,12 +48,16 @@ export class PlacesService {
   async update(id: string, dto: UpdatePlaceDto) {
     const place = await this.prisma.place.findFirst({ where: { id, ...this.owner.ownerFilter() } });
     if (!place) throw new NotFoundException(`Unknown place: ${id}`);
-    const data: { name?: string; climateControlled?: boolean } = {};
+    const data: { name?: string; climateControlled?: boolean; airflow?: Airflow | null } = {};
     let recompute = false;
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.climateControlled !== undefined && dto.climateControlled !== place.climateControlled) {
       data.climateControlled = dto.climateControlled;
       recompute = true;
+    }
+    if (dto.airflow !== undefined && dto.airflow !== place.airflow) {
+      data.airflow = dto.airflow;
+      recompute = true; // airflow drives the watering center → every plant in the place re-schedules
     }
     if (Object.keys(data).length > 0) await this.prisma.place.update({ where: { id }, data });
     if (recompute) await this.carePlan.recomputePlace(id);
