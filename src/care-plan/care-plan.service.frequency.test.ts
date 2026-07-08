@@ -33,7 +33,7 @@ function setup(frequencies: { task: string; intervalDays: number }[], recordOver
         adjustments: [], overrides: [], frequencies,
       }),
     },
-    careEvent: { findFirst: async () => null },
+    careEvent: { findFirst: async () => null, findMany: async () => [] },
     dueCache: {
       upsert: async ({ create }: any) => { upserts.push({ task: create.task, nextDueOn: create.nextDueOn }); },
       deleteMany: async ({ where }: any) => { cleared.push(where.task); },

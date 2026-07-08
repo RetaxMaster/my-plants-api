@@ -144,12 +144,12 @@ export interface WateringPlan {
   days: number;
   effectiveCenter: number;
   confidence: number;
-  alwaysOn: number; // vpd × placeLight × season × legacyAdjustment
+  alwaysOn: number; // vpd × placeLight × season
   optionalFactor: number; // pot × airflow × lightRefinement × soil × drainage × heater × habit × feedback
   perFactor: {
     pot: number; airflow: number; lightRefinement: number; soil: number;
     drainage: number; heater: number; habit: number; feedback: number;
-    vpd: number; placeLight: number; season: number; legacyAdjustment: number;
+    vpd: number; placeLight: number; season: number;
   };
 }
 
@@ -170,11 +170,12 @@ export function computeWateringPlan(input: ScheduleInput): WateringPlan {
     vpd: vpdFactor(input),
     placeLight: placeLightFactor(input),
     season: seasonFactor(input),
-    legacyAdjustment: input.adjustment, // full-strength UNTIL Spec B migrates it into feedbackFactor
   };
 
   // Always-on (exponent 1): pre-existing live signals, NOT dampened by confidence (§3.1).
-  const alwaysOn = perFactor.vpd * perFactor.placeLight * perFactor.season * perFactor.legacyAdjustment;
+  // A↔B migration (spec B §3.4): the learned value NO LONGER multiplies the always-on channel as a raw
+  // multiplier — it enters ONLY through the optional feedbackFactor below, so it is never applied twice.
+  const alwaysOn = perFactor.vpd * perFactor.placeLight * perFactor.season;
   // Optional (exponent = confidence): new physical + feedback data, partial data → partial authority.
   const optionalFactor =
     perFactor.pot * perFactor.airflow * perFactor.lightRefinement * perFactor.soil *

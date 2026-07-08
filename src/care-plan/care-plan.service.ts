@@ -5,10 +5,12 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
 import { effectiveConditions, humidityBand, type EffectiveConditions } from '../engines/indoor-climate.js';
 import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue, computeProgressDue } from '../engines/scheduling.js';
+import { deriveFeedback, type FeedbackWindowEvent } from '../engines/adaptation.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
 import type { Airflow, GrowthHabit, PotType, Season, SoilMix, WindowDist } from '@retaxmaster/my-plants-species-schema';
+import { EARLY_WATER_REASONS, WATER_POSTPONE_REASONS } from '@retaxmaster/my-plants-species-schema';
 
 const SCHEDULED_TASKS: Task[] = ['WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES'];
 
@@ -37,6 +39,8 @@ export class CarePlanService {
     );
     const hemisphere = hemisphereForLatitude(city.latitude);
     const season = seasonForDate(new Date(), hemisphere);
+
+    const waterFeedback = await this.waterFeedbackSignal(plantId);
 
     for (const task of SCHEDULED_TASKS) {
       // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none, clearing any
@@ -79,6 +83,8 @@ export class CarePlanService {
         nearHeater: plant.profile?.nearHeater ?? null,
         growthHabit: (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
         ageMonths: plant.profile?.ageMonths ?? null,
+        feedbackFactor: task === 'WATER' ? waterFeedback.feedbackFactor : undefined,
+        feedbackConfidence: task === 'WATER' ? waterFeedback.feedbackConfidence : undefined,
       }, frequencyDays);
       await this.upsertDue(plantId, task, due);
     }
@@ -133,6 +139,33 @@ export class CarePlanService {
     await this.upsertDue(plantId, 'PROGRESS', computeProgressDue(progressAnchor));
   }
 
+  // The plant's last-10 reason/symptom-bearing WATER feedback events, distilled into Spec A §3.6's
+  // optional-channel signal (spec B §3.3/§3.4). We over-fetch recent WATER feedback and classify + slice
+  // to 10 in JS (payload JSON is parsed in JS, never via a brittle MySQL JSON path — same pattern the old
+  // adaptFromPunctuality used). Only reason/symptom-bearing events enter the window; plain due waterings
+  // (no reason) are ignored, so a run of recent intuition waterings correctly dilutes older dry-soil.
+  private async waterFeedbackSignal(plantId: string): Promise<{ feedbackFactor: number; feedbackConfidence: number }> {
+    const rows = await this.prisma.careEvent.findMany({
+      where: { plantId, task: 'WATER', type: { in: ['DONE', 'POSTPONED', 'SYMPTOM'] } },
+      orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+      take: 60,
+      select: { type: true, payload: true },
+    });
+    const window: FeedbackWindowEvent[] = [];
+    for (const r of rows) {
+      const p = r.payload as { reason?: string; symptom?: string } | null;
+      if (r.type === 'DONE' && p?.reason && (EARLY_WATER_REASONS as readonly string[]).includes(p.reason)) {
+        window.push({ kind: 'early-water', reason: p.reason });
+      } else if (r.type === 'POSTPONED' && p?.reason && (WATER_POSTPONE_REASONS as readonly string[]).includes(p.reason)) {
+        window.push({ kind: 'postpone', reason: p.reason });
+      } else if (r.type === 'SYMPTOM' && p?.symptom) {
+        window.push({ kind: 'symptom', symptom: p.symptom });
+      }
+      if (window.length >= 10) break; // last-10 (spec B §3.3), newest-first
+    }
+    return deriveFeedback(window);
+  }
+
   private dueForTask(
     task: Task,
     record: SpeciesRecord,
@@ -152,6 +185,8 @@ export class CarePlanService {
       nearHeater?: boolean | null;
       growthHabit?: GrowthHabit | null;
       ageMonths?: number | null;
+      feedbackFactor?: number;
+      feedbackConfidence?: number;
     },
     frequencyDays?: number, // PlantTaskFrequency override — replaces the species base interval
   ): Date {
@@ -183,6 +218,8 @@ export class CarePlanService {
         nearHeater: ctx.nearHeater,
         growthHabit: ctx.growthHabit,
         ageMonths: ctx.ageMonths,
+        feedbackFactor: ctx.feedbackFactor,
+        feedbackConfidence: ctx.feedbackConfidence,
       });
     }
     if (task === 'FERTILIZE') {

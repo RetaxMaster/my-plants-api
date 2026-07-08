@@ -29,7 +29,7 @@ function setup(opts: { profile?: any; airflow?: string | null }) {
   };
   const prisma = {
     plant: { findUniqueOrThrow: async () => plant },
-    careEvent: { findFirst: async () => null },
+    careEvent: { findFirst: async () => null, findMany: async () => [] },
     dueCache: {
       upsert: async ({ where, create }: any) => { dues[where.plantId_task.task] = create?.nextDueOn ?? null; },
       deleteMany: async () => {},

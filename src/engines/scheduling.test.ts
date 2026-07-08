@@ -9,6 +9,7 @@ import {
   type WateringPlan,
 } from './scheduling.js';
 import { effectiveConditions, humidityBand, type PlaceClimateInput } from './indoor-climate.js';
+import { deriveFeedback } from './adaptation.js';
 
 const base: ScheduleInput = {
   baseIntervalDays: 10,
@@ -48,14 +49,28 @@ describe('computeNextDue', () => {
     expect(due.toISOString().slice(0, 10)).toBe('2026-06-11'); // anchor 2026-06-01 + 10
   });
 
-  it('golden: applies the per-plant adjustment multiplier unchanged', () => {
+  it('the raw per-plant adjustment NO LONGER moves the WATER schedule (A↔B migration)', () => {
+    // The learned value no longer rides the always-on channel as a raw multiplier — WATER ignores it.
     const days = daysFrom(computeNextDue({ ...neutral, adjustment: 1.5 }));
-    expect(days).toBe(15);
+    expect(days).toBe(10); // plain base interval, unaffected by `adjustment`
+  });
+
+  it('the learned value now enters through feedbackFactor/feedbackConfidence instead', () => {
+    // Full confidence + a >1 factor lengthens the schedule; the optional channel carries the learning now.
+    const later = daysFrom(computeNextDue({ ...neutral, feedbackFactor: 1.5, feedbackConfidence: 1 }));
+    expect(later).toBe(15); // base × 1 × 1.5^1 = 15
+    const sooner = daysFrom(computeNextDue({ ...neutral, feedbackFactor: 0.6, feedbackConfidence: 1 }));
+    expect(sooner).toBeLessThan(10);
   });
 
   it('golden: clamps to the exact drought-tolerance bounds at confidence 0', () => {
-    // low tolerance, no signal → widen = 1 → max = base * 1.5 = 15 (today's bound, unwidened).
-    const days = daysFrom(computeNextDue({ ...neutral, droughtTolerance: 'low', adjustment: 5 }));
+    // low tolerance, no signal → widen = 1 → max = base * 1.5 = 15 (today's bound, unwidened). The raw
+    // `adjustment` no longer moves WATER (A↔B migration), so we drive the center above the max through the
+    // always-on channel instead: winter dormancy (×1.5) + a dim place (light band) → center 16.2 > 15,
+    // exercising the clamp while confidence stays 0.
+    const days = daysFrom(
+      computeNextDue({ ...neutral, droughtTolerance: 'low', season: 'winter', placeLightRank: 0 }),
+    );
     expect(days).toBe(15);
   });
 
@@ -331,5 +346,29 @@ describe('re-anchored guardrail — nursery vs indoor fern (spec A §3.4)', () =
       effective: { tempC: 20, humidityPct: 70, tempSignal: true, humiditySignal: true }, // low VPD
     });
     expect(days).toBeGreaterThan(2); // daily correctly disallowed
+  });
+});
+
+describe('feedback crosses the old floor (spec B §3.4)', () => {
+  // A fern: base 4, low drought tolerance, no weather signal → today's hard floor is round(4 × 0.75) = 3.
+  const fern: ScheduleInput = {
+    ...base,
+    baseIntervalDays: 4,
+    droughtTolerance: 'low',
+    anchor: new Date('2026-06-01'),
+    effective: { tempC: 21, humidityPct: 50, tempSignal: false, humiditySignal: false },
+  };
+  const fernDays = (s: { feedbackFactor: number; feedbackConfidence: number }) =>
+    daysFrom(computeNextDue({ ...fern, feedbackFactor: s.feedbackFactor, feedbackConfidence: s.feedbackConfidence }));
+
+  it('repeated justified dry-soil early-waterings push the fern below the old 3-day floor (~every 2 days)', () => {
+    const signal = deriveFeedback(Array.from({ length: 10 }, () => ({ kind: 'early-water', reason: 'dry-soil' } as const)));
+    expect(fernDays(signal)).toBeLessThanOrEqual(2); // crossed the floor — the guardrail moved with the evidence
+  });
+
+  it('an intuition-only history reproduces today\'s schedule exactly (no blind shortening)', () => {
+    const signal = deriveFeedback(Array.from({ length: 10 }, () => ({ kind: 'early-water', reason: 'intuition' } as const)));
+    expect(signal).toEqual({ feedbackFactor: 1, feedbackConfidence: 0 });
+    expect(fernDays(signal)).toBe(4); // identical to the zero-feedback base schedule
   });
 });

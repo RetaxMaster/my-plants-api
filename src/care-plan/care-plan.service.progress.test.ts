@@ -41,6 +41,7 @@ function setup(opts: { lastProgressOn?: Date; acquiredOn: Date }) {
     careEvent: {
       findFirst: async ({ where }: any) =>
         where.task === 'PROGRESS' && opts.lastProgressOn ? { occurredOn: opts.lastProgressOn } : null,
+      findMany: async () => [],
     },
     dueCache: {
       upsert: async ({ create }: any) => { upserts.push({ task: create.task, nextDueOn: create.nextDueOn }); },
