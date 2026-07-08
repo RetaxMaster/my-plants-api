@@ -41,71 +41,58 @@ const anchor = new Date('2026-06-01');
 const daysFrom = (d: Date): number => Math.round((d.getTime() - anchor.getTime()) / 86_400_000);
 
 describe('computeNextDue', () => {
-  it('returns anchor + base interval at ideal conditions', () => {
-    const due = computeNextDue(base);
-    expect(due.toISOString().slice(0, 10)).toBe('2026-06-11');
+  // --- Backward-compat golden path: no optional data + NO real weather signal → identical to the
+  // pre-change engine (§3.5 invariant 1). Uses the `neutral` fixture (both signals false). ---
+  it('golden: returns anchor + base interval at neutral conditions', () => {
+    const due = computeNextDue(neutral);
+    expect(due.toISOString().slice(0, 10)).toBe('2026-06-11'); // anchor 2026-06-01 + 10
   });
 
-  it('shortens the interval in hot weather for a temperature-sensitive plant', () => {
-    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: true, humiditySignal: true } });
-    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeLessThan(10);
-  });
-
-  it('shortens for indoor heat when there is a real temperature signal', () => {
-    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: true, humiditySignal: true } });
-    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeLessThan(10);
-  });
-
-  it('is neutral on temperature when there is no temperature signal', () => {
-    const due = computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 60, tempSignal: false, humiditySignal: true } });
-    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBe(10);
-  });
-
-  it('shortens the interval when the air is drier than ideal', () => {
-    const dry = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 30, tempSignal: true, humiditySignal: true } });
-    const days = Math.round((dry.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeLessThan(10);
-  });
-
-  it('lengthens the interval when the air is more humid than ideal', () => {
-    const humid = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 85, tempSignal: true, humiditySignal: true } });
-    const days = Math.round((humid.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeGreaterThan(10);
-  });
-
-  it('is neutral on humidity when there is no humidity signal', () => {
-    const due = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 30, tempSignal: true, humiditySignal: false } });
-    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBe(10);
-  });
-
-  it('waters a humidity-sensitive plant sooner in a DRY indoor place than in a HUMID one', () => {
-    // The DRY (35%) vs HUMID (65%) indoor mapping from effectiveConditions drives the schedule:
-    // drier air → drink sooner.
-    const dry = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 35, tempSignal: false, humiditySignal: true } });
-    const humid = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 65, tempSignal: false, humiditySignal: true } });
-    expect(dry.getTime()).toBeLessThan(humid.getTime());
-  });
-
-  it('lengthens during dormancy when reduceInDormancy is set', () => {
-    const dormant = computeNextDue({ ...base, season: 'winter' });
-    const days = Math.round((dormant.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeGreaterThan(10);
-  });
-
-  it('applies the per-plant adjustment multiplier', () => {
-    const due = computeNextDue({ ...base, adjustment: 1.5 });
-    const days = Math.round((due.getTime() - base.anchor.getTime()) / 86_400_000);
+  it('golden: applies the per-plant adjustment multiplier unchanged', () => {
+    const days = daysFrom(computeNextDue({ ...neutral, adjustment: 1.5 }));
     expect(days).toBe(15);
   });
 
-  it('clamps to the drought-tolerance bounds', () => {
-    const tight = computeNextDue({ ...base, droughtTolerance: 'low', adjustment: 5 });
-    const days = Math.round((tight.getTime() - base.anchor.getTime()) / 86_400_000);
-    expect(days).toBeLessThanOrEqual(15); // low tolerance caps at base * 1.5
+  it('golden: clamps to the exact drought-tolerance bounds at confidence 0', () => {
+    // low tolerance, no signal → widen = 1 → max = base * 1.5 = 15 (today's bound, unwidened).
+    const days = daysFrom(computeNextDue({ ...neutral, droughtTolerance: 'low', adjustment: 5 }));
+    expect(days).toBe(15);
+  });
+
+  it('golden: lengthens during dormancy when reduceInDormancy is set', () => {
+    const days = daysFrom(computeNextDue({ ...neutral, season: 'winter' }));
+    expect(days).toBeGreaterThan(10);
+  });
+
+  it('golden: a dimmer place still lengthens the interval (light preserved at full strength)', () => {
+    // idealLightRank 2, placeLightRank 0 (low light) → longer, exactly as the old lightModulator.
+    const days = daysFrom(computeNextDue({ ...neutral, placeLightRank: 0 }));
+    expect(days).toBeGreaterThan(10);
+  });
+
+  // --- VPD path: with a real weather signal the schedule may re-baseline, but stays bounded. ---
+  it('shortens the interval in hot, thirsty air (high VPD)', () => {
+    const days = daysFrom(computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 30, tempSignal: true, humiditySignal: true } }));
+    expect(days).toBeLessThan(10);
+  });
+
+  it('lengthens the interval in cool, damp air (low VPD)', () => {
+    const days = daysFrom(computeNextDue({ ...base, effective: { tempC: 18, humidityPct: 88, tempSignal: true, humiditySignal: true } }));
+    expect(days).toBeGreaterThan(10);
+  });
+
+  it('the VPD replacement is full-strength but bounded by the vpd factor band [0.6, 1.5]', () => {
+    // VPD is always-on (exponent 1), so it applies fully — but the factor band caps the shift: the
+    // shortest reachable center is base × 0.6 = 6 (with no optional data, confidence 0).
+    const days = daysFrom(computeNextDue({ ...base, effective: { tempC: 33, humidityPct: 30, tempSignal: true, humiditySignal: true } }));
+    expect(days).toBeGreaterThanOrEqual(5); // bounded below by the vpd band + the confidence-0 clamp floor
+    expect(days).toBeLessThan(10);
+  });
+
+  it('waters a plant sooner in a DRY indoor place than a HUMID one (VPD direction)', () => {
+    const dry = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 35, tempSignal: false, humiditySignal: true } });
+    const humid = computeNextDue({ ...base, effective: { tempC: 22, humidityPct: 65, tempSignal: false, humiditySignal: true } });
+    expect(dry.getTime()).toBeLessThan(humid.getTime());
   });
 });
 
@@ -299,5 +286,50 @@ describe('computeWateringPlan — confidence & effectiveCenter (§3.2–3.4)', (
     expect(dry.confidence).toBeGreaterThan(0); // feedbackConfidence raises the optional-channel confidence
     const intuitionOnly = computeWateringPlan({ ...neutral, feedbackFactor: 1, feedbackConfidence: 0 });
     expect(intuitionOnly.effectiveCenter).toBe(neutral.baseIntervalDays); // no justified feedback → moves nothing
+  });
+});
+
+describe('re-anchored guardrail — nursery vs indoor fern (spec A §3.4)', () => {
+  // A fern: base 4 days, low drought tolerance, shade-loving (high light sensitivity), likes humidity.
+  const fern: ScheduleInput = {
+    ...base,
+    baseIntervalDays: 4,
+    droughtTolerance: 'low',
+    lightSensitivity: 'high',
+    idealLightRank: 1, // medium
+    anchor: new Date('2026-06-01'),
+  };
+  const fernDays = (i: ScheduleInput) => daysFrom(computeNextDue(i));
+
+  it('with ZERO data behaves exactly like today: the 0.75×base floor holds (no daily)', () => {
+    const days = fernDays({ ...fern, effective: { tempC: 21, humidityPct: 50, tempSignal: false, humiditySignal: false } });
+    expect(days).toBeGreaterThanOrEqual(3); // floor = round(4 * 0.75) = 3 — daily is NOT reachable
+  });
+
+  it('a nursery fern with rich dries-fast data can legitimately reach ~daily', () => {
+    const days = fernDays({
+      ...fern,
+      potType: 'terracotta', potSizeCm: 8, // small porous pot
+      airflow: 'breezy', // moving air
+      soilMix: 'cactus-succulent',
+      windowDistance: 'on-sill', // high, direct light
+      placeLightRank: 3,
+      hasDrainage: true, nearHeater: true,
+      effective: { tempC: 30, humidityPct: 30, tempSignal: true, humiditySignal: true }, // high VPD
+    });
+    expect(days).toBeLessThanOrEqual(2); // the guardrail moved WITH the evidence — daily is reachable
+  });
+
+  it("an indoor fern with rich holds-water data still forbids daily (rot protection intact)", () => {
+    const days = fernDays({
+      ...fern,
+      potType: 'glazed-ceramic', potSizeCm: 30, // big sealed pot
+      airflow: 'still',
+      soilMix: 'peat-based',
+      windowDistance: '2-to-3m', placeLightRank: 1, // medium light, as ideal
+      hasDrainage: true, nearHeater: false,
+      effective: { tempC: 20, humidityPct: 70, tempSignal: true, humiditySignal: true }, // low VPD
+    });
+    expect(days).toBeGreaterThan(2); // daily correctly disallowed
   });
 });

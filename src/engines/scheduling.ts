@@ -77,32 +77,7 @@ const WIDEN_GAIN = 2; // how fast the safety clamp widens with confidence (§3.4
 const W_POT = 3, W_AIRFLOW = 3, W_LIGHT = 3, W_SOIL = 1, W_DRAIN = 1, W_HEATER = 1, W_HABIT = 0.5;
 const W_TOTAL = W_POT + W_AIRFLOW + W_LIGHT + W_SOIL + W_DRAIN + W_HEATER + W_HABIT; // 12.5
 
-const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 const band = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
-
-// Hotter than ideal → drink sooner; colder → slower. Only when there's a real temperature signal.
-function tempModulator(input: ScheduleInput): number {
-  if (!input.effective.tempSignal) return 1;
-  const { tempC } = input.effective;
-  let deviation = 0;
-  if (tempC > input.idealMaxC) deviation = -(tempC - input.idealMaxC);
-  else if (tempC < input.idealMinC) deviation = input.idealMinC - tempC;
-  return clamp(1 + deviation * SENS_WEIGHT[input.temperatureSensitivity] * 0.1, 0.5, 1.6);
-}
-
-// Drier than ideal → drink sooner; more humid → slower. Only with a real humidity signal.
-// Humidity is in percentage points, so a small factor keeps a tens-of-points gap bounded.
-function humidityModulator(input: ScheduleInput): number {
-  if (!input.effective.humiditySignal) return 1;
-  const deviation = input.idealHumidityPct - input.effective.humidityPct; // + = drier than ideal
-  return clamp(1 - deviation * SENS_WEIGHT[input.humiditySensitivity] * 0.04, 0.7, 1.4);
-}
-
-// Brighter than ideal → drink sooner; dimmer → slower.
-function lightModulator(input: ScheduleInput): number {
-  const deviation = input.idealLightRank - input.placeLightRank; // + means dimmer than ideal
-  return clamp(1 + deviation * SENS_WEIGHT[input.lightSensitivity], 0.7, 1.4);
-}
 
 // ---- Optional-channel factors (each neutral 1.0 when its datum is absent) ----
 function potFactor(potType: PotType | null | undefined, potSizeCm: number | null | undefined): number {
@@ -218,20 +193,7 @@ export function computeWateringPlan(input: ScheduleInput): WateringPlan {
 }
 
 export function computeNextDue(input: ScheduleInput): Date {
-  const raw =
-    input.baseIntervalDays *
-    input.adjustment *
-    tempModulator(input) *
-    lightModulator(input) *
-    humidityModulator(input) *
-    seasonFactor(input);
-
-  const span = TOLERANCE_SPAN[input.droughtTolerance];
-  const min = input.baseIntervalDays * (1 - span * 0.5);
-  const max = input.baseIntervalDays * (1 + span);
-  const days = Math.round(clamp(raw, Math.max(1, min), max));
-
-  return addDays(input.anchor, days);
+  return addDays(input.anchor, computeWateringPlan(input).days);
 }
 
 function addDays(anchor: Date, days: number): Date {
