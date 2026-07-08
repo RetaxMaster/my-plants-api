@@ -8,7 +8,7 @@ import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNex
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
-import type { Season } from '@retaxmaster/my-plants-species-schema';
+import type { Airflow, GrowthHabit, PotType, Season, SoilMix, WindowDist } from '@retaxmaster/my-plants-species-schema';
 
 const SCHEDULED_TASKS: Task[] = ['WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES'];
 
@@ -19,7 +19,7 @@ export class CarePlanService {
   async recomputePlant(plantId: string): Promise<void> {
     const plant = await this.prisma.plant.findUniqueOrThrow({
       where: { id: plantId },
-      include: { species: true, place: { include: { city: true } }, adjustments: true, overrides: true, frequencies: true },
+      include: { species: true, place: { include: { city: true } }, adjustments: true, overrides: true, frequencies: true, profile: true },
     });
     const record = parseSpeciesRecord(plant.species.record);
     const { place } = plant;
@@ -67,6 +67,18 @@ export class CarePlanService {
         season,
         anchor,
         adjustment,
+        // Optional physical profile + place airflow → the confidence-blended watering center (spec A §3).
+        // Enum columns store validated slugs, so the string→union casts are sound (same as toProfileView).
+        potType: (plant.profile?.potType ?? null) as PotType | null,
+        potSizeCm: plant.profile?.potSizeCm ?? null,
+        airflow: (place.airflow ?? null) as Airflow | null,
+        windowDistance: (plant.profile?.windowDistance ?? null) as WindowDist | null,
+        growLight: plant.profile?.growLight ?? null,
+        soilMix: (plant.profile?.soilMix ?? null) as SoilMix | null,
+        hasDrainage: plant.profile?.hasDrainage ?? null,
+        nearHeater: plant.profile?.nearHeater ?? null,
+        growthHabit: (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
+        ageMonths: plant.profile?.ageMonths ?? null,
       }, frequencyDays);
       await this.upsertDue(plantId, task, due);
     }
@@ -130,6 +142,16 @@ export class CarePlanService {
       season: Season;
       anchor: Date;
       adjustment: number;
+      potType?: PotType | null;
+      potSizeCm?: number | null;
+      airflow?: Airflow | null;
+      windowDistance?: WindowDist | null;
+      growLight?: boolean | null;
+      soilMix?: SoilMix | null;
+      hasDrainage?: boolean | null;
+      nearHeater?: boolean | null;
+      growthHabit?: GrowthHabit | null;
+      ageMonths?: number | null;
     },
     frequencyDays?: number, // PlantTaskFrequency override — replaces the species base interval
   ): Date {
@@ -151,6 +173,16 @@ export class CarePlanService {
         placeLightRank: ctx.placeLightRank,
         season: ctx.season,
         reduceSeason: 'winter',
+        potType: ctx.potType,
+        potSizeCm: ctx.potSizeCm,
+        airflow: ctx.airflow,
+        windowDistance: ctx.windowDistance,
+        growLight: ctx.growLight,
+        soilMix: ctx.soilMix,
+        hasDrainage: ctx.hasDrainage,
+        nearHeater: ctx.nearHeater,
+        growthHabit: ctx.growthHabit,
+        ageMonths: ctx.ageMonths,
       });
     }
     if (task === 'FERTILIZE') {
