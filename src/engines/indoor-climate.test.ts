@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effectiveConditions, type PlaceClimateInput } from './indoor-climate.js';
+import { effectiveConditions, vpd, type PlaceClimateInput } from './indoor-climate.js';
 
 const outdoor: PlaceClimateInput = {
   indoor: false, climateControlled: false, humidityCharacter: 'NORMAL',
@@ -80,5 +80,28 @@ describe('effectiveConditions', () => {
     expect(effectiveConditions(place, null)).toEqual({
       tempC: 21, humidityPct: 50, tempSignal: false, humiditySignal: true,
     });
+  });
+});
+
+describe('vpd (vapour-pressure deficit, kPa)', () => {
+  it('is ~0 in fully saturated air (100% RH)', () => {
+    expect(vpd(21, 100)).toBeCloseTo(0, 5);
+  });
+
+  it('rises as air gets hotter at the same RH (thirstier air)', () => {
+    expect(vpd(30, 50)).toBeGreaterThan(vpd(20, 50));
+  });
+
+  it('rises as air gets drier at the same temperature', () => {
+    expect(vpd(22, 30)).toBeGreaterThan(vpd(22, 70));
+  });
+
+  it('matches the Tetens value at 22C / 60% within tolerance', () => {
+    // es(22) = 0.6108 * exp(17.27*22 / (22+237.3)) ≈ 2.645 kPa ; VPD = es * (1 - 0.60) ≈ 1.058
+    expect(vpd(22, 60)).toBeCloseTo(1.058, 2);
+  });
+
+  it('clamps out-of-range humidity (never negative)', () => {
+    expect(vpd(22, 120)).toBeGreaterThanOrEqual(0);
   });
 });

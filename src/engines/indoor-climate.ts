@@ -82,3 +82,12 @@ export function effectiveConditions(
 
   return { tempC, humidityPct, tempSignal, humiditySignal };
 }
+
+// Vapour-pressure deficit (kPa): the air's evaporative demand — the physically-correct JOINT signal of
+// temperature and humidity (higher VPD = thirstier air = faster drying). Saturation vapour pressure via
+// the Tetens equation; VPD = es(T) × (1 − RH). Single source used by the watering engine's vpdFactor.
+export function vpd(tempC: number, humidityPct: number): number {
+  const es = 0.6108 * Math.exp((17.27 * tempC) / (tempC + 237.3)); // kPa
+  const rh = Math.min(100, Math.max(0, humidityPct)) / 100;
+  return es * (1 - rh);
+}
