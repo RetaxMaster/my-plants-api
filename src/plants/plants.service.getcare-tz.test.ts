@@ -47,6 +47,11 @@ it('getCare computes the boundary from the plant place-city (no primary lookup)'
   expect(out.viability).toHaveProperty('level');
 });
 
+it('getCare exposes the species soil-dryness on the care payload (for the WATER info modal)', async () => {
+  const out = await runGetCare('UTC');
+  expect(out.soilDrynessBeforeWatering).toBe('mostly-dry');
+});
+
 it('getCare feeds the place-city timezone into the boundary (proven: an invalid tz throws)', async () => {
   // If getCare hardcoded 'UTC' or used the primary, an invalid place-city tz would be ignored.
   // Because the boundary is built from plant.place.city.timezone, an invalid zone makes

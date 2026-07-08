@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { parseSpeciesRecord, primaryCommonName, type PlantProfile } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName, type PlantProfile, type SoilDryness } from '@retaxmaster/my-plants-species-schema';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -100,6 +100,9 @@ export class PlantsService {
     plantId: string;
     tasks: { task: Task; nextDueOn: string; daysUntilDue: number; status: CareStatus }[];
     viability: ViabilityResult;
+    // The species' soil-dryness-before-watering slug (e.g. 'mostly-dry'), surfaced so the plant page's
+    // WATER info modal can show a species-specific line without a second /species round-trip. Additive.
+    soilDrynessBeforeWatering: SoilDryness;
   }> {
     const plant = await this.prisma.plant.findFirst({
       where: { id, ...this.owner.ownerFilter() },
@@ -161,7 +164,7 @@ export class PlantsService {
         : null,
     );
 
-    return { plantId: id, tasks, viability };
+    return { plantId: id, tasks, viability, soilDrynessBeforeWatering: record.watering.soilDrynessBeforeWatering };
   }
 
   async create(dto: CreatePlantDto) {
