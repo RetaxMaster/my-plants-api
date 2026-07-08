@@ -44,7 +44,7 @@ function setup() {
       update: async ({ where, data }: any) => { const p = seed.plants.find((x) => x.id === where.id); Object.assign(p!, data); return p; },
     },
     place: { findFirst: async ({ where }: any) => seed.places.find((p) => matches(p, where)) ?? null },
-    plantProfile: { findUnique: async () => null },
+    plantProfile: { findUnique: async () => null, upsert: async ({ create }: any) => ({ ...create }) },
     plantProgressEntry: { findFirst: async () => null },
     careEvent: { findFirst: async () => null },
   } as any;
@@ -94,6 +94,23 @@ describe('PlantsService.update', () => {
     });
     expect(seed.plants.find((p) => p.id === 'pl-other')!.placeId).toBe('place-y');
     expect(recomputed).toEqual(['pl-other']);
+  });
+});
+
+describe('PlantsService.updateProfile', () => {
+  it('recomputes the plant after a profile write (so new physical data moves the schedule)', async () => {
+    const { svc, run, recomputed } = setup();
+    await run(actor('owner-1', 'USER'), async () => {
+      await svc.updateProfile('pl-own', { potType: 'terracotta', potSizeCm: 8 });
+    });
+    expect(recomputed).toEqual(['pl-own']);
+  });
+
+  it('a USER cannot edit another owner plant profile', async () => {
+    const { svc, run } = setup();
+    await run(actor('owner-1', 'USER'), async () => {
+      await expect(svc.updateProfile('pl-other', { potType: 'plastic' })).rejects.toBeInstanceOf(NotFoundException);
+    });
   });
 });
 

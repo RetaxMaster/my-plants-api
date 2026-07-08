@@ -322,6 +322,8 @@ export class PlantsService {
       create: { plantId: id, ...patch },
       update: { ...patch },
     });
+    // The profile now feeds the watering center (spec A §3/§4) — a change must move the schedule.
+    await this.carePlan.recomputePlant(id);
     return this.toProfileView(row);
   }
 
