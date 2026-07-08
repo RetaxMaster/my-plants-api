@@ -4,8 +4,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { nextAdjustment } from '../engines/adaptation.js';
-import { computeEarlyRatio } from '../engines/punctuality.js';
-import { computeAdherence, eligibleCycles, type AdherencePayload } from './adherence.js';
+import { computeAdherence, type AdherencePayload } from './adherence.js';
 
 const POSTPONE_WINDOW_DAYS = 60;
 
@@ -23,6 +22,7 @@ export class FeedbackService {
     type: CareEventType;
     occurredOn: Date;
     postponeToOn?: Date;
+    reason?: string; // top-level WATER feedback reason (spec B §4) — persisted into CareEvent.payload
     payload?: unknown;
   }): Promise<void> {
     // Defense in depth: PROGRESS is never a feedback event (the DTO already rejects it). Progress is
@@ -72,10 +72,12 @@ export class FeedbackService {
 
     // (3) create the event, merging adherence into the client payload (keeps previousAnchor
     //     uncontaminated by this new event because we read it in step 1).
-    const mergedPayload =
-      adherence !== null
-        ? { ...(input.payload as Record<string, unknown> | undefined), adherence }
-        : input.payload;
+    const base = {
+      ...(input.payload as Record<string, unknown> | undefined),
+      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      ...(adherence !== null ? { adherence } : {}),
+    };
+    const mergedPayload = Object.keys(base).length > 0 ? base : undefined;
     await this.prisma.careEvent.create({
       data: {
         plantId: input.plantId,
@@ -91,10 +93,8 @@ export class FeedbackService {
     if (input.type === 'DONE') {
       // (4) delete the override (existing DONE behaviour).
       await this.prisma.taskOverride.deleteMany({ where: { plantId: input.plantId, task: input.task } });
-      // (5) adapt ONLY if the just-closed cycle is eligible — exactly one nudge per eligible cycle.
-      if (adherence !== null && adherence.eligible) {
-        await this.adaptFromPunctuality(input.plantId);
-      }
+      // WATER cadence learning now derives from the last-10 reason/symptom window in recomputePlant
+      // (spec B §3.3/§3.4) — no PlantTaskAdjustment write here anymore.
     }
 
     if (input.type === 'POSTPONED' && input.postponeToOn) {
@@ -103,71 +103,13 @@ export class FeedbackService {
         create: { plantId: input.plantId, task: input.task, nextDueOn: input.postponeToOn },
         update: { nextDueOn: input.postponeToOn },
       });
-      await this.adapt(input.plantId, input.task);
-    }
-
-    if (input.type === 'SYMPTOM') {
-      await this.adaptForSymptom(input.plantId, input.payload);
+      // Non-water Postpone keeps today's behaviour (spec B non-goal). WATER postpones learn via the
+      // reason window in recomputePlant, so they do NOT nudge the raw multiplier here.
+      if (input.task !== 'WATER') await this.adapt(input.plantId, input.task);
     }
 
     // (6) recompute the plant (existing behaviour).
     await this.carePlan.recomputePlant(input.plantId);
-  }
-
-  // DONE-path WATER adaptation: read the recent window, score the early signal with the pure
-  // function, persist the multiplier. recentPostpones = 0 (postpones adapt on their own events).
-  private async adaptFromPunctuality(plantId: string): Promise<void> {
-    const recent = await this.prisma.careEvent.findMany({
-      where: { plantId, task: 'WATER', type: 'DONE' },
-      orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
-      take: 5,
-      select: { payload: true },
-    });
-    // Parse adherence out of each payload IN JS (not MySQL JSON-path, which is brittle), newest first.
-    const cycles = eligibleCycles(
-      recent.map((e) => {
-        const adherence = (e.payload as { adherence?: AdherencePayload } | null)?.adherence;
-        return adherence
-          ? {
-              ...adherence,
-              previousAnchorOn: new Date(adherence.previousAnchorOn),
-              scheduledDueOn: new Date(adherence.scheduledDueOn),
-            }
-          : undefined;
-      }),
-    );
-    const ratio = computeEarlyRatio(cycles, { deadband: 0.1, minSamples: 2 });
-    const current = (await this.prisma.plantTaskAdjustment.findUnique({
-      where: { plantId_task: { plantId, task: 'WATER' } },
-    }))?.multiplier ?? 1;
-    const multiplier = nextAdjustment({ current, recentPostpones: 0, earlyLateRatio: ratio });
-    await this.prisma.plantTaskAdjustment.upsert({
-      where: { plantId_task: { plantId, task: 'WATER' } },
-      create: { plantId, task: 'WATER', multiplier },
-      update: { multiplier },
-    });
-  }
-
-  // Minimal v1 symptom→watering map: over-watering signs lengthen, under-watering shorten.
-  private async adaptForSymptom(plantId: string, payload: unknown): Promise<void> {
-    const symptom = (payload as { symptom?: string } | undefined)?.symptom;
-    const nudge: Record<string, number> = {
-      'yellow-leaves-wet-soil': 0.15, // likely over-watered → water less often
-      'mushy-stem': 0.2,
-      'wilting-dry-soil': -0.15, // under-watered → water more often
-      'crispy-edges-dry-soil': -0.1,
-    };
-    const delta = symptom ? nudge[symptom] : undefined;
-    if (delta === undefined) return; // unknown symptom: stored as an event, no adjustment
-    const current = (await this.prisma.plantTaskAdjustment.findUnique({
-      where: { plantId_task: { plantId, task: 'WATER' } },
-    }))?.multiplier ?? 1;
-    const multiplier = Math.min(2, Math.max(0.5, current + delta));
-    await this.prisma.plantTaskAdjustment.upsert({
-      where: { plantId_task: { plantId, task: 'WATER' } },
-      create: { plantId, task: 'WATER', multiplier },
-      update: { multiplier },
-    });
   }
 
   private async adapt(plantId: string, task: Task): Promise<void> {
