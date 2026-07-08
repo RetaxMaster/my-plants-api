@@ -1,5 +1,7 @@
-import type { DroughtTolerance, MistingBenefit, Season, Sensitivity } from '@retaxmaster/my-plants-species-schema';
-import type { EffectiveConditions } from './indoor-climate.js';
+import type {
+  Airflow, DroughtTolerance, GrowthHabit, MistingBenefit, PotType, Season, Sensitivity, SoilMix, WindowDist,
+} from '@retaxmaster/my-plants-species-schema';
+import { vpd, type EffectiveConditions } from './indoor-climate.js';
 
 export interface ScheduleInput {
   baseIntervalDays: number;
@@ -18,6 +20,23 @@ export interface ScheduleInput {
   placeLightRank: number; // 0..3
   season: Season;
   reduceSeason: Season; // the dormancy season for this hemisphere (typically 'winter')
+  // Optional physical inputs (spec A §3.1) — every one nullable/absent, defaulting to a NEUTRAL 1.0
+  // factor and 0 confidence weight, so missing data never shifts the schedule (§3.5 invariant 3). Phase 4
+  // reads these off the plant's PlantProfile + place.airflow.
+  potType?: PotType | null;
+  potSizeCm?: number | null;
+  airflow?: Airflow | null;
+  windowDistance?: WindowDist | null;
+  growLight?: boolean | null;
+  soilMix?: SoilMix | null;
+  hasDrainage?: boolean | null;
+  nearHeater?: boolean | null;
+  growthHabit?: GrowthHabit | null;
+  ageMonths?: number | null;
+  // Spec-B feedback coupling (§3.6). Wired here, fed in Spec B. feedbackFactor multiplies the center;
+  // feedbackConfidence raises confidence (widening the guardrail). Defaults are neutral (1 / 0).
+  feedbackFactor?: number;
+  feedbackConfidence?: number;
 }
 
 const SENS_WEIGHT: Record<Sensitivity, number> = { low: 0.04, medium: 0.08, high: 0.14 };
