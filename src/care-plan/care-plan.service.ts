@@ -140,15 +140,23 @@ export class CarePlanService {
   }
 
   // The plant's last-10 reason/symptom-bearing WATER feedback events, distilled into Spec A §3.6's
-  // optional-channel signal (spec B §3.3/§3.4). We over-fetch recent WATER feedback and classify + slice
-  // to 10 in JS (payload JSON is parsed in JS, never via a brittle MySQL JSON path — same pattern the old
-  // adaptFromPunctuality used). Only reason/symptom-bearing events enter the window; plain due waterings
-  // (no reason) are ignored, so a run of recent intuition waterings correctly dilutes older dry-soil.
+  // optional-channel signal (spec B §3.3/§3.4). We fetch WATER feedback newest-first and classify + slice
+  // to the 10 most recent reason/symptom-bearing events in JS (payload JSON is parsed in JS, never via a
+  // brittle MySQL JSON path — same pattern the old adaptFromPunctuality used). Only reason/symptom-bearing
+  // events enter the window; plain due waterings (no reason) are ignored, so a run of recent intuition
+  // waterings correctly dilutes older dry-soil.
+  //
+  // Deliberately NO fixed row cap (`take`): the spec defines the window by reason-bearing COUNT (10), not
+  // by raw-event count. Every plain on-time watering also writes a DONE CareEvent (adherence, no reason),
+  // so a fixed cap of N raw rows would let a run of >N plain waterings evict still-relevant reason-bearing
+  // events out of the fetch — silently reverting a frequently-watered plant (e.g. a fern watered every few
+  // days) to the species base and destroying its learning. Unbounded is safe at our single-user scale: a
+  // two-column projection over one plant's lifetime WATER events is tiny, and the JS loop stops at 10
+  // reason-bearing matches regardless of how many plain rows precede them.
   private async waterFeedbackSignal(plantId: string): Promise<{ feedbackFactor: number; feedbackConfidence: number }> {
     const rows = await this.prisma.careEvent.findMany({
       where: { plantId, task: 'WATER', type: { in: ['DONE', 'POSTPONED', 'SYMPTOM'] } },
       orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
-      take: 60,
       select: { type: true, payload: true },
     });
     const window: FeedbackWindowEvent[] = [];

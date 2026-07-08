@@ -30,8 +30,9 @@ function setup(waterEvents: { type: string; payload: unknown }[]) {
     careEvent: {
       // recomputePlant reads the per-task last-DONE anchor (findFirst) AND the feedback window (findMany).
       findFirst: async () => null,
-      findMany: async ({ where }: any) =>
-        where?.type?.in ? waterEvents : [], // only the feedback-window query has type: { in: [...] }
+      // Honors `take` so a regression test can prove a fixed row cap would truncate the window.
+      findMany: async ({ where, take }: any) =>
+        where?.type?.in ? (take ? waterEvents.slice(0, take) : waterEvents) : [], // window query has type: { in: [...] }
     },
     dueCache: {
       upsert: async ({ where, create }: any) => { dues[where.plantId_task.task] = create?.nextDueOn ?? null; },
@@ -64,5 +65,17 @@ describe('CarePlanService — reason-aware WATER feedback crosses the floor', ()
     const { svc, dues } = setup(events);
     await svc.recomputePlant('pl1');
     expect(daysBetween(new Date('2026-06-01'), dues.WATER)).toBe(4);
+  });
+
+  it('reason-bearing events survive a long run of plain due waterings (window is by reason count, not raw rows)', async () => {
+    // 60 plain on-time waterings (DONE, no reason) are the NEWEST events; 10 older justified dry-soil
+    // early-waterings sit behind them. A fixed `take: 60` would fetch only the plain run → empty window →
+    // silent revert to the species base (4 days). The window is defined by reason-bearing COUNT, so the
+    // dry-soil signal must still be found and cross the floor. Guards the frequently-watered fern case.
+    const plain = Array.from({ length: 60 }, () => ({ type: 'DONE', payload: { adherence: { observedDays: 4 } } }));
+    const dry = Array.from({ length: 10 }, () => ({ type: 'DONE', payload: { reason: 'dry-soil' } }));
+    const { svc, dues } = setup([...plain, ...dry]);
+    await svc.recomputePlant('pl1');
+    expect(daysBetween(new Date('2026-06-01'), dues.WATER)).toBeLessThanOrEqual(2);
   });
 });
