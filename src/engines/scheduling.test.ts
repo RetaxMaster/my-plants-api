@@ -261,6 +261,26 @@ describe('computeWateringPlan — per-factor direction, bounds & neutral default
     expect(computeWateringPlan(neutral).perFactor.vpd).toBe(1);
   });
 
+  it('weights the VPD response by species sensitivity (sensitive reacts more sharply, both directions)', () => {
+    // Same room, only the species temp/humidity sensitivity differs. A sensitive species must pull its
+    // vpdFactor further from 1 than a rugged one; a 'medium'/'medium' species sits between (and equals the
+    // unweighted baseline). Re-uses the previously-vestigial temperature/humiditySensitivity fields.
+    // Mild-but-off-reference air, chosen so the vpdFactor stays OFF both band edges [0.6, 1.5] for all
+    // three sensitivities — otherwise a saturated factor would hide the ordering.
+    const warmDry = { tempC: 26, humidityPct: 50, tempSignal: true, humiditySignal: true };
+    const coolDamp = { tempC: 20, humidityPct: 70, tempSignal: true, humiditySignal: true };
+    const vpdFor = (s: 'low' | 'medium' | 'high', eff: typeof warmDry) =>
+      computeWateringPlan({ ...base, temperatureSensitivity: s, humiditySensitivity: s, effective: eff }).perFactor.vpd;
+    // Warm, dry air: every species dries faster (< 1), sensitive most, rugged least.
+    expect(vpdFor('high', warmDry)).toBeLessThan(vpdFor('medium', warmDry));
+    expect(vpdFor('medium', warmDry)).toBeLessThan(vpdFor('low', warmDry));
+    expect(vpdFor('low', warmDry)).toBeLessThan(1);
+    // Cool, damp air: every species holds water (> 1), sensitive most, rugged least.
+    expect(vpdFor('high', coolDamp)).toBeGreaterThan(vpdFor('medium', coolDamp));
+    expect(vpdFor('medium', coolDamp)).toBeGreaterThan(vpdFor('low', coolDamp));
+    expect(vpdFor('low', coolDamp)).toBeGreaterThan(1);
+  });
+
   it('every factor is clamped to its band even for extreme inputs (no absurd multiplier)', () => {
     const p = computeWateringPlan({ ...neutral, potType: 'fabric', potSizeCm: 1 });
     expect(p.perFactor.pot).toBeGreaterThanOrEqual(0.5);

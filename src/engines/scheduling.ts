@@ -67,7 +67,12 @@ const DRAINAGE_LOW = 1.12; // hasDrainage === false → water lingers
 const HEATER_LOW = 0.85; // nearHeater === true → drier microclimate
 const HABIT_LOW = 0.95; // large climbing/tree specimen transpires more (kept intentionally weak)
 const VPD_REF_KPA = 1.1; // the VPD at which vpdFactor ≈ 1 (a mild, comfortable demand)
-const VPD_EXP = 0.5; // softens the response so a tens-of-% VPD swing stays a modest factor
+const VPD_EXP = 0.5; // base response softness so a tens-of-% VPD swing stays a modest factor
+// Per-species weighting of the VPD response STRENGTH (spec A follow-up). VPD is the physical driver, but a
+// heat/humidity-sensitive species should react MORE sharply to the same evaporative demand than a rugged
+// one. This scales the VPD_EXP exponent; centered so a 'medium' species is 1.0 (→ byte-identical to the
+// unweighted behaviour). Since VPD blends temperature AND humidity, we average the two sensitivities.
+const VPD_SENS_MULT: Record<Sensitivity, number> = { low: 0.6, medium: 1.0, high: 1.5 };
 const WIDEN_GAIN = 2; // how fast the safety clamp widens with confidence (§3.4)
 
 // Confidence weights (§3.2) — the OPTIONAL channel only. Dominant drivers highest, habit lowest. The
@@ -105,12 +110,15 @@ function lightRefinementFactor(input: ScheduleInput): number {
 
 // ---- Always-on factors (exponent 1) ----
 // VPD replaces the old temp × humidity modulators (§3.1). Neutral 1.0 when NEITHER temp nor humidity is a
-// real signal (§3.5 invariant 6) — matching today's "no signal → neutral".
+// real signal (§3.5 invariant 6) — matching today's "no signal → neutral". The response strength is
+// weighted by the species' temperature + humidity sensitivity (VPD_SENS_MULT): a sensitive species reacts
+// more sharply to the same demand; a 'medium'/'medium' species is unchanged from the unweighted response.
 function vpdFactor(input: ScheduleInput): number {
   if (!input.effective.tempSignal && !input.effective.humiditySignal) return 1;
   const d = vpd(input.effective.tempC, input.effective.humidityPct);
   if (d <= 0) return 1.5; // fully saturated air → hold water (upper band)
-  return band(Math.pow(VPD_REF_KPA / d, VPD_EXP), 0.6, 1.5);
+  const sensMult = (VPD_SENS_MULT[input.temperatureSensitivity] + VPD_SENS_MULT[input.humiditySensitivity]) / 2;
+  return band(Math.pow(VPD_REF_KPA / d, VPD_EXP * sensMult), 0.6, 1.5);
 }
 
 // The place light LEVEL vs the species ideal — this IS today's lightModulator, renamed. Always-on: it is
