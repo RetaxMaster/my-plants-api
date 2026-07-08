@@ -5,10 +5,12 @@ import {
   computeMistingDue,
   computeNextDue,
   computeWateringPlan,
+  VPD_EXP,
+  VPD_REF_KPA,
   type ScheduleInput,
   type WateringPlan,
 } from './scheduling.js';
-import { effectiveConditions, humidityBand, type PlaceClimateInput } from './indoor-climate.js';
+import { effectiveConditions, humidityBand, vpd, type PlaceClimateInput } from './indoor-climate.js';
 import { deriveFeedback } from './adaptation.js';
 
 const base: ScheduleInput = {
@@ -279,6 +281,11 @@ describe('computeWateringPlan — per-factor direction, bounds & neutral default
     expect(vpdFor('high', coolDamp)).toBeGreaterThan(vpdFor('medium', coolDamp));
     expect(vpdFor('medium', coolDamp)).toBeGreaterThan(vpdFor('low', coolDamp));
     expect(vpdFor('low', coolDamp)).toBeGreaterThan(1);
+    // Backcompat guard: a 'medium'/'medium' species MUST equal the unweighted (VPD_REF/d)^VPD_EXP — the
+    // sensitivity weighting is a no-op at medium. Pins the one property the change relies on so a future
+    // tweak to VPD_SENS_MULT.medium (or the averaging) can't silently reschedule every medium species.
+    expect(vpdFor('medium', warmDry)).toBeCloseTo(Math.pow(VPD_REF_KPA / vpd(26, 50), VPD_EXP), 12);
+    expect(vpdFor('medium', coolDamp)).toBeCloseTo(Math.pow(VPD_REF_KPA / vpd(20, 70), VPD_EXP), 12);
   });
 
   it('every factor is clamped to its band even for extreme inputs (no absurd multiplier)', () => {

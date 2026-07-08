@@ -66,8 +66,8 @@ const WINDOW_LIGHT_DELTA: Record<WindowDist, number> = {
 const DRAINAGE_LOW = 1.12; // hasDrainage === false → water lingers
 const HEATER_LOW = 0.85; // nearHeater === true → drier microclimate
 const HABIT_LOW = 0.95; // large climbing/tree specimen transpires more (kept intentionally weak)
-const VPD_REF_KPA = 1.1; // the VPD at which vpdFactor ≈ 1 (a mild, comfortable demand)
-const VPD_EXP = 0.5; // base response softness so a tens-of-% VPD swing stays a modest factor
+export const VPD_REF_KPA = 1.1; // the VPD at which vpdFactor ≈ 1 (a mild, comfortable demand)
+export const VPD_EXP = 0.5; // base response softness so a tens-of-% VPD swing stays a modest factor
 // Per-species weighting of the VPD response STRENGTH (spec A follow-up). VPD is the physical driver, but a
 // heat/humidity-sensitive species should react MORE sharply to the same evaporative demand than a rugged
 // one. This scales the VPD_EXP exponent; centered so a 'medium' species is 1.0 (→ byte-identical to the
@@ -116,7 +116,8 @@ function lightRefinementFactor(input: ScheduleInput): number {
 function vpdFactor(input: ScheduleInput): number {
   if (!input.effective.tempSignal && !input.effective.humiditySignal) return 1;
   const d = vpd(input.effective.tempC, input.effective.humidityPct);
-  if (d <= 0) return 1.5; // fully saturated air → hold water (upper band)
+  if (d <= 0) return 1.5; // fully saturated air → hold water. Sensitivity-independent on purpose: the
+  // limit of (VPD_REF/d)^k as d→0⁺ is +∞ for every k>0, so every species clamps to the 1.5 ceiling here.
   const sensMult = (VPD_SENS_MULT[input.temperatureSensitivity] + VPD_SENS_MULT[input.humiditySensitivity]) / 2;
   return band(Math.pow(VPD_REF_KPA / d, VPD_EXP * sensMult), 0.6, 1.5);
 }
