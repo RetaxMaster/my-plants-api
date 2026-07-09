@@ -53,6 +53,7 @@ export class PlacesService {
     const data: {
       name?: string; climateControlled?: boolean; lightType?: LightType;
       humidityCharacter?: HumidityCharacter | null; airflow?: Airflow | null;
+      indoorTempMinC?: number | null; indoorTempMaxC?: number | null;
     } = {};
     let recompute = false;
     if (dto.name !== undefined) data.name = dto.name;
@@ -71,6 +72,15 @@ export class PlacesService {
     if (dto.airflow !== undefined && dto.airflow !== place.airflow) {
       data.airflow = dto.airflow;
       recompute = true; // airflow drives the watering center → every plant in the place re-schedules
+    }
+    // The indoor temperature bounds are averaged into the effective temperature, which feeds VPD.
+    if (dto.indoorTempMinC !== undefined && dto.indoorTempMinC !== place.indoorTempMinC) {
+      data.indoorTempMinC = dto.indoorTempMinC;
+      recompute = true;
+    }
+    if (dto.indoorTempMaxC !== undefined && dto.indoorTempMaxC !== place.indoorTempMaxC) {
+      data.indoorTempMaxC = dto.indoorTempMaxC;
+      recompute = true;
     }
     if (Object.keys(data).length > 0) await this.prisma.place.update({ where: { id }, data });
     if (recompute) await this.carePlan.recomputePlace(id);

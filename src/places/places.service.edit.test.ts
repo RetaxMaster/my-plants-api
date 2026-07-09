@@ -10,8 +10,8 @@ const actor = (ownerId: string, role: 'USER' | 'ADMIN') => ({ userId: 'u', usern
 function setup() {
   const matches = (row: any, where: any = {}) => Object.entries(where).every(([k, v]) => v === undefined || row[k] === v);
   const seed = { places: [
-    { id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null },
-    { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null },
+    { id: 'p1', ownerId: 'owner-1', name: 'Sala', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null, indoorTempMinC: null, indoorTempMaxC: null },
+    { id: 'p2', ownerId: 'owner-2', name: 'Otra', climateControlled: false, lightType: 'BRIGHT_INDIRECT', humidityCharacter: null, airflow: null, indoorTempMinC: null, indoorTempMaxC: null },
   ] };
   const recomputed: string[] = [];
   const prisma = {
@@ -86,6 +86,36 @@ describe('PlacesService.update', () => {
     const { svc, run, recomputed } = setup();
     await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { humidityCharacter: null }); });
     expect(recomputed).toEqual([]);
+  });
+
+  it('indoor temperature bounds change recomputes the place (they feed the effective temp → VPD)', async () => {
+    const { svc, run, recomputed, seed } = setup();
+    await run(actor('owner-1', 'USER'), async () => { await svc.update('p1', { indoorTempMinC: 18, indoorTempMaxC: 24 }); });
+    const p1 = seed.places.find((p) => p.id === 'p1')!;
+    expect(p1.indoorTempMinC).toBe(18);
+    expect(p1.indoorTempMaxC).toBe(24);
+    expect(recomputed).toEqual(['p1']);
+  });
+
+  it('setting the indoor temperature bounds to their current values does not recompute', async () => {
+    const { svc, run, recomputed } = setup();
+    await run(actor('owner-1', 'USER'), async () => {
+      await svc.update('p1', { indoorTempMinC: 18, indoorTempMaxC: 24 });
+      recomputed.length = 0;
+      await svc.update('p1', { indoorTempMinC: 18, indoorTempMaxC: 24 });
+    });
+    expect(recomputed).toEqual([]);
+  });
+
+  it('clearing an indoor temperature bound to null recomputes the place', async () => {
+    const { svc, run, recomputed, seed } = setup();
+    await run(actor('owner-1', 'USER'), async () => {
+      await svc.update('p1', { indoorTempMinC: 18, indoorTempMaxC: 24 });
+      recomputed.length = 0;
+      await svc.update('p1', { indoorTempMinC: null });
+    });
+    expect(seed.places.find((p) => p.id === 'p1')!.indoorTempMinC).toBeNull();
+    expect(recomputed).toEqual(['p1']);
   });
 
   it('a USER cannot edit another owner place', async () => {
