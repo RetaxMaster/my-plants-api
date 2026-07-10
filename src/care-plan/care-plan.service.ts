@@ -9,6 +9,10 @@ import {
   computeRepotDue, crowdingFactorRepot, crowdingIndex, freshness,
 } from '../engines/scheduling.js';
 import { deriveFeedback, deriveRepotResidual, type FeedbackWindowEvent, type RepotResidualSignal } from '../engines/adaptation.js';
+import {
+  calibrateRepotWithCarry, type RepotCycle, type RepotObservation,
+} from '../engines/repot-calibration.js';
+import { resolveDue } from './resolve-due.js';
 import { latestSizedHeight } from '../plants/latest-sized-height.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
@@ -52,21 +56,33 @@ export class CarePlanService {
     const heightCm = sized?.heightCm ?? null;
     const heightAgeDays = sized?.heightAgeDays ?? null;
 
+    // The per-plant crowding threshold, learned from the owner's inspections (spec F §F.5). Until an
+    // inspection is routed to the calibration this returns R_REF literally, so a bare plant is bit-for-bit
+    // what Spec E alone computed.
+    const now = new Date();
+    const rRefPlant = await this.repotThreshold(plantId, now);
+
     for (const task of SCHEDULED_TASKS) {
       // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none, clearing any
       // stale due so a previously-scheduled cadence does not linger after the species loses it.
       if (task === 'ROTATE' && record.maintenance.rotationDays === null) { await this.clearDue(plantId, task); continue; }
       if (task === 'CLEAN_LEAVES' && record.maintenance.leafCleaningDays === null) { await this.clearDue(plantId, task); continue; }
 
+      // NO early short-circuit here, and NO `task !== 'REPOT'` conditional: `resolveDue` is the ONLY place
+      // that knows floor-vs-replace (spec F3.1). For a non-REPOT task WITH an override, resolveDue returns
+      // the override Date (REPLACE) — bit-for-bit the value the old short-circuit wrote — at the cost of one
+      // extra pure dueForTask call. That is precisely what makes resolveDue's REPLACE branch REACHABLE in
+      // production, so the seam is one dispatched implementation rather than a fork.
       const override = plant.overrides.find((o) => o.task === task);
-      if (override) {
-        await this.upsertDue(plantId, task, override.nextDueOn);
-        continue;
-      }
 
+      // The scheduling anchor. The `createdAt` tiebreak matches plants.service.ts's `lastRepot` query, so
+      // the anchor and `derived.lastRepottedOn` can never disagree on which of two same-day DONE events
+      // wins. `occurredOn` is `@db.Date` (day granularity), so same-day events genuinely tie — and Spec F's
+      // calibration reads `R_obs` from THAT event's payload, so a non-deterministic winner would silently
+      // pick a different observation on every recompute.
       const lastDone = await this.prisma.careEvent.findFirst({
         where: { plantId, task, type: 'DONE' },
-        orderBy: { occurredOn: 'desc' },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
       });
       const anchor = lastDone?.occurredOn ?? plant.acquiredOn;
       const adjustment = plant.adjustments.find((a) => a.task === task)?.multiplier ?? 1;
@@ -89,7 +105,7 @@ export class CarePlanService {
           (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
         );
         if (r != null) {
-          repotCrowdingFactor = crowdingFactorRepot(r); // rRefPlant defaults to R_REF (the Spec F seam)
+          repotCrowdingFactor = crowdingFactorRepot(r, rRefPlant); // Spec F: the per-plant threshold
           repotWc = freshness(heightAgeDays ?? 0);
         }
         const resid = await this.repotResidualSignal(plantId, anchor);
@@ -97,8 +113,17 @@ export class CarePlanService {
         repotWr = resid.residualConfidence;
       }
 
+      // F6.0a: `payload.routedTo` stops any single EVENT feeding both channels, but it cannot stop a PLANT
+      // from accumulating both — two years of stale-height inspections teach the fallback multiplier, and
+      // then the owner records a height and the calibration comes alive too. Nothing unlearns the
+      // multiplier: it is persistent and never decays. So when the physical channel goes live, the
+      // fallback SURRENDERS AUTHORITY in proportion. The persisted multiplier is NOT mutated (it is the
+      // owner's accumulated evidence, still valid if the height goes stale again) — only its authority is
+      // scaled, by the same freshness that scales the crowding factor's.
+      const repotAdjustmentEffective = 1 + (adjustment - 1) * (1 - repotWc);
+
       const frequencyDays = plant.frequencies.find((f) => f.task === task)?.intervalDays;
-      const due = this.dueForTask(task, record, {
+      const computed = this.dueForTask(task, record, {
         effective,
         placeLightRank: placeLightRank(place.lightType),
         season,
@@ -124,8 +149,9 @@ export class CarePlanService {
         repotResidualFactor,
         repotWc,
         repotWr,
+        repotAdjustmentEffective,
       }, frequencyDays);
-      await this.upsertDue(plantId, task, due);
+      await this.upsertDue(plantId, task, resolveDue(task, computed, override?.nextDueOn ?? null));
     }
 
     // Misting (sixth cycle): humidity-graded, may produce no task at all.
@@ -194,6 +220,59 @@ export class CarePlanService {
   // reason-bearing matches regardless of how many plain rows precede them.
   private async waterFeedbackSignal(plantId: string): Promise<{ feedbackFactor: number; feedbackConfidence: number }> {
     return deriveFeedback(await this.waterFeedbackWindow(plantId));
+  }
+
+  // Fold the plant's REPOT inspection history into a per-plant crowding threshold `R_REF_plant` (spec F5.2b
+  // / F5.3). We read ALL REPOT events oldest-first — the `DONE`s are cycle boundaries, the `POSTPONED`s are
+  // inspections — and consume ONLY `payload.routedTo === 'calibration'` events.
+  //
+  // That filter IS the mechanism, not an optimisation. `adapt()` writes the fallback multiplier ONCE, at
+  // submit time; this calibration is a pure function of the event history, re-evaluated on EVERY recompute.
+  // So a fallback-routed inspection still carries its `R_obs` in the payload, and without the `routedTo`
+  // check the very next recompute would feed it to the calibration as well: one event, both channels.
+  //
+  // A `REPOT` `DONE` is NOT an observation (F.10 item 4). A preventive or merely scheduled repot would enter
+  // the estimate as a false `needed` and poison it. `routedTo: 'done'` excludes it structurally.
+  //
+  // Legacy events (every REPOT event in production today) carry no `reason` and no `routedTo`, so they are
+  // skipped here and the estimator short-circuits to `R_REF` literally.
+  //
+  // `ageDays` for `σ_obs` is the HEIGHT MEASUREMENT's age, measured to now — never the inspection event's.
+  private async repotThreshold(plantId: string, now: Date): Promise<number> {
+    const events = await this.prisma.careEvent.findMany({
+      where: { plantId, task: 'REPOT', type: { in: ['DONE', 'POSTPONED'] } },
+      orderBy: [{ occurredOn: 'asc' }, { createdAt: 'asc' }],
+      select: { type: true, occurredOn: true, payload: true },
+    });
+    const yearsBetween = (a: Date, b: Date) => (b.getTime() - a.getTime()) / (365 * 86_400_000);
+    const cycles: RepotCycle[] = [];
+    let current: RepotObservation[] = [];
+    for (const e of events) {
+      if (e.type === 'DONE') {
+        // A repot closes the cycle. Its posterior is carried forward as the next cycle's prior, widened by
+        // the elapsed time — a repot is a physical reset, not amnesia (F5.2b).
+        cycles.push({ obs: current, doneYearsAgo: Math.max(0, yearsBetween(e.occurredOn, now)) });
+        current = [];
+        continue;
+      }
+      const p = e.payload as {
+        routedTo?: string; reason?: string; R_obs?: number | null; heightMeasuredOn?: string | null;
+      } | null;
+      if (p?.routedTo !== 'calibration' || p.R_obs == null) continue; // ONLY calibration-routed inspections
+      const kind =
+        p.reason === 'not-needed-yet' ? 'not-needed' : p.reason === 'needed-cannot-now' ? 'needed' : null;
+      if (kind == null) continue;
+      const ageDays = p.heightMeasuredOn
+        ? Math.max(0, Math.floor((now.getTime() - new Date(p.heightMeasuredOn).getTime()) / 86_400_000))
+        : 0;
+      current.push({ kind, R: p.R_obs, ageDays });
+    }
+    cycles.push({ obs: current, doneYearsAgo: null }); // the open cycle
+    // The posterior's sharpness `w` is deliberately NOT consumed here. It measures how well we know this
+    // plant's threshold; `wc` measures how much we trust TODAY's height. They are different quantities on
+    // different scales, and Spec E A5.4 forbids feeding both into the binary noisy-OR. Surfacing `w` in the
+    // UI is F.10 item 13 — deferred.
+    return calibrateRepotWithCarry(cycles).est;
   }
 
   // The SAME watering-feedback window, read as a root-bound signal for REPOT (spec E, A2.8/A5.4). The only
@@ -265,6 +344,9 @@ export class CarePlanService {
       repotResidualFactor?: number;
       repotWc?: number;
       repotWr?: number;
+      // `adjustment` scaled by (1 - wc) — spec F6.0a. REPOT reads this INSTEAD of `adjustment`; every other
+      // task reads `adjustment` and never sees this field.
+      repotAdjustmentEffective?: number;
     },
     frequencyDays?: number, // PlantTaskFrequency override — replaces the species base interval
   ): Date {
@@ -318,7 +400,9 @@ export class CarePlanService {
     if (task === 'REPOT') {
       return computeRepotDue({
         cadenceDays: frequencyDays ?? record.repotting.typicalIntervalMonths * 30,
-        adjustment: ctx.adjustment,
+        // The FALLBACK multiplier, with its authority surrendered in proportion to the physical channel's
+        // freshness (F6.0a). Falls back to the raw `adjustment` only if the field was not threaded.
+        adjustment: ctx.repotAdjustmentEffective ?? ctx.adjustment,
         anchor: ctx.anchor,
         crowdingFactor: ctx.repotCrowdingFactor ?? 1,
         residualFactor: ctx.repotResidualFactor ?? 1,

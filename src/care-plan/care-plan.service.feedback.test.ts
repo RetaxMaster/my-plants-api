@@ -34,8 +34,11 @@ function setup(waterEvents: { type: string; payload: unknown }[]) {
       // recomputePlant reads the per-task last-DONE anchor (findFirst) AND the feedback window (findMany).
       findFirst: async () => null,
       // Honors `take` so a regression test can prove a fixed row cap would truncate the window.
+      // Discriminates on `task` as real Prisma does: recomputePlant now issues TWO `type: { in: [...] }`
+      // findMany queries — the WATER feedback window and Spec F's REPOT inspection history. Keying only on
+      // `type.in` would hand the WATER rows to the REPOT calibration.
       findMany: async ({ where, take }: any) =>
-        where?.type?.in ? (take ? waterEvents.slice(0, take) : waterEvents) : [], // window query has type: { in: [...] }
+        where?.task === 'WATER' && where?.type?.in ? (take ? waterEvents.slice(0, take) : waterEvents) : [],
     },
     dueCache: {
       upsert: async ({ where, create }: any) => { dues[where.plantId_task.task] = create?.nextDueOn ?? null; },
