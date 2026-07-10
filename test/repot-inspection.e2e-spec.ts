@@ -177,13 +177,26 @@ describe('REPOT as an inspection (e2e)', () => {
     expect(after).toBe(before);
   });
 
-  it('F6.4: not-needed-yet ALWAYS moves the date — the floor lands at today + 14 (UTC midnight)', async () => {
-    const id = await newPlant();
+  it('F6.4: not-needed-yet ALWAYS moves the date — even when the optional channel is fully neutral', async () => {
+    // This plant has no height and no pot size, so `optional ** 0 === 1` and the emergent push is EXACTLY
+    // zero. Without the floor, the owner supplies the most valuable observation the system can receive and
+    // the task reappears the same day.
+    const id = await newPlant('2024-01-01'); // long overdue: the computed date is in the past
+    await recompute();
+    const computedBefore = await repotDue(id);
+    expect(dayDiff(computedBefore!, startOfTodayUtc(TZ))).toBeLessThan(0); // overdue
+
     await postFeedback(id, { task: 'REPOT', type: 'POSTPONED', occurredOn: todayYmd(), reason: 'not-needed-yet' })
       .expect(201);
+
     const ov = await repotOverride(id);
     expect(ov!.nextDueOn.getTime() % 86_400_000).toBe(0); // a @db.Date round-trip: no wall-clock remainder
     expect(dayDiff(ov!.nextDueOn, startOfTodayUtc(TZ))).toBe(14);
+
+    // And the promise lives in the SCHEDULE, not in the override row: `resolveDue` must apply the floor.
+    // A `resolveDue` that ignored the REPOT floor would leave the overdue date and this would fail.
+    const due = await repotDue(id);
+    expect(dayDiff(due!, startOfTodayUtc(TZ))).toBe(14);
   });
 
   it('F3.1: the override is a FLOOR — a +1-day could-not-check snooze does NOT pin the far-future due date', async () => {

@@ -48,32 +48,29 @@ describe('logPhi — relative precision + continuous two-term asymptotic tail (s
     expect(Math.abs((logPhi(-40) - converged) / converged)).toBeLessThan(5e-12);
   });
 
-  it('is continuous across the z = -10 branch cutoff (branch jump < 1e-5 nats)', () => {
-    // The cutoff is -10, NOT -6: at -6 this exact assertion fails at 1.39e-4 (14x the tolerance), because
-    // the two-term Mills error there is 2.78e-4 nats. At -10 it is 1.42e-5, so the branch jump is 7.08e-6.
-    const left = logPhi(-10.0001);
-    const at = logPhi(-10);
-    const right = logPhi(-9.9999);
-    expect(Math.abs(at - left)).toBeLessThan(2e-3); // step 0.0001 in z; slope ~-10 -> ~1e-3
-    expect(Math.abs(right - at)).toBeLessThan(2e-3);
-    // the residual JUMP attributable to the branch switch (not the z-step) is far smaller:
-    const slope = (right - left) / 0.0002; // ~ dlogPhi/dz at -10
-    const predictedAt = left + slope * 0.0001;
-    expect(Math.abs(at - predictedAt)).toBeLessThan(1e-5); // branch discontinuity 7.08e-6 < 1e-5
-  });
-
-  it('the cutoff could NOT have been -6: the two-term Mills error there is 47x the error at -10', () => {
-    // This is the assertion that makes the choice of LOGPHI_CUTOFF falsifiable rather than decorative.
-    // Both branches evaluated explicitly at the same z; the direct branch is exact there (erfc(4.24) is
-    // computed to relative precision), so the difference IS the asymptotic's error.
+  it('the branch jump at the z = -10 cutoff is 1.42e-5 nats — measured DIRECTLY, not by extrapolation', () => {
+    // ⚠️ CORRECTED 2026-07-09. This test used to assert `|at - (left+right)/2| < 1e-5` and the doc called
+    // that "the branch jump". It is not: `left` is the only sample on the tail branch, so its error enters
+    // the midpoint HALVED. The metric measured 7.08e-6 — exactly half of the real jump. Since the direct
+    // branch is exact at -10, the branch jump simply IS the two-term Mills error there.
     const mills = (z: number) =>
       (-z * z) / 2 - Math.log(-z * Math.sqrt(2 * Math.PI)) + Math.log1p(-1 / z ** 2 + 3 / z ** 4);
     const direct = (z: number) => Math.log(0.5 * erfc(-z / Math.SQRT2));
-    const errAt6 = Math.abs(mills(-6) - direct(-6));
-    const errAt10 = Math.abs(mills(-10) - direct(-10));
-    expect(errAt6).toBeGreaterThan(2e-4); // 2.78e-4 — far too large to switch branches at -6
-    expect(errAt10).toBeLessThan(2e-5); // 1.42e-5 — small enough that the branch jump stays < 1e-5
-    expect(errAt6 / errAt10).toBeGreaterThan(15); // measured ~19.6x
+
+    const jumpAt10 = Math.abs(mills(-10) - direct(-10));
+    expect(jumpAt10).toBeLessThan(2e-5); // measured 1.4173e-5
+    expect(jumpAt10).toBeGreaterThan(1e-5); // and it is NOT below 1e-5 — the old claim was wrong
+
+    // The cutoff choice is falsifiable, not decorative: at -6 the same jump is 19.6x larger.
+    const jumpAt6 = Math.abs(mills(-6) - direct(-6));
+    expect(jumpAt6).toBeGreaterThan(2e-4); // 2.782e-4 — far too large to switch branches at -6
+    expect(jumpAt6 / jumpAt10).toBeGreaterThan(15); // measured 19.6x
+
+    // A 1.42e-5-nat step is immaterial where it lands: exp(1.42e-5) = 1.0000142, applied to a likelihood
+    // factor already of order 1e-23. `logPhi` itself is therefore continuous to well within the estimator's
+    // needs, and the shipped function agrees with both branches at the seam.
+    expect(Math.abs(logPhi(-10) - direct(-10))).toBeLessThan(1e-15); // -10 takes the DIRECT branch
+    expect(Math.abs(logPhi(-10.0001) - mills(-10.0001))).toBeLessThan(1e-15); // just below: the tail branch
   });
 
   it('erfc has relative precision deep in the tail (erfc(4) ~ 1.5417e-8, not 0)', () => {

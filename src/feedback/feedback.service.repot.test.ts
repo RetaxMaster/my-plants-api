@@ -250,46 +250,46 @@ describe('FeedbackService — REPOT inspection flow (spec F.3/F5.3/F.6)', () => 
     expect(adjustmentUpserts).toHaveLength(1);
   });
 
-  it('routing is on freshness >= 0.5, not freshness > 0: a barely-fresh height still takes the fallback', async () => {
+  it('routing is on freshness >= ROUTE_MIN, not freshness > 0: a barely-fresh height takes the fallback', async () => {
     // freshness ramps linearly from 1 at day 90 to 0 at day 730. At day 600 it is 0.203 — well above zero,
     // far below ROUTE_MIN. Routing on `> 0` would send this to a channel where it has almost no authority
-    // AND deny it the fallback.
+    // AND deny it the fallback, so it would contribute to neither.
     const age600 = new Date(Date.now() - 600 * 86_400_000);
     const { svc, adjustmentUpserts, created } = build({
-      potSizeCm: 20,
-      growthHabit: 'upright',
-      sizeCm: 60,
-      sizedOccurredOn: age600,
-      currentMultiplier: 1,
+      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age600, currentMultiplier: 1,
     });
     await svc.record({
-      plantId: 'pl1',
-      task: 'REPOT',
-      type: 'POSTPONED',
-      occurredOn: new Date(),
-      reason: 'not-needed-yet',
+      plantId: 'pl1', task: 'REPOT', type: 'POSTPONED', occurredOn: new Date(), reason: 'not-needed-yet',
     });
     expect(payloadOf(created).routedTo).toBe('adjustment');
     expect(adjustmentUpserts).toHaveLength(1);
   });
 
-  it('at freshness just ABOVE the threshold (age 400 d) it routes to calibration — the boundary is real', async () => {
-    // freshness(400) = (730-400)/(730-90) = 0.5156 >= 0.5. Paired with the 600-day case above, this proves
-    // the branch is a genuine threshold on a continuous curve, not a constant.
+  it('at freshness 0.516 (age 400 d) it STILL takes the fallback — the calibration would be weaker there', async () => {
+    // freshness(400) = (730-400)/(730-90) = 0.5156. Above zero, above 0.5 — and still below ROUTE_MIN = 0.6,
+    // because at that age sigma_obs has grown to 0.566 and one inspection moves R_REF_plant so little that
+    // the calibration's marginal authority (-35.5 d) is BELOW the fallback's step (-37.2 d). This test is
+    // what pins ROUTE_MIN above the measured crossover at freshness 0.5187.
     const age400 = new Date(Date.now() - 400 * 86_400_000);
     const { svc, adjustmentUpserts, created } = build({
-      potSizeCm: 20,
-      growthHabit: 'upright',
-      sizeCm: 60,
-      sizedOccurredOn: age400,
-      currentMultiplier: 1,
+      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age400, currentMultiplier: 1,
     });
     await svc.record({
-      plantId: 'pl1',
-      task: 'REPOT',
-      type: 'POSTPONED',
-      occurredOn: new Date(),
-      reason: 'not-needed-yet',
+      plantId: 'pl1', task: 'REPOT', type: 'POSTPONED', occurredOn: new Date(), reason: 'not-needed-yet',
+    });
+    expect(payloadOf(created).routedTo).toBe('adjustment');
+    expect(adjustmentUpserts).toHaveLength(1);
+  });
+
+  it('at freshness 0.672 (age 300 d) it routes to calibration — the boundary is a real threshold', async () => {
+    // freshness(300) = 430/640 = 0.672 >= 0.6. Paired with the 400- and 600-day cases above, this proves the
+    // branch is a genuine threshold on a continuous curve, not a constant.
+    const age300 = new Date(Date.now() - 300 * 86_400_000);
+    const { svc, adjustmentUpserts, created } = build({
+      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age300, currentMultiplier: 1,
+    });
+    await svc.record({
+      plantId: 'pl1', task: 'REPOT', type: 'POSTPONED', occurredOn: new Date(), reason: 'not-needed-yet',
     });
     expect(payloadOf(created).routedTo).toBe('calibration');
     expect(adjustmentUpserts).toEqual([]);

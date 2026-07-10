@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type CareEventType, type Task } from '@prisma/client';
+import { UNJUSTIFIED_REPOT_REASON } from '@retaxmaster/my-plants-species-schema';
 import type { GrowthHabit, RepotPostponeReason } from '@retaxmaster/my-plants-species-schema';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
@@ -13,17 +14,39 @@ import { computeAdherence, type AdherencePayload } from './adherence.js';
 const POSTPONE_WINDOW_DAYS = 60;
 
 // ---- REPOT inspection constants (spec F.6/F6.4). Each has a §7.10 ledger row. ----
-// Route an inspection to the F.5 calibration iff the height's `freshness` is at least this. Below it the
-// calibration's authority collapses toward the fallback's, and routing there would ALSO deny the inspection
-// the fallback — so a nearly-stale height would contribute to neither channel. One continuous `freshness`
-// curve, three consumers, one threshold on it.
-const REPOT_ROUTE_MIN = 0.5;
-// `not-needed-yet` must ALWAYS move the date (F6.4): with a stale height the whole optional channel is
-// neutral (`optional ** 0 === 1`) and the emergent push can be exactly zero — the owner supplies the most
-// valuable observation the system can receive, and nothing happens.
-const REPOT_MIN_PUSH_DAYS = 14;
-const REPOT_SNOOZE_DAYS = 14; // `needed-cannot-now`: a short snooze — the owner will repot soon.
-const REPOT_REMIND_DAYS = 1; // `could-not-check`: remind tomorrow. Logistics, not information.
+//
+// Route an inspection to the F.5 calibration iff the height's `freshness` is at least this; otherwise send
+// it to the fallback tracker. §F.6 is normative: the threshold must be chosen so the calibration channel's
+// MARGINAL authority at ROUTE_MIN EXCEEDS what the fallback would have contributed — otherwise a nearly-
+// stale height goes to a channel where it does less, AND is denied the one where it would have done more.
+//
+// Measured on the reference case (a NEUTRAL plant, R = R_REF, where `crowdingFactorRepot` is unclamped so
+// the whole shift IS the inspection's own contribution; a 600-day cadence). The binding direction is
+// `needed-cannot-now`, whose fallback step is -37.2 d against `not-needed-yet`'s +9.7 d:
+//
+//   freshness  height age   calibration marginal   fallback step
+//     0.70        282 d          -55.2 d              -37.2 d
+//     0.60        346 d          -44.8 d              -37.2 d   <- ROUTE_MIN: a 1.20x margin
+//     0.5187      398 d          -37.2 d              -37.2 d   <- the true crossover
+//     0.50        410 d          -35.5 d              -37.2 d   <- fallback WINS: 0.5 would violate F.6
+//
+// `sigma_obs` grows with the height's age, so an old observation moves `R_REF_plant` less; a derivation that
+// ignores that (or that reads a plant whose factor is already clamped at the band edge) overstates the
+// calibration's authority. See docs/care-engine.md §7.10.
+const REPOT_ROUTE_MIN = 0.6;
+
+// The floor a postpone writes, per reason. A typed exhaustive record keyed by the shared vocabulary: a
+// missing or misspelled slug is a compile error, and the engine never re-types a literal.
+//   not-needed-yet    F6.4 — it must ALWAYS move the date. With a stale height the optional channel is
+//                     exactly neutral (`optional ** 0 === 1`) and the emergent push can be zero: the owner
+//                     supplies the most valuable observation the system can receive and nothing happens.
+//   needed-cannot-now a short snooze — the owner will repot soon. Kept short: a late repot compounds.
+//   could-not-check   remind tomorrow. Logistics, not information.
+const REPOT_FLOOR_DAYS: Record<RepotPostponeReason, number> = {
+  'not-needed-yet': 14,
+  'needed-cannot-now': 14,
+  'could-not-check': 1,
+};
 
 @Injectable()
 export class FeedbackService {
@@ -212,11 +235,12 @@ export class FeedbackService {
     }
 
     // POSTPONED — an inspection. An absent or foreign reason (e.g. a WATER slug the coarse DTO allows)
-    // defaults to `could-not-check`, which is the safe outcome: it records nothing.
+    // defaults to the UNJUSTIFIED outcome, which is the safe one: it records nothing. The vocabulary is
+    // referenced by name from the shared schema, never re-typed.
     const reason: RepotPostponeReason =
-      input.reason === 'not-needed-yet' || input.reason === 'needed-cannot-now'
-        ? input.reason
-        : 'could-not-check';
+      input.reason != null && isJustifiedRepotReason(input.reason)
+        ? (input.reason as RepotPostponeReason)
+        : UNJUSTIFIED_REPOT_REASON;
     const justified = isJustifiedRepotReason(reason);
     // The split is by FRESHNESS, not mere existence. A height recorded two years ago yields an `R_obs` that
     // exists but whose authority has decayed to nothing; routing it to the calibration would give it no
@@ -248,12 +272,7 @@ export class FeedbackService {
       })
     ).place.city.timezone;
     const today = startOfTodayUtc(tz, now);
-    const pushDays =
-      reason === 'not-needed-yet'
-        ? REPOT_MIN_PUSH_DAYS
-        : reason === 'needed-cannot-now'
-          ? REPOT_SNOOZE_DAYS
-          : REPOT_REMIND_DAYS;
+    const pushDays = REPOT_FLOOR_DAYS[reason];
     const floorOn = new Date(
       Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + pushDays),
     );

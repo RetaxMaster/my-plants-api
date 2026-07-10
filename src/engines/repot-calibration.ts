@@ -48,9 +48,10 @@ function erfccheb(z: number): number {
 export const erfc = (x: number): number => (x >= 0 ? erfccheb(x) : 2 - erfccheb(-x));
 
 // ln Phi(z). Direct relative-precision branch where valid; a TWO-term asymptotic (Mills ratio) below
-// z = -10. The cutoff is -10, NOT -6: the two-term error at -6 is 2.78e-4 nats (measured), so a -6 cutoff
-// FAILS the branch-continuity assertion at 1.39e-4 — 14x the 1e-5 tolerance. At -10 the two-term error is
-// 1.42e-5 and the branch jump is 7.08e-6. TREACHEROUS to get wrong: logPhi(-6) uses the DIRECT branch
+// z = -10. Because the direct branch is exact at the seam, the BRANCH JUMP simply IS the two-term Mills
+// error there: 1.4173e-5 nats at -10, and 2.782e-4 at -6 (19.6x worse). The cutoff is -10, not -6, for
+// exactly that reason. A 1.42e-5-nat step is immaterial where it lands — exp(1.42e-5) = 1.0000142 on a
+// likelihood factor already of order 1e-23. TREACHEROUS to get wrong: logPhi(-6) uses the DIRECT branch
 // (exact), logPhi(-10) the tail (rel. error ~3e-8), logPhi(-40) is machine-exact — so every other logPhi
 // test passes; ONLY the continuity assertion exposes a too-shallow cutoff. No clamp anywhere: the
 // relative-precision erfc never underflows to a fake zero, and erfc(10/sqrt2) ~ 1.52e-23 keeps the direct
