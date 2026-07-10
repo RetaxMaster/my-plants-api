@@ -60,7 +60,16 @@ function setupRepot(
         return null;
       },
       // Two `type: { in: [...] }` queries exist: the WATER feedback window and the REPOT inspection history.
-      findMany: async ({ where }: any) => (where?.task === 'REPOT' ? repotEvents : []),
+      // Honour the ORDER real Prisma returns (occurredOn asc, createdAt asc). The calibration splits cycles
+      // at each DONE, so a harness that returned insertion order could silently validate the wrong grouping.
+      findMany: async ({ where }: any) =>
+        where?.task === 'REPOT'
+          ? [...repotEvents].sort(
+              (a, b) =>
+                a.occurredOn.getTime() - b.occurredOn.getTime() ||
+                (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0),
+            )
+          : [],
     },
     dueCache: {
       upsert: async ({ where, create, update }: any) => {
@@ -237,13 +246,16 @@ describe('REPOT calibration + floor wiring (spec F5.2b/F5.3/F6.0a/F3.1)', () => 
   });
 
   it('F5.2b: a REPOT DONE carries the posterior forward — it does not reset R_REF_plant to R_REF', async () => {
-    const doneOn = new Date(Date.now() - 400 * 86_400_000); // a repot ~1.1 y ago closed the first cycle
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
+    const doneOn = daysAgo(400); // a repot ~1.1 y ago CLOSED the first cycle
     const carried = setupRepot({
       profile: freshProfile,
       sizedHeight: sizedToday(46),
       repotEvents: [
-        calibEvent('not-needed-yet', 2.6),
-        calibEvent('needed-cannot-now', 3.8),
+        // Both inspections PRE-DATE the DONE, so they belong to the closed cycle. `heightMeasuredOn` stays
+        // "today" so sigma_obs does not also decay them — this test is about the carry-forward alone.
+        { ...calibEvent('not-needed-yet', 2.6), occurredOn: daysAgo(500) },
+        { ...calibEvent('needed-cannot-now', 3.8), occurredOn: daysAgo(450) },
         { type: 'DONE', occurredOn: doneOn, payload: { routedTo: 'done', R_obs: 2.6 } },
       ],
     });
@@ -252,7 +264,10 @@ describe('REPOT calibration + floor wiring (spec F5.2b/F5.3/F6.0a/F3.1)', () => 
     await carried.svc.recomputePlant('pl1');
     await amnesia.svc.recomputePlant('pl1');
     // Both anchor on the DONE / acquiredOn respectively, so compare the *shape*: the carried plant's
-    // threshold is still above R_REF, so it reads as LESS crowded and its due sits further from its anchor.
+    // threshold is still above R_REF (2.421 vs 2.000), so the same R reads as LESS crowded and its due sits
+    // further from its anchor. Under amnesia semantics BOTH would be 962 and the strict `>` would fail.
+    expect(daysBetween(doneOn, carried.dues.REPOT)).toBe(1121);
+    expect(daysBetween(ANCHOR, amnesia.dues.REPOT)).toBe(962);
     expect(daysBetween(doneOn, carried.dues.REPOT)).toBeGreaterThan(daysBetween(ANCHOR, amnesia.dues.REPOT));
   });
 
