@@ -24,33 +24,40 @@ const POSTPONE_WINDOW_DAYS = 60;
 // than it looks, twice over:
 //
 //  (a) The fallback multiplier's authority is itself damped by `(1 - wc)` (F6.0a), and any plant that
-//      REACHES this decision has a computable R, hence `wc = freshness > 0`. So the fallback's raw step
-//      (-37.2 d on a 600-day cadence) is the step of a plant with `wc = 0` — one whose R is NOT computable,
-//      which is routed to the fallback by `rObs == null` and never consults this threshold at all.
-//  (b) `crowdingFactorRepot` is clamped to [0.82, 1.18]. A plant already pinned at a band edge cannot move
-//      further in that direction, so the calibration's marginal authority there is ~zero regardless of
-//      freshness.
+//      REACHES this decision has a computable R, hence `wc = freshness > 0`. The fallback's UNDAMPED step
+//      (-37.2 d on a 600-day cadence) belongs to a plant with `wc = 0` — one whose R is NOT computable, which
+//      is routed to the fallback by `rObs == null` and never consults this threshold at all. Comparing
+//      against it overstates the fallback and understates the calibration.
+//  (b) `crowdingFactorRepot` is clamped to [0.82, 1.18] (raw factor: clamped HI for R <= 1.517, clamped LO
+//      for R >= 2.509). A clamped plant cannot move further TOWARD the edge it sits on, so the calibration is
+//      saturated in exactly one direction: `not-needed-yet` on a HI-clamped plant, `needed-cannot-now` on a
+//      LO-clamped one. The opposite direction moves freely. Saturation is DIRECTIONAL, not a property of
+//      being clamped.
 //
 // Measured on the NEUTRAL reference plant (R = R_REF, factor unclamped, 600-day cadence). The binding
 // direction is `needed-cannot-now` (the `not-needed-yet` crossover sits far lower, at freshness 0.157):
 //
-//   freshness  height age   calibration marginal   fallback marginal (damped by 1-wc)
-//     0.70        282 d          -55.2 d                 -11.2 d
-//     0.60        346 d          -44.8 d                 -14.9 d     <- ROUTE_MIN: a 3.0x margin
-//     0.50        410 d          -35.5 d                 -18.6 d        (1.9x — 0.5 also satisfies F.6)
-//     0.40        474 d          -27.2 d                 -22.3 d        (1.2x)
-//     0.358       501 d          -23.9 d                 -23.9 d     <- the crossover, for THIS plant
+//   freshness  height age   calibration marginal   fallback marginal (damped by 1-wc)   ratio
+//     0.70        282 d          -55.2 d                  -11.2 d                        4.9x
+//     0.60        346 d          -44.8 d                  -14.9 d                        3.0x
+//     0.50        410 d          -35.5 d                  -18.6 d                        1.9x   <- ROUTE_MIN
+//     0.40        474 d          -27.2 d                  -22.3 d                        1.2x
+//     0.358       501 d          -23.9 d                  -23.9 d                        1.0x   <- crossover
 //
-// ⚠️ There is NO freshness threshold that satisfies F.6 for every plant, because the crossover is
-// STATE-DEPENDENT: it is 0.358 at R = R_REF, but 0.395 at R = 1.5 and ~1.0 for a band-clamped plant
-// (R >= 2.5), where the calibration is saturated and the fallback is the better channel at ANY freshness.
-// Given that, a HIGHER threshold is the safer error: routing a band-clamped plant to the calibration loses
-// its lesson entirely (marginal ~0 AND the fallback is denied), whereas routing a neutral plant to the
-// fallback merely damps its lesson to a still-useful (1 - wc) fraction. `0.6` is therefore a deliberately
-// CONSERVATIVE choice, not the crossover; it also reads plainly as "the height is more trusted than not"
-// and admits heights up to ~11.5 months old. Routing on the marginal effect itself — computable here at
-// submit time — is the honest improvement, and is deferred (docs/care-engine.md §7.11).
-const REPOT_ROUTE_MIN = 0.6;
+// `0.5` therefore satisfies F.6 with a 1.9x margin, and reads exactly as the spec's own verbal criterion:
+// *"the height is more trusted than not."* It admits heights up to ~13.5 months old.
+//
+// ⚠️ NO freshness threshold satisfies F.6 for EVERY plant: the crossover is state-dependent (0.358 at
+// R = R_REF; 0.395 at R = 1.5; and for a plant saturated in the observed direction the calibration marginal
+// is ~0, so the fallback is stronger at ANY freshness). Raising the threshold does not fix that — a saturated
+// plant with freshness above the threshold is routed to the calibration whichever value we pick. `0.6` was
+// implemented and then REVERTED for exactly this reason: its stated advantage did not survive measurement
+// (it rescues a saturated plant only in the narrow window `f ∈ [0.5, 0.6)`, while sending a neutral plant in
+// that same window to the fallback, which retains only 42-52% of the available authority; mean retained
+// authority across the population is flat, 0.777-0.792, and the worst case is 0 at every threshold).
+// The honest fix is to route on the MARGINAL EFFECT itself — both marginals are computable here, at submit
+// time — or to widen the band. Deferred; see docs/care-engine.md §7.11.
+const REPOT_ROUTE_MIN = 0.5;
 
 // The floor a postpone writes, per reason. A typed exhaustive record keyed by the shared vocabulary: a
 // missing or misspelled slug is a compile error, and the engine never re-types a literal.

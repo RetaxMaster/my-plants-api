@@ -265,15 +265,13 @@ describe('FeedbackService — REPOT inspection flow (spec F.3/F5.3/F.6)', () => 
     expect(adjustmentUpserts).toHaveLength(1);
   });
 
-  it('at freshness 0.516 (age 400 d) it STILL takes the fallback — ROUTE_MIN is conservative by design', async () => {
-    // freshness(400) = (730-400)/(730-90) = 0.5156: above zero, above 0.5, and still below ROUTE_MIN = 0.6.
-    // Paired with the 300-day case below, this brackets the threshold to (0.5156, 0.672] — lowering it to
-    // 0.5 or raising it to 0.7 breaks one of the two. `0.6` is a deliberately conservative choice, NOT the
-    // crossover (which is state-dependent: 0.358 for a neutral plant, ~1.0 for a band-clamped one). See the
-    // derivation in feedback.service.ts.
-    const age400 = new Date(Date.now() - 400 * 86_400_000);
+  it('at freshness 0.484 (age 420 d) it takes the fallback — just BELOW the threshold', async () => {
+    // freshness(420) = (730-420)/(730-90) = 0.4844. Paired with the 410-day case below, this brackets
+    // ROUTE_MIN to (0.4844, 0.5] — lowering it or raising it breaks one of the two. The bracket is what makes
+    // the constant falsifiable rather than decorative.
+    const age420 = new Date(Date.now() - 420 * 86_400_000);
     const { svc, adjustmentUpserts, created } = build({
-      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age400, currentMultiplier: 1,
+      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age420, currentMultiplier: 1,
     });
     await svc.record({
       plantId: 'pl1', task: 'REPOT', type: 'POSTPONED', occurredOn: new Date(), reason: 'not-needed-yet',
@@ -282,12 +280,12 @@ describe('FeedbackService — REPOT inspection flow (spec F.3/F5.3/F.6)', () => 
     expect(adjustmentUpserts).toHaveLength(1);
   });
 
-  it('at freshness 0.672 (age 300 d) it routes to calibration — the boundary is a real threshold', async () => {
-    // freshness(300) = 430/640 = 0.672 >= 0.6. Paired with the 400- and 600-day cases above, this proves the
-    // branch is a genuine threshold on a continuous curve, not a constant.
-    const age300 = new Date(Date.now() - 300 * 86_400_000);
+  it('at freshness 0.500 exactly (age 410 d) it routes to calibration — the threshold is inclusive', async () => {
+    // freshness(410) = 320/640 = 0.5 exactly. `>=` admits it. This is the boundary, and it is a real
+    // threshold on a continuous curve, not a constant.
+    const age410 = new Date(Date.now() - 410 * 86_400_000);
     const { svc, adjustmentUpserts, created } = build({
-      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age300, currentMultiplier: 1,
+      potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age410, currentMultiplier: 1,
     });
     await svc.record({
       plantId: 'pl1', task: 'REPOT', type: 'POSTPONED', occurredOn: new Date(), reason: 'not-needed-yet',
