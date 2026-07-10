@@ -55,7 +55,7 @@ const POSTPONE_WINDOW_DAYS = 60;
 // plant with freshness above the threshold is routed to the calibration whichever value we pick. `0.6` was
 // implemented and then REVERTED for exactly this reason: its stated advantage did not survive measurement
 // (it rescues a saturated plant only in the narrow window `f in [0.5, 0.6)`, while sending a neutral plant in
-// that same window to the fallback, where it retains between 52.3% at f = 0.5 and 33.4% as f -> 0.6. The
+// that same window to the fallback, where it retains between 52.3% at f = 0.5 and 33.2% as f -> 0.6. The
 // aggregate cannot decide it either: the WORST-case retained authority is 0 at every threshold, and the MEAN
 // is flat to ~±0.04 across [0.36, 0.62] AND reverses its ordering with the weighting of the R grid).
 // The honest fix is to route on the MARGINAL EFFECT itself — both marginals are computable here, at submit
