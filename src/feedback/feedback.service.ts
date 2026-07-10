@@ -1,12 +1,29 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type CareEventType, type Task } from '@prisma/client';
+import type { GrowthHabit, RepotPostponeReason } from '@retaxmaster/my-plants-species-schema';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
-import { nextAdjustment } from '../engines/adaptation.js';
+import { isJustifiedRepotReason, nextAdjustment, nextRepotAdjustment } from '../engines/adaptation.js';
+import { crowdingIndex, freshness } from '../engines/scheduling.js';
+import { latestSizedHeight } from '../plants/latest-sized-height.js';
+import { startOfTodayUtc } from '../common/time/local-date.js';
 import { computeAdherence, type AdherencePayload } from './adherence.js';
 
 const POSTPONE_WINDOW_DAYS = 60;
+
+// ---- REPOT inspection constants (spec F.6/F6.4). Each has a §7.10 ledger row. ----
+// Route an inspection to the F.5 calibration iff the height's `freshness` is at least this. Below it the
+// calibration's authority collapses toward the fallback's, and routing there would ALSO deny the inspection
+// the fallback — so a nearly-stale height would contribute to neither channel. One continuous `freshness`
+// curve, three consumers, one threshold on it.
+const REPOT_ROUTE_MIN = 0.5;
+// `not-needed-yet` must ALWAYS move the date (F6.4): with a stale height the whole optional channel is
+// neutral (`optional ** 0 === 1`) and the emergent push can be exactly zero — the owner supplies the most
+// valuable observation the system can receive, and nothing happens.
+const REPOT_MIN_PUSH_DAYS = 14;
+const REPOT_SNOOZE_DAYS = 14; // `needed-cannot-now`: a short snooze — the owner will repot soon.
+const REPOT_REMIND_DAYS = 1; // `could-not-check`: remind tomorrow. Logistics, not information.
 
 @Injectable()
 export class FeedbackService {
@@ -38,6 +55,16 @@ export class FeedbackService {
       select: { id: true },
     });
     if (!owned) throw new NotFoundException(`Unknown plant: ${input.plantId}`);
+
+    // REPOT is an INSPECTION, not a scheduled action (spec F). It has its own submit flow: snapshot the
+    // observation, route it to exactly one learning channel, write a FLOOR override, and gate the fallback
+    // tracker on a justified reason. It never reaches the generic path below — in particular it never
+    // reaches the un-gated `adapt()`, which is the F1.2 fix.
+    if (input.task === 'REPOT') {
+      await this.recordRepotFeedback(input);
+      await this.carePlan.recomputePlant(input.plantId);
+      return;
+    }
 
     // DONE-on-WATER closes a punctuality cycle (spec A.2). Capture adherence BEFORE any write —
     // an active override here is precisely the "this cycle was postponed" signal; deleting it first
@@ -112,6 +139,153 @@ export class FeedbackService {
     await this.carePlan.recomputePlant(input.plantId);
   }
 
+  // Snapshot the observation AS IT IS NOW (spec F5.3). `R_obs` lives in habit-normalized space, the same
+  // space `R_REF ≈ 2` is defined in, and is persisted alongside the raw inputs that produced it — because
+  // `growthHabit` is a user-editable profile field, so persisting only the ratio would let an edit from
+  // `shrub` to `climber` silently rewrite the meaning of the whole observation history. The height and its
+  // measurement day come from `latestSizedHeight`, the single definition of "the plant's height"; this flow
+  // must not re-implement that query (a later note-only progress entry must never blank a real height).
+  private async snapshotRepotObservation(plantId: string, now: Date) {
+    const [profile, sized] = await Promise.all([
+      this.prisma.plantProfile.findUnique({
+        where: { plantId },
+        select: { potSizeCm: true, growthHabit: true },
+      }),
+      latestSizedHeight(this.prisma, plantId, now),
+    ]);
+    const heightCm = sized?.heightCm ?? null;
+    const potSizeCm = profile?.potSizeCm ?? null;
+    const growthHabit = (profile?.growthHabit ?? null) as GrowthHabit | null;
+    const heightMeasuredOn = sized?.measuredOn ?? null;
+    const rObs = crowdingIndex(heightCm, potSizeCm, growthHabit); // null when R is not computable
+    // `fresh` is 0 whenever R is not computable — no pot size, no height, or a trailing habit. Those
+    // inspections have no physical channel to enter, so they take the fallback (Spec E A5.4's `wc`).
+    const fresh = rObs != null ? freshness(sized?.heightAgeDays ?? 0) : 0;
+    return { rObs, heightCm, potSizeCm, growthHabit, heightMeasuredOn, fresh };
+  }
+
+  // The full REPOT inspection flow (both DONE and POSTPONED). A DONE re-anchors (its `occurredOn`) and
+  // clears the override; a POSTPONED captures the reason, snapshots the observation, decides the routing,
+  // writes a FLOOR override, and — ONLY on the fallback route and ONLY for a justified reason — nudges the
+  // quantile tracker. `could-not-check` never moves the multiplier: that is the F1.2 fix.
+  private async recordRepotFeedback(input: {
+    plantId: string;
+    type: CareEventType;
+    occurredOn: Date;
+    reason?: string;
+    payload?: unknown;
+  }): Promise<void> {
+    // Guard the HTTP edge: REPOT feedback is ONLY DONE or POSTPONED. The DTO accepts any CareEventType
+    // (@IsEnum), so without this a { task: 'REPOT', type: 'SYMPTOM' } would FALL THROUGH to the POSTPONED
+    // path below and be persisted with the wrong type, an invented reason, and a floor override — silent
+    // data corruption.
+    if (input.type !== 'DONE' && input.type !== 'POSTPONED') {
+      throw new BadRequestException(`REPOT feedback must be DONE or POSTPONED, got ${input.type}`);
+    }
+    const now = new Date();
+    const snap = await this.snapshotRepotObservation(input.plantId, now);
+    const basePayload = {
+      ...(input.payload as Record<string, unknown> | undefined),
+      R_obs: snap.rObs,
+      heightCm: snap.heightCm,
+      potSizeCm: snap.potSizeCm,
+      growthHabit: snap.growthHabit,
+      heightMeasuredOn: snap.heightMeasuredOn ? snap.heightMeasuredOn.toISOString() : null,
+    };
+
+    if (input.type === 'DONE') {
+      // A DONE snapshots the payload for audit but is NEVER a calibration observation: a preventive or
+      // merely scheduled repot would enter the estimate as a false `needed` and poison it (F.10 item 4).
+      // `routedTo: 'done'` makes the calibration's `routedTo === 'calibration'` filter exclude it
+      // structurally, rather than relying on the absence of a `reason`.
+      await this.prisma.careEvent.create({
+        data: {
+          plantId: input.plantId,
+          task: 'REPOT',
+          type: 'DONE',
+          occurredOn: input.occurredOn,
+          payload: { ...basePayload, routedTo: 'done' } as Prisma.InputJsonValue,
+        },
+      });
+      await this.prisma.taskOverride.deleteMany({ where: { plantId: input.plantId, task: 'REPOT' } });
+      return;
+    }
+
+    // POSTPONED — an inspection. An absent or foreign reason (e.g. a WATER slug the coarse DTO allows)
+    // defaults to `could-not-check`, which is the safe outcome: it records nothing.
+    const reason: RepotPostponeReason =
+      input.reason === 'not-needed-yet' || input.reason === 'needed-cannot-now'
+        ? input.reason
+        : 'could-not-check';
+    const justified = isJustifiedRepotReason(reason);
+    // The split is by FRESHNESS, not mere existence. A height recorded two years ago yields an `R_obs` that
+    // exists but whose authority has decayed to nothing; routing it to the calibration would give it no
+    // effect AND deny it the fallback, so it would contribute to neither channel.
+    const routedTo: 'calibration' | 'adjustment' =
+      justified && snap.rObs != null && snap.fresh >= REPOT_ROUTE_MIN ? 'calibration' : 'adjustment';
+
+    await this.prisma.careEvent.create({
+      data: {
+        plantId: input.plantId,
+        task: 'REPOT',
+        type: 'POSTPONED',
+        occurredOn: input.occurredOn,
+        payload: { ...basePayload, reason, routedTo } as Prisma.InputJsonValue,
+      },
+    });
+
+    // The floor date (F6.4 / F3.1). `resolveDue` applies it as `max(computed, override)`, so a snooze can
+    // only ever push FORWARD; it can never pin.
+    //
+    // CRITICAL: `TaskOverride.nextDueOn` is `@db.Date` (DAY granularity). Build a UTC-MIDNIGHT date from the
+    // plant's local "today" the way the rest of the engine does — never `Date.now() + N * 86_400_000`, which
+    // carries the current wall-clock time, truncates on insert, and lands on a day that depends on the
+    // session timezone (the MariaDB date rule).
+    const tz = (
+      await this.prisma.plant.findUniqueOrThrow({
+        where: { id: input.plantId },
+        select: { place: { select: { city: { select: { timezone: true } } } } },
+      })
+    ).place.city.timezone;
+    const today = startOfTodayUtc(tz, now);
+    const pushDays =
+      reason === 'not-needed-yet'
+        ? REPOT_MIN_PUSH_DAYS
+        : reason === 'needed-cannot-now'
+          ? REPOT_SNOOZE_DAYS
+          : REPOT_REMIND_DAYS;
+    const floorOn = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + pushDays),
+    );
+    await this.prisma.taskOverride.upsert({
+      where: { plantId_task: { plantId: input.plantId, task: 'REPOT' } },
+      create: { plantId: input.plantId, task: 'REPOT', nextDueOn: floorOn },
+      update: { nextDueOn: floorOn },
+    });
+
+    // The fallback tracker: ONLY when routed to `adjustment` AND the reason is justified. A
+    // calibration-routed event leaves the multiplier alone — exclusivity is decided here, at submit time,
+    // and persisted as `payload.routedTo`, because the calibration re-reads the whole event history on
+    // every recompute and would otherwise consume this event through the second channel as well.
+    if (routedTo === 'adjustment' && justified) {
+      const current =
+        (
+          await this.prisma.plantTaskAdjustment.findUnique({
+            where: { plantId_task: { plantId: input.plantId, task: 'REPOT' } },
+          })
+        )?.multiplier ?? 1;
+      const multiplier = nextRepotAdjustment(current, reason);
+      await this.prisma.plantTaskAdjustment.upsert({
+        where: { plantId_task: { plantId: input.plantId, task: 'REPOT' } },
+        create: { plantId: input.plantId, task: 'REPOT', multiplier },
+        update: { multiplier },
+      });
+    }
+  }
+
+  // The generic, un-gated adaptation. REPOT no longer reaches it (see `record`). It now serves only
+  // FERTILIZE / ROTATE / CLEAN_LEAVES / MIST, which still carry the F1.2 defect — named, scheduled
+  // separately, and deliberately out of Spec F's scope.
   private async adapt(plantId: string, task: Task): Promise<void> {
     const since = new Date(Date.now() - POSTPONE_WINDOW_DAYS * 86_400_000);
     const recentPostpones = await this.prisma.careEvent.count({

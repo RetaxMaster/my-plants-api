@@ -4,15 +4,25 @@ export interface LatestSizedHeight {
   heightCm: number;
   /** Whole days from the measurement to now, floored at 0. Drives `freshness` (spec E, A5.5). */
   heightAgeDays: number;
+  /**
+   * The day the plant was measured (`occurredOn`, a `@db.Date`). Spec F §F5.3 snapshots this into the
+   * inspection's `CareEvent.payload` as `heightMeasuredOn`, because `σ_obs`'s age term *and* the
+   * calibration-vs-fallback routing both mean **the height measurement's** age, never the inspection
+   * event's — the two differ exactly in the case that matters (a fresh inspection of a plant whose height
+   * was recorded two years ago). Returned here rather than re-queried by the feedback service, so there
+   * stays exactly ONE definition of "the plant's height measurement" in the system.
+   */
+  measuredOn: Date;
 }
 
 /**
  * The plant's most recent SIZE-BEARING progress entry, and how old it is.
  *
  * This is the single definition of "the plant's height" for the whole system: the care engine reads it
- * to compute the crowding index, the plant detail read model shows it, and the care read model decides
- * from its age whether the engine is actually using it. Three callers, one query — because the two
- * things that make it correct are conventions, not obvious facts, and a copy cannot keep them:
+ * to compute the crowding index, the plant detail read model shows it, the care read model decides
+ * from its age whether the engine is actually using it, and the REPOT feedback flow snapshots it into the
+ * inspection payload. Four callers, one query — because the two things that make it correct are
+ * conventions, not obvious facts, and a copy cannot keep them:
  *
  *  - a later NOTE-ONLY progress entry must never blank a real height (hence the `sizeCm: { not: null }`
  *    filter *before* the ordering), and
@@ -36,5 +46,6 @@ export async function latestSizedHeight(
   return {
     heightCm: latest.sizeCm,
     heightAgeDays: Math.max(0, Math.floor((now.getTime() - latest.occurredOn.getTime()) / 86_400_000)),
+    measuredOn: latest.occurredOn,
   };
 }
