@@ -28,11 +28,13 @@ const POSTPONE_WINDOW_DAYS = 60;
 //      (-37.2 d on a 600-day cadence) belongs to a plant with `wc = 0` — one whose R is NOT computable, which
 //      is routed to the fallback by `rObs == null` and never consults this threshold at all. Comparing
 //      against it overstates the fallback and understates the calibration.
-//  (b) `crowdingFactorRepot` is clamped to [0.82, 1.18] (raw factor: clamped HI for R <= 1.517, clamped LO
-//      for R >= 2.509). A clamped plant cannot move further TOWARD the edge it sits on, so the calibration is
-//      saturated in exactly one direction: `not-needed-yet` on a HI-clamped plant, `needed-cannot-now` on a
-//      LO-clamped one. The opposite direction moves freely. Saturation is DIRECTIONAL, not a property of
-//      being clamped.
+//  (b) `crowdingFactorRepot` is clamped to [0.82, 1.18]. The raw factor hits the HI edge at R ~ 1.5170 and the
+//      LO edge at R ~ 2.5091, so it is clamped for R <= 1.516 and R >= 2.510 (rounded INWARD: raw(1.517) and
+//      raw(2.509) are both still inside the band). A clamped plant cannot move further TOWARD the edge it
+//      already sits on, so the calibration is saturated in exactly one direction: `not-needed-yet` on a
+//      HI-clamped plant, `needed-cannot-now` on a LO-clamped one. The opposite direction moves freely
+//      (R = 1.5 is clamped HI, yet its `needed-cannot-now` marginal at f = 0.8 is -72.6 d). Saturation is
+//      DIRECTIONAL, not a property of being clamped.
 //
 // Measured on the NEUTRAL reference plant (R = R_REF, factor unclamped, 600-day cadence). The binding
 // direction is `needed-cannot-now` (the `not-needed-yet` crossover sits far lower, at freshness 0.157):
@@ -52,9 +54,10 @@ const POSTPONE_WINDOW_DAYS = 60;
 // is ~0, so the fallback is stronger at ANY freshness). Raising the threshold does not fix that — a saturated
 // plant with freshness above the threshold is routed to the calibration whichever value we pick. `0.6` was
 // implemented and then REVERTED for exactly this reason: its stated advantage did not survive measurement
-// (it rescues a saturated plant only in the narrow window `f ∈ [0.5, 0.6)`, while sending a neutral plant in
-// that same window to the fallback, which retains only 42-52% of the available authority; mean retained
-// authority across the population is flat, 0.777-0.792, and the worst case is 0 at every threshold).
+// (it rescues a saturated plant only in the narrow window `f in [0.5, 0.6)`, while sending a neutral plant in
+// that same window to the fallback, where it retains between 52.3% at f = 0.5 and 33.4% as f -> 0.6. The
+// aggregate cannot decide it either: the WORST-case retained authority is 0 at every threshold, and the MEAN
+// is flat to ~±0.04 across [0.36, 0.62] AND reverses its ordering with the weighting of the R grid).
 // The honest fix is to route on the MARGINAL EFFECT itself — both marginals are computable here, at submit
 // time — or to widen the band. Deferred; see docs/care-engine.md §7.11.
 const REPOT_ROUTE_MIN = 0.5;
