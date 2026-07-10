@@ -166,8 +166,9 @@ describe('deriveRepotResidual — BIDIRECTIONAL root-bound signal from the water
 describe('nextAdjustment — the F1.2 bug, pinned BEFORE the fix (this is the *before* half of a pair)', () => {
   // This documents the LIVE PRODUCTION DEFECT that Spec F fixes for REPOT: an unreasoned POSTPONED runs
   // adapt(), and `postponeNudge = recentPostpones * 0.05` COMPOUNDS and never decays, because `current` is
-  // read already-nudged and the freshly-created event is inside the 60-day count. On a 360-720-day REPOT
-  // cadence that is 4-7 months of silent lengthening, taught by "I had no time".
+  // read already-nudged and the freshly-created event is inside the 60-day count. A 1.30 multiplier is
+  // +108 d (3.6 months) on a 360-day REPOT cadence and +216 d (7.1 months) on a 720-day one — silent
+  // lengthening, taught by "I had no time".
   //
   // It is pinned here to prove the magnitude, NOT because it is behaviour we keep. After the fix REPOT no
   // longer calls nextAdjustment at all (it calls nextRepotAdjustment); FERTILIZE/ROTATE/CLEAN_LEAVES/MIST
