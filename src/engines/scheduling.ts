@@ -135,12 +135,34 @@ export function freshness(ageDays: number): number {
 // is 1.5× steeper than WATER (n=2) for ALL B,p.
 const CROWD_B = 1;     // TUNED softening (shape). Un-clipped WATER window R ∈ [0.86, 3.19] at these values.
 const CROWD_EXP = 0.5; // TUNED damping, VPD_EXP family (same magnitude as VPD_EXP).
+// EXACTNESS NOTE (the `Object.is` neutral pins depend on this, so it is a proof, not a hope): at
+// `r === rRef` the quotient `r/rRef` is exactly 1, `1 ** n === 1` for every finite n, so numerator and
+// denominator are the *same* float and their quotient is exactly 1, and `Math.pow(1, p) === 1` for every
+// finite p. The result is therefore bit-exactly 1 — not "returned literally", but provably exact. The
+// feature's standing rule ("Object.is only on literally-returned values") is relaxed for this one case,
+// on the strength of that chain; every other pin is on a genuine literal.
 function crowdingResponse(r: number, rRef: number, n: number): number {
-  return ((1 + CROWD_B) / (1 + CROWD_B * (r / rRef) ** n)) ** CROWD_EXP; // exactly 1 at r === rRef
+  return ((1 + CROWD_B) / (1 + CROWD_B * (r / rRef) ** n)) ** CROWD_EXP; // bit-exactly 1 at r === rRef
+}
+
+// The crowding band for REPOT, deliberately tighter than WATER's [0.75, 1.3] on BOTH sides (A2.7: a late
+// repot compounds, but an early one is disruptive surgery on a plant that did not need it). ONE pair of
+// constants, shared by the factor and by `repotOptional`'s post-mean clamp — changing one literal without
+// the other would silently break the "tighter than WATER on both sides" guarantee.
+const REPOT_OPT_LO = 0.82, REPOT_OPT_HI = 1.18;
+
+// Below this freshness the engine's crowding factor is `crowdingFactor ** freshness ≈ 1`: it is not, in
+// any observable sense, reading the height. The care payload's `usedByEngine` (which drives the plant
+// page's height dot) uses this rather than `freshness > 0`, because at day 729 freshness is 0.0016 and a
+// green dot would be a lie. TUNED.
+const CROWDING_USED_MIN_FRESHNESS = 0.05;
+export function crowdingIsEngineRead(r: number | null, heightAgeDays: number | null): boolean {
+  return r != null && freshness(heightAgeDays ?? 0) >= CROWDING_USED_MIN_FRESHNESS;
 }
 
 // WATER reads R² (transpiring area per reservoir, A2.5b) — NOT R³ (REPOT's biomass-per-volume question).
-// Neutral (=1, returned literally via (1+B)/(1+B)) at R = R_REF. Bounded like its siblings.
+// Bit-exactly neutral (= 1) at R = R_REF; see the exactness note on `crowdingResponse`. Bounded like its
+// siblings.
 export function crowdingFactorWater(r: number): number {
   return band(crowdingResponse(r, R_REF, 2), 0.75, 1.3);
 }
@@ -305,7 +327,7 @@ export function computeCadenceDue(i: CadenceInput): Date {
 // plant that did not need it). `rRefPlant` is the SEAM for Spec F's per-plant calibration; it defaults to
 // the R_REF convention.
 export function crowdingFactorRepot(r: number, rRefPlant: number = R_REF): number {
-  return band(crowdingResponse(r, rRefPlant, 3), 0.82, 1.18);
+  return band(crowdingResponse(r, rRefPlant, 3), REPOT_OPT_LO, REPOT_OPT_HI);
 }
 
 // A5.4: crowdingFactor and residualFactor are two ESTIMATORS OF THE SAME latent quantity (root-boundness),
@@ -323,7 +345,6 @@ export function crowdingFactorRepot(r: number, rRefPlant: number = R_REF): numbe
 // only that path would guard the one case that needs no guard. If a future change widens either input's
 // band, the "tighter than WATER on both sides" guarantee must not evaporate through a short-circuit.
 // `band()` returns its argument LITERALLY when in range, so the Object.is degeneracy pins still hold.
-const REPOT_OPT_LO = 0.82, REPOT_OPT_HI = 1.18;
 export function repotOptional(crowdingFactor: number, residualFactor: number, wc: number, wr: number): number {
   if (wc === 0 && wr === 0) return band(1, REPOT_OPT_LO, REPOT_OPT_HI);
   if (wr === 0) return band(crowdingFactor, REPOT_OPT_LO, REPOT_OPT_HI);

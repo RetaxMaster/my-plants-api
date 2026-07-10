@@ -474,7 +474,12 @@ describe('freshness — height-age authority curve (spec A5.5)', () => {
 });
 
 describe('crowdingFactorWater — R² reservoir-vs-loss factor, damped (spec A2.5b/A5.3)', () => {
-  it('is exactly neutral at R = R_REF (normalized form: (1+B)/(1+B) = 1, then ^p, then band)', () => {
+  // RULE EXEMPTION, with its proof. The feature's standing rule is "Object.is only on literally-returned
+  // values", and this value flows through `**`. It is nevertheless BIT-EXACT: at r === rRef the quotient
+  // r/rRef is exactly 1; 1 ** n === 1 for every finite n; numerator and denominator are then the same
+  // float, so their quotient is exactly 1; and Math.pow(1, p) === 1 for every finite p. Verified over
+  // 200k random exponents. The pin is safe; every OTHER Object.is in this file is on a genuine literal.
+  it('is exactly neutral at R = R_REF (bit-exact: pow(1, p) === 1 for all finite p)', () => {
     expect(Object.is(crowdingFactorWater(R_REF), 1)).toBe(true);
   });
   it('is < 1 for a crowded plant (R > R_REF) and > 1 for a roomy one (R < R_REF)', () => {
@@ -534,12 +539,34 @@ describe('WATER crowding in the optional channel (spec A5.3 / A.7)', () => {
     const plan = computeWateringPlan({ ...neutral, growthHabit: 'trailing', potSizeCm: 20, heightCm: 90, heightAgeDays: 0 });
     expect(Object.is(plan.perFactor.crowding, 1)).toBe(true);
   });
-  it('NO CLIFF: sampling the days either side of every freshness breakpoint moves the interval ≤ 1 day', () => {
-    const at = (age: number) => computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 90, heightAgeDays: age }).days;
+  // ⚠️ THIS TEST WAS WRITTEN WRONG ONCE, AND IT MATTERS HOW. The first version sampled `days` at
+  // `heightCm: 90, potSizeCm: 20` (R = 4.5) and asserted the interval moved by at most one day. It was
+  // vacuous TWICE OVER:
+  //   1. R = 4.5 puts crowdingResponse at 0.5744, which the band CLIPS to 0.75. A factor pinned to a band
+  //      edge cannot move, so the test observed a quantity held constant by SATURATION, not by continuity.
+  //   2. `days` is a rounded step function that absorbs the jump. The hard gate A5.5 rejected in round 4
+  //      (`crowdingFactor := 1` past HEIGHT_FRESH_DAYS) gives days(90) = 9, days(91) = 10 — a difference of
+  //      exactly 1, which `<= 1` accepts. The only no-cliff test CERTIFIED THE CLIFF.
+  // Both fixed below: R = 2.5 sits strictly inside the un-clipped window [0.857, 3.197], and we assert on
+  // the FACTOR, which is where the discontinuity would live. Verified numerically: at the age-90
+  // breakpoint the shipped continuous curve moves 1.7e-4, the rejected hard gate moves 1.17e-1.
+  it('NO CLIFF: the crowding FACTOR is continuous across every freshness breakpoint', () => {
+    const cf = (age: number) =>
+      computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 50, heightAgeDays: age }).perFactor.crowding;
+    // Guard the guard: if a future band change clipped this fixture, the assertions below would pass by
+    // saturation and prove nothing. Require the factor to be strictly inside the band, i.e. free to move.
+    expect(cf(0)).toBeGreaterThan(0.75);
+    expect(cf(0)).toBeLessThan(1.3);
     for (const bp of [90, 730]) {
-      expect(Math.abs(at(bp) - at(bp - 1))).toBeLessThanOrEqual(1);
-      expect(Math.abs(at(bp) - at(bp + 1))).toBeLessThanOrEqual(1);
+      expect(Math.abs(cf(bp) - cf(bp - 1))).toBeLessThan(0.01);
+      expect(Math.abs(cf(bp) - cf(bp + 1))).toBeLessThan(0.01);
     }
+  });
+  it('the 0.01 tolerance DISCRIMINATES: the rejected hard gate would break it at the 90-day breakpoint', () => {
+    // A no-cliff test is only worth its lines if a cliff fails it. Reconstruct round 4's rejected design
+    // (hard freshness gate instead of a continuous exponent) and show the assertion above rejects it.
+    const rejectedHardGate = (age: number) => (age <= 90 ? crowdingFactorWater(2.5) : 1);
+    expect(Math.abs(rejectedHardGate(91) - rejectedHardGate(90))).toBeGreaterThan(0.01);
   });
   it('at constant R, crowding is exactly constant and days is monotone NON-DECREASING in pot size', () => {
     // R fixed at 2 (height = 2× pot, upright): only potFactor varies, and it saturates at its band.
@@ -564,9 +591,10 @@ describe('WATER crowding in the optional channel (spec A5.3 / A.7)', () => {
 // ===== Spec E, Area A — REPOT: the two-channel engine ===================================================
 
 describe('crowdingFactorRepot — R³ biomass-per-volume prior, damped (spec A2.5/A5.4)', () => {
-  it('is exactly neutral at R = R_REF_plant (normalized form returns 1 literally)', () => {
+  // Same bit-exactness exemption as crowdingFactorWater's neutral pin above; see the proof there.
+  it('is exactly neutral at R = R_REF_plant (bit-exact, for ANY per-plant threshold)', () => {
     expect(Object.is(crowdingFactorRepot(R_REF, R_REF), 1)).toBe(true);
-    expect(Object.is(crowdingFactorRepot(5, 5), 1)).toBe(true); // neutral at ANY per-plant threshold
+    expect(Object.is(crowdingFactorRepot(5, 5), 1)).toBe(true);
   });
   it('is < 1 for a crowded plant and > 1 for a roomy one', () => {
     expect(crowdingFactorRepot(3, R_REF)).toBeLessThan(1);

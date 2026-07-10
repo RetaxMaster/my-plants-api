@@ -20,11 +20,13 @@ const record = {
   metadata: { confidence: 'high', sources: [{ title: 'RHS', url: 'https://www.rhs.org.uk/plants/dracaena', accessedAt: '2026-06-18' }] },
 };
 
-const plantWithTz = (timezone: string) => ({
+const plantWithTz = (timezone: string, profile: unknown = null) => ({
   id: 'p1', ownerId: 'owner-1', placeId: 'place-a', speciesSlug: 'dracaena-trifasciata', nickname: 'Sansa',
   acquiredOn: new Date('2026-01-01'),
   species: { scientificName: 'Dracaena trifasciata', record },
   place: { indoor: true, lightType: 'BRIGHT_INDIRECT', climateControlled: false, humidityCharacter: null, indoorTempMinC: null, indoorTempMaxC: null, city: { id: 'c1', latitude: 10, longitude: 20, timezone } },
+  // getCare pulls the profile through its own `include` — one round-trip, no separate plantProfile read.
+  profile,
 });
 // NOTE: these fake prismas have NO `city` delegate — if getCare still called city.findFirst it would throw.
 type CrowdingFixture = {
@@ -33,9 +35,8 @@ type CrowdingFixture = {
 };
 const runGetCare = (timezone: string, crowding: CrowdingFixture = {}) => {
   const prisma = {
-    plant: { findFirst: async () => plantWithTz(timezone) },
+    plant: { findFirst: async () => plantWithTz(timezone, crowding.profile ?? null) },
     dueCache: { findMany: async () => [{ task: 'WATER', nextDueOn: new Date(Date.UTC(2026, 5, 21)) }] },
-    plantProfile: { findUnique: async () => crowding.profile ?? null },
     plantProgressEntry: { findFirst: async () => crowding.sized ?? null },
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
@@ -94,6 +95,17 @@ describe('getCare crowding block', () => {
     const out = await runGetCare('UTC', { profile: FRESH.profile, sized: { sizeCm: 60, occurredOn: daysAgo(800) } });
     expect(out.crowding.index).not.toBeNull();
     expect(out.crowding.usedByEngine).toBe(false);
+  });
+
+  it('usedByEngine goes false BEFORE the hard-zero age, once the height carries no real authority', async () => {
+    // At day 729 freshness is 1/640 = 0.0016: the engine raises the factor to ~1, i.e. it is not using the
+    // height in any observable sense. `freshness > 0` would still light the dot green — that was the lie.
+    const nearZero = await runGetCare('UTC', { profile: FRESH.profile, sized: { sizeCm: 60, occurredOn: daysAgo(729) } });
+    expect(nearZero.crowding.index).not.toBeNull();
+    expect(nearZero.crowding.usedByEngine).toBe(false);
+    // ...while a height the engine genuinely leans on stays green.
+    const trusted = await runGetCare('UTC', { profile: FRESH.profile, sized: { sizeCm: 60, occurredOn: daysAgo(200) } });
+    expect(trusted.crowding.usedByEngine).toBe(true);
   });
 
   it('a trailing habit yields no index at all (height is not the relevant dimension)', async () => {

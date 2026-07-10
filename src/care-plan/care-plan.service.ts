@@ -9,6 +9,7 @@ import {
   computeRepotDue, crowdingFactorRepot, crowdingIndex, freshness,
 } from '../engines/scheduling.js';
 import { deriveFeedback, deriveRepotResidual, type FeedbackWindowEvent, type RepotResidualSignal } from '../engines/adaptation.js';
+import { latestSizedHeight } from '../plants/latest-sized-height.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
@@ -45,18 +46,11 @@ export class CarePlanService {
 
     const waterFeedback = await this.waterFeedbackSignal(plantId);
 
-    // The plant's most recent SIZE-bearing progress entry (spec E, Area A). A later note-only entry never
-    // blanks a real height — same canonical tiebreak as plants.service. `heightAgeDays` drives `freshness`,
-    // which damps the crowding factor's authority rather than its value.
-    const latestSized = await this.prisma.plantProgressEntry.findFirst({
-      where: { plantId, sizeCm: { not: null } },
-      orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
-      select: { sizeCm: true, occurredOn: true },
-    });
-    const heightCm = latestSized?.sizeCm ?? null;
-    const heightAgeDays = latestSized
-      ? Math.max(0, Math.floor((Date.now() - latestSized.occurredOn.getTime()) / 86_400_000))
-      : null;
+    // The plant's height (spec E, Area A). `heightAgeDays` drives `freshness`, which damps the crowding
+    // factor's authority rather than its value.
+    const sized = await latestSizedHeight(this.prisma, plantId);
+    const heightCm = sized?.heightCm ?? null;
+    const heightAgeDays = sized?.heightAgeDays ?? null;
 
     for (const task of SCHEDULED_TASKS) {
       // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none, clearing any

@@ -116,24 +116,45 @@ describe('REPOT two-channel wiring (spec A5.4)', () => {
     expect(daysBetween(ACQUIRED, dues.REPOT)).toBe(CADENCE);
   });
 
-  it('a fresh crowded height pulls the REPOT date IN (earlier)', async () => {
+  it('a fresh crowded height pulls the REPOT date IN, by a PINNED magnitude (A5.4 / A.7)', async () => {
+    // Magnitude, not just sign: `toBeLessThan(CADENCE)` would pass just as happily with a
+    // REPOT_RESID_STEP or a band that is 10x too aggressive. R = 90/20 = 4.5 -> crowdingFactorRepot clips
+    // to the band floor 0.82; wc = 1, wr = 0 -> optional = 0.82, confidence = 1 -> 360·0.82 = 295.2 -> 295.
     const crowded = setup({ profile: CROWDED_PROFILE, sized: { sizeCm: 90, occurredOn: daysAgo(0) } });
     await crowded.svc.recomputePlant('pl1');
-    expect(daysBetween(ACQUIRED, crowded.dues.REPOT)).toBeLessThan(CADENCE);
+    expect(daysBetween(ACQUIRED, crowded.dues.REPOT)).toBe(295);
   });
 
-  it('a roomy plant pushes the REPOT date OUT (later)', async () => {
-    const roomy = setup({ profile: CROWDED_PROFILE, sized: { sizeCm: 20, occurredOn: daysAgo(0) } }); // R = 1
+  it('a roomy plant pushes the REPOT date OUT, by a PINNED magnitude', async () => {
+    // R = 20/20 = 1 -> crowdingFactorRepot clips to the band ceiling 1.18 -> 360·1.18 = 424.8 -> 425.
+    const roomy = setup({ profile: CROWDED_PROFILE, sized: { sizeCm: 20, occurredOn: daysAgo(0) } });
     await roomy.svc.recomputePlant('pl1');
-    expect(daysBetween(ACQUIRED, roomy.dues.REPOT)).toBeGreaterThan(CADENCE);
+    expect(daysBetween(ACQUIRED, roomy.dues.REPOT)).toBe(425);
   });
 
-  it('a fresh height with NO pot size gives wc = 0 — the repot date must not move (A5.4, load-bearing)', async () => {
-    // This is the case Spec F §F6.0a reads `wc` for. If `wc` were read as staleness alone it would be ~1
-    // here, silently erasing the learned adjustment in favour of a physical channel that does not exist.
-    const { svc, dues } = setup({ profile: { ...CROWDED_PROFILE, potSizeCm: null }, sized: { sizeCm: 90, occurredOn: daysAgo(0) } });
+  it('a fresh height with NO pot size gives wc = 0 — and the residual makes that OBSERVABLE (A5.4)', async () => {
+    // This is the case Spec F §F6.0a reads `wc` for: it computes
+    // `adjustment_effective = 1 + (adjustment - 1)·(1 - wc)`, so misreading `wc` as staleness alone would
+    // silently erase years of learned adjustment in favour of a physical channel that does not exist.
+    //
+    // With NO residual evidence this is UNTESTABLE: crowdingFactor is 1, so `repotOptional(1, 1, wc, 0)`
+    // returns 1 whatever `wc` is, and the date does not move either way. Give it justified drying evidence
+    // and `wc` becomes observable in the output. Verified numerically:
+    //   correct (wc = 0): wc===0 branch -> optional = 0.91, confidence = 0.5 -> 360·0.91^0.5 = 343.4 -> 343
+    //   buggy  (wc = 1): geomean = exp((ln 1 + 0.5·ln 0.91)/1.5) = 0.96905, confidence = 1  -> 348.9 -> 349
+    const evidence = [dry(daysAgo(3)), dry(daysAgo(9)), dry(daysAgo(15))];
+    const { svc, dues } = setup({
+      profile: { ...CROWDED_PROFILE, potSizeCm: null },
+      sized: { sizeCm: 90, occurredOn: daysAgo(0) },
+      waterEvents: evidence,
+    });
     await svc.recomputePlant('pl1');
-    expect(daysBetween(ACQUIRED, dues.REPOT)).toBe(CADENCE);
+    expect(daysBetween(ACQUIRED, dues.REPOT)).toBe(343); // 349 if wc were read as freshness alone
+
+    // Control: the same plant WITH a pot size does get a crowding channel, and lands somewhere else.
+    const withPot = setup({ profile: CROWDED_PROFILE, sized: { sizeCm: 90, occurredOn: daysAgo(0) }, waterEvents: evidence });
+    await withPot.svc.recomputePlant('pl1');
+    expect(daysBetween(ACQUIRED, withPot.dues.REPOT)).not.toBe(343);
   });
 
   it('a TRAILING habit gives no crowding signal even with a fresh height and a pot size', async () => {
@@ -148,10 +169,17 @@ describe('REPOT two-channel wiring (spec A5.4)', () => {
     expect(daysBetween(ACQUIRED, dues.REPOT)).toBe(CADENCE);
   });
 
-  it('justified dry-soil watering feedback alone pulls the REPOT date IN (the measured residual)', async () => {
+  it('justified dry-soil feedback alone pulls the REPOT date IN, by a PINNED magnitude (A2.8)', async () => {
+    // THE DEPLOY-DAY CASE. A5.4 warns that every actively-cared-for plant's repot date moves on deploy,
+    // and requires the magnitude to be pinned rather than discovered in production. Three justified
+    // dry-soil events: residualFactor = 1 - 3·0.03 = 0.91, wr = 3/6 = 0.5, wc = 0.
+    //   optional = 0.91 (wc===0 branch), confidence = combineConfidence(0, 0.5) = 0.5
+    //   360 · 0.91^0.5 = 343.4 -> 343, i.e. 17 days earlier on a 360-day cadence (4.7%).
+    // Structural bound: `optional` is clamped to [0.82, 1.18] and confidence to [0,1], so NO plant can
+    // ever shift more than 18% of its cadence — well inside the plan's "stop if > 1/3" sanity bound.
     const { svc, dues } = setup({ profile: null, sized: null, waterEvents: [dry(daysAgo(3)), dry(daysAgo(9)), dry(daysAgo(15))] });
     await svc.recomputePlant('pl1');
-    expect(daysBetween(ACQUIRED, dues.REPOT)).toBeLessThan(CADENCE);
+    expect(daysBetween(ACQUIRED, dues.REPOT)).toBe(343);
   });
 
   it('CONFOUND: an UNJUSTIFIED early-water (intuition) does NOT move the REPOT date', async () => {
@@ -183,6 +211,6 @@ describe('REPOT two-channel wiring (spec A5.4)', () => {
     // ...and crowding rides on top of the override rather than replacing it.
     const crowded = setup({ profile: CROWDED_PROFILE, sized: { sizeCm: 90, occurredOn: daysAgo(0) }, frequencies: [{ task: 'REPOT', intervalDays: 300 }] });
     await crowded.svc.recomputePlant('pl1');
-    expect(daysBetween(ACQUIRED, crowded.dues.REPOT)).toBeLessThan(300);
+    expect(daysBetween(ACQUIRED, crowded.dues.REPOT)).toBe(246); // 300 · 0.82 = 246
   });
 });

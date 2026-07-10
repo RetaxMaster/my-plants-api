@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { parseSpeciesRecord, primaryCommonName, type GrowthHabit, type PlantProfile, type SoilDryness } from '@retaxmaster/my-plants-species-schema';
-import { crowdingIndex, freshness } from '../engines/scheduling.js';
+import { crowdingIndex, crowdingIsEngineRead } from '../engines/scheduling.js';
+import { latestSizedHeight } from './latest-sized-height.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -54,22 +55,17 @@ export class PlantsService {
     });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
 
-    // Care-basis reads (all owner-safe: the plant is already owner-scoped above). latestProgress and
-    // heightCm are SEPARATE reads — heightCm filters to entries WITH a size and takes the most recent of
-    // THOSE, so a later note-only entry never blanks a real height. All three share the canonical
-    // occurredOn desc, createdAt desc tiebreak.
-    const [profileRow, latest, latestSized, lastRepot] = await Promise.all([
+    // Care-basis reads (all owner-safe: the plant is already owner-scoped above). latestProgress and the
+    // height are SEPARATE reads — the height comes from `latestSizedHeight`, the one definition of that
+    // query, so a later note-only entry never blanks a real height.
+    const [profileRow, latest, sized, lastRepot] = await Promise.all([
       this.prisma.plantProfile.findUnique({ where: { plantId: id } }),
       this.prisma.plantProgressEntry.findFirst({
         where: { plantId: id },
         orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
         select: { id: true, occurredOn: true, health: true, observations: true },
       }),
-      this.prisma.plantProgressEntry.findFirst({
-        where: { plantId: id, sizeCm: { not: null } },
-        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
-        select: { sizeCm: true },
-      }),
+      latestSizedHeight(this.prisma, id),
       this.prisma.careEvent.findFirst({
         where: { plantId: id, task: 'REPOT', type: 'DONE' },
         orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
@@ -89,7 +85,7 @@ export class PlantsService {
           }
         : null,
       derived: {
-        heightCm: latestSized?.sizeCm ?? null,
+        heightCm: sized?.heightCm ?? null,
         lastRepottedOn: lastRepot ? ymdFromUtcDate(lastRepot.occurredOn) : null,
       },
     };
@@ -111,7 +107,8 @@ export class PlantsService {
   }> {
     const plant = await this.prisma.plant.findFirst({
       where: { id, ...this.owner.ownerFilter() },
-      include: { species: true, place: { include: { city: true } } },
+      // `profile` rides along for the crowding block below — one round-trip, not two.
+      include: { species: true, place: { include: { city: true } }, profile: true },
     });
     if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
 
@@ -169,35 +166,27 @@ export class PlantsService {
         : null,
     );
 
-    // Crowding (spec E, Area A). Same canonical reads as `get()`: the profile's pot size + growth habit,
-    // and the most recent SIZE-bearing progress entry (a later note-only entry never blanks a real height).
-    const [profileRow, latestSized] = await Promise.all([
-      this.prisma.plantProfile.findUnique({ where: { plantId: id } }),
-      this.prisma.plantProgressEntry.findFirst({
-        where: { plantId: id, sizeCm: { not: null } },
-        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
-        select: { sizeCm: true, occurredOn: true },
-      }),
-    ]);
+    // Crowding (spec E, Area A). The pot size + growth habit ride along on the plant read; the height
+    // comes from `latestSizedHeight`, the one definition of that query.
+    const sized = await latestSizedHeight(this.prisma, id);
     const r = crowdingIndex(
-      latestSized?.sizeCm ?? null,
-      profileRow?.potSizeCm ?? null,
-      (profileRow?.growthHabit ?? null) as GrowthHabit | null,
+      sized?.heightCm ?? null,
+      plant.profile?.potSizeCm ?? null,
+      (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
     );
-    // The dot is green only when the engine is ACTUALLY using the height: R computable AND the measurement
-    // still carries authority. A stale height gives freshness 0 → `crowdingFactor ** 0 === 1` → the engine
-    // is not using it, so a green dot would be a lie.
-    const heightAgeDays = latestSized
-      ? Math.max(0, Math.floor((Date.now() - latestSized.occurredOn.getTime()) / 86_400_000))
-      : null;
-    const crowdingUsed = r != null && freshness(heightAgeDays ?? 0) > 0;
-
+    // The dot is green only when the engine is ACTUALLY using the height. `crowdingIsEngineRead` owns that
+    // rule (R computable AND the measurement still carries real authority): at 729 days freshness is
+    // 0.0016, the engine raises the factor to ~1, and a green dot would be a lie.
     return {
       plantId: id,
       tasks,
       viability,
       soilDrynessBeforeWatering: record.watering.soilDrynessBeforeWatering,
-      crowding: { index: r, usedByEngine: crowdingUsed, repotSigns: record.repotting.signs },
+      crowding: {
+        index: r,
+        usedByEngine: crowdingIsEngineRead(r, sized?.heightAgeDays ?? null),
+        repotSigns: record.repotting.signs,
+      },
     };
   }
 
