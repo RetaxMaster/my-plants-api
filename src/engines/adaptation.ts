@@ -68,3 +68,40 @@ export function deriveFeedback(window: FeedbackWindowEvent[]): FeedbackSignal {
   const feedbackConfidence = clamp(justified / CONFIDENCE_FULL, 0, 1);
   return { feedbackFactor, feedbackConfidence };
 }
+
+// ---- Spec E, Area A (A2.8/A5.4): the watering model's RESIDUAL, read as a BIDIRECTIONAL root-bound
+// signal for REPOT. Once pot volume, evaporative demand, soil and drainage are all controlled for, a
+// persistent residual says the reservoir is not the size the pot's geometry implies. The two UNAMBIGUOUS
+// substrate-state reports are exact mirrors: `dry-soil` (a justified early-water) says the reservoir is
+// SMALLER than geometry implies → root-bound → repot SOONER (factor < 1); `soil-still-moist` (a justified
+// postpone) says it holds MORE water → repot LATER (factor > 1). The DRY symptoms also push down; the WET
+// symptoms (mushy-stem, yellow-leaves-wet-soil) are EXCLUDED — confounded with rot. `window` MUST already
+// be sliced by the caller to the 10 most-recent reason-bearing WATER events SINCE the last REPOT DONE.
+export const REPOT_RESID_STEP = 0.03; // TUNED per-event step magnitude.
+export const REPOT_CONFIDENCE_FULL = 6; // TUNED: this many justified events ≈ full wr.
+const REPOT_RESID_LO = 0.85, REPOT_RESID_HI = 1.15; // TUNED: tighter than WATER's [0.5, 1.5] both sides.
+const REPOT_RESID_DRY_SYMPTOMS = new Set(['wilting-dry-soil', 'crispy-edges-dry-soil']);
+
+export interface RepotResidualSignal {
+  residualFactor: number; // [0.85, 1.15]; 1 = no evidence.
+  residualConfidence: number; // [0,1]; the `wr` of A5.4
+}
+
+export function deriveRepotResidual(window: FeedbackWindowEvent[]): RepotResidualSignal {
+  let net = 0;
+  let justified = 0;
+  for (const e of window) {
+    let step = 0;
+    if (e.kind === 'early-water' && e.reason === JUSTIFIED_EARLY_WATER_REASON) step = -REPOT_RESID_STEP; // dry → sooner
+    else if (e.kind === 'postpone' && e.reason === JUSTIFIED_POSTPONE_REASON) step = REPOT_RESID_STEP; // moist → later
+    else if (e.kind === 'symptom' && e.symptom != null && REPOT_RESID_DRY_SYMPTOMS.has(e.symptom)) step = -REPOT_RESID_STEP;
+    if (step !== 0) {
+      net += step;
+      justified += 1;
+    }
+  }
+  return {
+    residualFactor: clamp(1 + net, REPOT_RESID_LO, REPOT_RESID_HI),
+    residualConfidence: clamp(justified / REPOT_CONFIDENCE_FULL, 0, 1),
+  };
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveFeedback, nextAdjustment } from './adaptation.js';
+import { deriveFeedback, deriveRepotResidual, nextAdjustment } from './adaptation.js';
 
 describe('nextAdjustment', () => {
   it('keeps the multiplier when there is no signal', () => {
@@ -106,5 +106,52 @@ describe('deriveFeedback — reason-gated, last-10 WATER window (spec B §3.3/§
     expect(s.feedbackConfidence).toBe(1);
     expect(s.feedbackFactor).toBeGreaterThanOrEqual(0.5);
     expect(s.feedbackFactor).toBeLessThanOrEqual(1.5);
+  });
+});
+
+describe('deriveRepotResidual — BIDIRECTIONAL root-bound signal from the watering residual (A2.8/A5.4)', () => {
+  const early = (reason: string | null) => ({ kind: 'early-water' as const, reason });
+  const post = (reason: string | null) => ({ kind: 'postpone' as const, reason });
+  const sym = (symptom: string | null) => ({ kind: 'symptom' as const, symptom });
+
+  it('is neutral (factor 1, wr 0) on an empty window', () => {
+    expect(deriveRepotResidual([])).toEqual({ residualFactor: 1, residualConfidence: 0 });
+  });
+  it('justified dry-soil early-water pulls the factor < 1 (root-bound → repot sooner)', () => {
+    const s = deriveRepotResidual([early('dry-soil'), early('dry-soil'), early('dry-soil')]);
+    expect(s.residualFactor).toBeCloseTo(1 - 3 * 0.03, 10); // 0.91
+    expect(s.residualConfidence).toBeCloseTo(3 / 6, 10);
+  });
+  it('justified soil-still-moist postpone pulls the factor > 1 (holds water → repot later)', () => {
+    const s = deriveRepotResidual([post('soil-still-moist'), post('soil-still-moist')]);
+    expect(s.residualFactor).toBeCloseTo(1 + 2 * 0.03, 10); // 1.06
+    expect(s.residualConfidence).toBeCloseTo(2 / 6, 10);
+  });
+  it('dry and moist reports oppose and net out (they are exact mirrors)', () => {
+    const s = deriveRepotResidual([early('dry-soil'), post('soil-still-moist')]);
+    expect(Object.is(s.residualFactor, 1)).toBe(true);
+    expect(s.residualConfidence).toBeCloseTo(2 / 6, 10);
+  });
+  it('reads the DRY symptoms (negative) but EXCLUDES the wet symptoms (confounded with rot)', () => {
+    const dry = deriveRepotResidual([sym('wilting-dry-soil'), sym('crispy-edges-dry-soil')]);
+    expect(dry.residualFactor).toBeLessThan(1);
+    expect(dry.residualConfidence).toBeCloseTo(2 / 6, 10);
+    const wet = deriveRepotResidual([sym('mushy-stem'), sym('yellow-leaves-wet-soil')]);
+    expect(wet).toEqual({ residualFactor: 1, residualConfidence: 0 });
+  });
+  it('IGNORES unjustified reasons (intuition / no-time / other)', () => {
+    expect(deriveRepotResidual([early('intuition'), post('no-time'), post('other')]))
+      .toEqual({ residualFactor: 1, residualConfidence: 0 });
+  });
+  it('is clamped to [0.85, 1.15] — tighter than WATER on both sides', () => {
+    const manyDry = Array(10).fill(0).map(() => early('dry-soil'));
+    const manyMoist = Array(10).fill(0).map(() => post('soil-still-moist'));
+    expect(deriveRepotResidual(manyDry).residualFactor).toBe(0.85);
+    expect(deriveRepotResidual(manyMoist).residualFactor).toBe(1.15);
+  });
+  it('differs from deriveFeedback: the WATER signal reads wet symptoms, the REPOT residual does not', () => {
+    const wet = [sym('mushy-stem')];
+    expect(deriveFeedback(wet).feedbackConfidence).toBeGreaterThan(0); // WATER learns from it
+    expect(deriveRepotResidual(wet).residualConfidence).toBe(0); // REPOT does not
   });
 });

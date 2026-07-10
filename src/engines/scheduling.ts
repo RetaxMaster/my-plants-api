@@ -294,6 +294,63 @@ export function computeCadenceDue(i: CadenceInput): Date {
   return addDays(i.anchor, Math.round(i.cadenceDays * i.adjustment));
 }
 
+// ---- REPOT: the two-channel engine (spec E, Area A — A5.4 is normative) --------------------------------
+// computeCadenceDue above is DELIBERATELY left untouched: ROTATE/CLEAN_LEAVES keep calling it, which is
+// the strongest possible guarantee that they stay byte-identical. Only REPOT moves to computeRepotDue.
+
+// A2.5: biomass/volume ∝ H³/D³ = R³ (Poorter 2012 + isometric allometry). REPOT reads R³ — a DIFFERENT
+// exponent from WATER's R² (A2.5b). It reuses the SHARED `crowdingResponse` with n = 3, so it is provably
+// 1.5× steeper than WATER at neutral. Neutral (= 1, returned literally) at R = rRefPlant. Bounded tighter
+// than the watering band (A2.7: a late repot compounds, but an early repot is disruptive surgery on a
+// plant that did not need it). `rRefPlant` is the SEAM for Spec F's per-plant calibration; it defaults to
+// the R_REF convention.
+export function crowdingFactorRepot(r: number, rRefPlant: number = R_REF): number {
+  return band(crowdingResponse(r, rRefPlant, 3), 0.82, 1.18);
+}
+
+// A5.4: crowdingFactor and residualFactor are two ESTIMATORS OF THE SAME latent quantity (root-boundness),
+// so they are AVERAGED in log space weighted by confidence — NEVER multiplied. A product assumes
+// independent multiplicative effects and compounds (0.5 × 0.5 = 0.25, outside the range either estimator
+// would ever return); the weighted log-average is bounded by [min, max] of its inputs.
+//
+// Honest label: this is a bounded ENGINEERING CHOICE, not a principle. The standard combination of two
+// estimators of one quantity is inverse-variance weighting, and `wc` (a staleness gate) / `wr`
+// (justified/6) are not precisions.
+//
+// The three degeneracies are EXPLICIT branches taken BEFORE any log/exp: exp((wc·ln cF)/wc) !== cF in
+// IEEE-754 (cF = 3, wc = 0.5 returns 2.9999999999999996). EVERY branch is banded, including the
+// short-circuits: the geometric-mean path is the ONLY one that provably cannot exceed the band, so banding
+// only that path would guard the one case that needs no guard. If a future change widens either input's
+// band, the "tighter than WATER on both sides" guarantee must not evaporate through a short-circuit.
+// `band()` returns its argument LITERALLY when in range, so the Object.is degeneracy pins still hold.
+const REPOT_OPT_LO = 0.82, REPOT_OPT_HI = 1.18;
+export function repotOptional(crowdingFactor: number, residualFactor: number, wc: number, wr: number): number {
+  if (wc === 0 && wr === 0) return band(1, REPOT_OPT_LO, REPOT_OPT_HI);
+  if (wr === 0) return band(crowdingFactor, REPOT_OPT_LO, REPOT_OPT_HI);
+  if (wc === 0) return band(residualFactor, REPOT_OPT_LO, REPOT_OPT_HI);
+  const logMean = (wc * Math.log(crowdingFactor) + wr * Math.log(residualFactor)) / (wc + wr);
+  return band(Math.exp(logMean), REPOT_OPT_LO, REPOT_OPT_HI);
+}
+
+export interface RepotInput {
+  cadenceDays: number; // frequencyDays ?? typicalIntervalMonths × 30 — the PlantTaskFrequency seam
+  adjustment: number; // the existing learned multiplier (Spec F wraps this as adjustment_effective)
+  anchor: Date;
+  crowdingFactor: number; // crowdingFactorRepot(R, R_REF_plant); 1 when R is not computable
+  residualFactor: number; // deriveRepotResidual(...).residualFactor; 1 when no evidence
+  wc: number; // crowdingConfidence = freshness (0 when R is not computable) — Spec F reads this
+  wr: number; // residualConfidence
+}
+
+// REPOT's own due function. `optional ^ confidence` mirrors §7.6, with the shipped BINARY noisy-OR.
+// The engine's output is an INSPECTION date, presented with the species' repotting signs — never a
+// verdict about roots it cannot see.
+export function computeRepotDue(i: RepotInput): Date {
+  const optional = repotOptional(i.crowdingFactor, i.residualFactor, i.wc, i.wr);
+  const confidence = combineConfidence(i.wc, i.wr);
+  return addDays(i.anchor, Math.round(i.cadenceDays * i.adjustment * Math.pow(optional, confidence)));
+}
+
 // Fertilizing: in-season cadence; OUT of an active season always lengthens — strongly when
 // reduceInDormancy is set (true dormancy), mildly otherwise.
 const DORMANT_FERTILIZE_FACTOR = 4;

@@ -4,10 +4,13 @@ import {
   computeFertilizingDue,
   computeMistingDue,
   computeNextDue,
+  computeRepotDue,
   computeWateringPlan,
+  crowdingFactorRepot,
   crowdingFactorWater,
   crowdingIndex,
   freshness,
+  repotOptional,
   R_REF,
   VPD_EXP,
   VPD_REF_KPA,
@@ -555,5 +558,118 @@ describe('WATER crowding in the optional channel (spec A5.3 / A.7)', () => {
     const withHeight = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 90, heightAgeDays: 0 });
     const without = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 });
     expect(Object.is(withHeight.confidence, without.confidence)).toBe(true);
+  });
+});
+
+// ===== Spec E, Area A — REPOT: the two-channel engine ===================================================
+
+describe('crowdingFactorRepot — R³ biomass-per-volume prior, damped (spec A2.5/A5.4)', () => {
+  it('is exactly neutral at R = R_REF_plant (normalized form returns 1 literally)', () => {
+    expect(Object.is(crowdingFactorRepot(R_REF, R_REF), 1)).toBe(true);
+    expect(Object.is(crowdingFactorRepot(5, 5), 1)).toBe(true); // neutral at ANY per-plant threshold
+  });
+  it('is < 1 for a crowded plant and > 1 for a roomy one', () => {
+    expect(crowdingFactorRepot(3, R_REF)).toBeLessThan(1);
+    expect(crowdingFactorRepot(1, R_REF)).toBeGreaterThan(1);
+  });
+  it('is bounded to [0.82, 1.18] — tighter than the watering band (A2.7)', () => {
+    expect(crowdingFactorRepot(100, R_REF)).toBe(0.82);
+    expect(crowdingFactorRepot(0.01, R_REF)).toBe(1.18);
+  });
+  it('defaults rRefPlant to the R_REF convention (the Spec F seam is opt-in)', () => {
+    expect(Object.is(crowdingFactorRepot(2.3), crowdingFactorRepot(2.3, R_REF))).toBe(true);
+  });
+  it('honours the R_REF_plant seam: a higher per-plant threshold makes the same R less crowded', () => {
+    // If the seam were ignored, both calls would return the same value and this fails.
+    expect(crowdingFactorRepot(3, 2)).toBeLessThan(crowdingFactorRepot(3, 4));
+  });
+});
+
+describe('REPOT reads R³, WATER reads R² — REPOT is steeper at neutral (A2.5b / A.7)', () => {
+  it('at a point INSIDE both live windows, |repotResp| > |waterResp| (the shared shape ⇒ 1.5× steeper)', () => {
+    // r = 2.2 is inside WATER's live [0.86, 3.19] AND REPOT's live [1.52, 2.50]; r·1.02 = 2.244 is still
+    // inside both, so neither factor clips. Verified: |waterResp| ≈ 0.01094, |repotResp| ≈ 0.01718.
+    const r = 2.2, r1 = r * 1.02;
+    const waterResp = Math.abs(Math.log(crowdingFactorWater(r1) / crowdingFactorWater(r)));
+    const repotResp = Math.abs(Math.log(crowdingFactorRepot(r1, R_REF) / crowdingFactorRepot(r, R_REF)));
+    expect(waterResp).toBeGreaterThan(0); // guard: neither side is clipped, so the comparison has content
+    expect(repotResp).toBeGreaterThan(waterResp);
+  });
+});
+
+describe('repotOptional — confidence-weighted GEOMETRIC MEAN, never a product (spec A5.4 / A.7)', () => {
+  // Inputs are within the factor contract ([0.82,1.18] crowding, [0.85,1.15] residual) so the final
+  // band() clamp on the geomean path is a no-op and the short-circuits return their literal values.
+  it('wc = wr = 0 → exactly 1 (literal short-circuit)', () => {
+    expect(Object.is(repotOptional(0.9, 0.9, 0, 0), 1)).toBe(true);
+  });
+  it('wr = 0 → exactly crowdingFactor (literal, NOT exp((wc·ln cF)/wc))', () => {
+    expect(Object.is(repotOptional(0.85, 0.9, 1, 0), 0.85)).toBe(true);
+    expect(Object.is(repotOptional(0.85, 0.9, 0.5, 0), 0.85)).toBe(true); // the IEEE-754 trap case
+  });
+  it('wc = 0 → exactly residualFactor (literal)', () => {
+    expect(Object.is(repotOptional(0.9, 1.1, 0, 1), 1.1)).toBe(true);
+  });
+  it('with equal weights it is the geometric mean, NOT the product', () => {
+    const gm = repotOptional(0.9, 0.9, 1, 1);
+    expect(gm).toBeCloseTo(0.9, 10); // sqrt(0.81) = 0.9
+    expect(gm).not.toBeCloseTo(0.81, 5); // the product would be 0.81
+  });
+  it('opposing estimators net out toward neutral instead of compounding', () => {
+    expect(repotOptional(0.85, 1.15, 1, 1)).toBeCloseTo(Math.sqrt(0.85 * 1.15), 10);
+  });
+  it('clamps every branch to [0.82, 1.18], including the short-circuits', () => {
+    // Defensive: if a future change widens either input's band, the guarantee must not leak.
+    expect(repotOptional(0.5, 1, 1, 0)).toBe(0.82);
+    expect(repotOptional(1, 1.5, 0, 1)).toBe(1.18);
+  });
+});
+
+const REPOT_ANCHOR = new Date(Date.UTC(2026, 0, 1));
+const daysBetween = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / 86_400_000);
+
+describe('computeRepotDue — two-channel: cadence base × adjustment × optional^confidence (spec A5.4)', () => {
+  const repotBase = { cadenceDays: 600, adjustment: 1, anchor: REPOT_ANCHOR };
+
+  it('BACKCOMPAT: wc = wr = 0 (no crowding, no residual) → exactly the species cadence', () => {
+    // Even with hostile factors: optional^0 === 1 exactly, and combineConfidence(0,0) === 0 exactly.
+    const due = computeRepotDue({ ...repotBase, crowdingFactor: 0.5, residualFactor: 0.5, wc: 0, wr: 0 });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBe(600);
+  });
+  it('BACKCOMPAT: matches computeCadenceDue exactly when there is no evidence', () => {
+    const twoChannel = computeRepotDue({ ...repotBase, adjustment: 1.2, crowdingFactor: 1, residualFactor: 1, wc: 0, wr: 0 });
+    const cadence = computeCadenceDue({ cadenceDays: 600, adjustment: 1.2, anchor: REPOT_ANCHOR });
+    expect(Object.is(twoChannel.getTime(), cadence.getTime())).toBe(true);
+  });
+  it('the PlantTaskFrequency seam survives: cadenceDays drives the base', () => {
+    const due = computeRepotDue({ ...repotBase, cadenceDays: 300, crowdingFactor: 1, residualFactor: 1, wc: 0, wr: 0 });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBe(300);
+  });
+  it('a crowded, well-evidenced plant pulls the date IN (shorter than the base cadence)', () => {
+    const due = computeRepotDue({ ...repotBase, crowdingFactor: 0.85, residualFactor: 0.9, wc: 1, wr: 1 });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBeLessThan(600);
+  });
+  it('a roomy, well-evidenced plant pushes the date OUT', () => {
+    const due = computeRepotDue({ ...repotBase, crowdingFactor: 1.18, residualFactor: 1.1, wc: 1, wr: 1 });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBeGreaterThan(600);
+  });
+  it('low confidence nudges; it never replaces the species cadence', () => {
+    // The evidence is maximally crowded but barely trusted → the date moves a little, not to the band edge.
+    const weak = daysBetween(REPOT_ANCHOR, computeRepotDue({ ...repotBase, crowdingFactor: 0.82, residualFactor: 0.85, wc: 0.1, wr: 0 }));
+    const strong = daysBetween(REPOT_ANCHOR, computeRepotDue({ ...repotBase, crowdingFactor: 0.82, residualFactor: 0.85, wc: 1, wr: 0 }));
+    expect(weak).toBeGreaterThan(strong);
+    expect(weak).toBeLessThan(600);
+    expect(strong).toBeGreaterThanOrEqual(Math.round(600 * 0.82)); // bounded: evidence nudges, never overrides
+  });
+});
+
+describe('computeCadenceDue is untouched — ROTATE/CLEAN_LEAVES stay byte-identical (constraint #6)', () => {
+  it('rotation cadence is unchanged by this feature', () => {
+    const due = computeCadenceDue({ cadenceDays: 14, adjustment: 1, anchor: REPOT_ANCHOR });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBe(14);
+  });
+  it('leaf-cleaning cadence with an adjustment is unchanged by this feature', () => {
+    const due = computeCadenceDue({ cadenceDays: 30, adjustment: 1.5, anchor: REPOT_ANCHOR });
+    expect(daysBetween(REPOT_ANCHOR, due)).toBe(45);
   });
 });
