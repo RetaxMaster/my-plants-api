@@ -159,13 +159,36 @@ describe('Plant photos gallery & care-basis (e2e)', () => {
     expect(mine).not.toHaveProperty('coverImageObjectKey');
   });
 
-  it('engine untouched: /plants/:id/care is identical before and after a profile PATCH', async () => {
+  // CORRECTED 2026-07-09. This test used to assert `expect(after.body).toEqual(before.body)` under the claim
+  // "the profile is capture+display only — it feeds NO scheduling/viability computation". That claim became
+  // FALSE when the watering-precision engine wired `potType`, `potSizeCm`, `growLight`, `soilMix`,
+  // `hasDrainage`, `nearHeater` and `growthHabit` into the watering center (docs/care-engine.md §7.10). The
+  // test had been failing on `main` ever since; it was a stale claim, not a regression. It now asserts what
+  // is actually true: the PHYSICAL profile moves the WATER date, and nothing else in the payload moves.
+  it('a physical profile PATCH shortens the WATER date (terracotta breathes) and touches nothing else', async () => {
     const before = await auth(request(server()).get(`/plants/${plantId}/care`)).expect(200);
     await auth(request(server()).patch(`/plants/${plantId}/profile`))
       .send({ potType: 'terracotta', growLight: true, ageMonths: 24 })
       .expect(200);
     const after = await auth(request(server()).get(`/plants/${plantId}/care`)).expect(200);
-    // The profile is capture+display only — it feeds NO scheduling/viability computation.
+
+    const water = (b: { tasks: { task: string; nextDueOn: string }[] }) =>
+      b.tasks.find((t) => t.task === 'WATER')!.nextDueOn;
+    // A porous pot (POT_MATERIAL 0.85) and a grow light both dry the soil faster → water SOONER.
+    expect(new Date(water(after.body)).getTime()).toBeLessThan(new Date(water(before.body)).getTime());
+
+    // Everything that the physical profile must NOT touch stays byte-identical.
+    expect(after.body.viability).toEqual(before.body.viability);
+    expect(after.body.crowding).toEqual(before.body.crowding); // no height, no potSizeCm → still no signal
+    expect(after.body.soilDrynessBeforeWatering).toBe(before.body.soilDrynessBeforeWatering);
+    const nonWater = (b: { tasks: { task: string }[] }) => b.tasks.filter((t) => t.task !== 'WATER');
+    expect(nonWater(after.body)).toEqual(nonWater(before.body)); // FERTILIZE/REPOT/ROTATE/... unchanged
+  });
+
+  it('ageMonths alone feeds NO factor: the care payload is byte-identical (docs/care-engine.md §7.11)', async () => {
+    const before = await auth(request(server()).get(`/plants/${plantId}/care`)).expect(200);
+    await auth(request(server()).patch(`/plants/${plantId}/profile`)).send({ ageMonths: 99 }).expect(200);
+    const after = await auth(request(server()).get(`/plants/${plantId}/care`)).expect(200);
     expect(after.body).toEqual(before.body);
   });
 });
