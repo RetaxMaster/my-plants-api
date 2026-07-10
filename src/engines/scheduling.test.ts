@@ -5,11 +5,16 @@ import {
   computeMistingDue,
   computeNextDue,
   computeWateringPlan,
+  crowdingFactorWater,
+  crowdingIndex,
+  freshness,
+  R_REF,
   VPD_EXP,
   VPD_REF_KPA,
   type ScheduleInput,
   type WateringPlan,
 } from './scheduling.js';
+import type { GrowthHabit } from '@retaxmaster/my-plants-species-schema';
 import { effectiveConditions, humidityBand, vpd, type PlaceClimateInput } from './indoor-climate.js';
 import { deriveFeedback } from './adaptation.js';
 
@@ -397,5 +402,158 @@ describe('feedback crosses the old floor (spec B §3.4)', () => {
     const signal = deriveFeedback(Array.from({ length: 10 }, () => ({ kind: 'early-water', reason: 'intuition' } as const)));
     expect(signal).toEqual({ feedbackFactor: 1, feedbackConfidence: 0 });
     expect(fernDays(signal)).toBe(4); // identical to the zero-feedback base schedule
+  });
+});
+
+// ===== Spec E, Area A — the crowding index (plant-to-pot ratio) =========================================
+
+describe('crowdingIndex — habit-normalized height/pot ratio (spec A5.1/A5.2)', () => {
+  it('is null when height is absent', () => {
+    expect(crowdingIndex(null, 20, 'upright')).toBeNull();
+  });
+  it('is null when pot size is absent', () => {
+    expect(crowdingIndex(40, null, 'upright')).toBeNull();
+  });
+  it('is null for a trailing habit (height is not the relevant dimension)', () => {
+    expect(crowdingIndex(40, 20, 'trailing')).toBeNull();
+  });
+  it('is null when growth habit is absent (cannot pick a normalizer)', () => {
+    expect(crowdingIndex(40, 20, null)).toBeNull();
+  });
+  it('normalizes: upright 40/20 → 2.0 (a typical upright specimen is neutral at R_REF)', () => {
+    expect(crowdingIndex(40, 20, 'upright')).toBeCloseTo(2.0, 10);
+  });
+  it('a rosette inflates the ratio (0.25 reference) — a tall rosette reads as crowded', () => {
+    // 21/20 = 1.05 raw → /0.25 = 4.2 normalized (well above R_REF)
+    expect(crowdingIndex(21, 20, 'rosette')).toBeCloseTo(4.2, 10);
+  });
+  it('a tree deflates the ratio (3.0 reference) — trees are meant to tower', () => {
+    // 48/20 = 2.4 raw → /3.0 = 0.8 normalized (below R_REF — a short tree, roomy)
+    expect(crowdingIndex(48, 20, 'tree')).toBeCloseTo(0.8, 10);
+  });
+  it('a TYPICAL specimen of every non-trailing habit normalizes to R_REF (no per-class bias)', () => {
+    // HABIT_REF ≡ typical(H/D)/R_REF, so typical H/D ÷ HABIT_REF === R_REF for every habit.
+    const typical: Record<string, number> = { upright: 2, clumping: 1.5, rosette: 0.5, shrub: 2.5, tree: 6, climber: 5, other: 2 };
+    for (const [habit, hd] of Object.entries(typical)) {
+      expect(crowdingIndex(hd, 1, habit as GrowthHabit)).toBeCloseTo(2.0, 10);
+    }
+  });
+  it('is monotonically increasing in height and decreasing in pot size', () => {
+    const a = crowdingIndex(30, 20, 'upright')!;
+    const taller = crowdingIndex(60, 20, 'upright')!;
+    const biggerPot = crowdingIndex(30, 40, 'upright')!;
+    expect(taller).toBeGreaterThan(a);
+    expect(biggerPot).toBeLessThan(a);
+  });
+});
+
+describe('freshness — height-age authority curve (spec A5.5)', () => {
+  it('is exactly 1 for a height measured today', () => {
+    expect(Object.is(freshness(0), 1)).toBe(true);
+  });
+  it('is exactly 1 across the full-trust plateau (≤ 90 days)', () => {
+    expect(Object.is(freshness(90), 1)).toBe(true);
+  });
+  it('is exactly 0 at and past the hard-zero age (≥ 730 days)', () => {
+    expect(Object.is(freshness(730), 0)).toBe(true);
+    expect(Object.is(freshness(1000), 0)).toBe(true);
+  });
+  it('is a continuous linear ramp between the breakpoints', () => {
+    expect(freshness(410)).toBeCloseTo(0.5, 10); // midpoint of the ramp
+    expect(freshness(91)).toBeLessThan(1);
+    expect(freshness(91)).toBeGreaterThan(0.99);
+    expect(freshness(729)).toBeGreaterThan(0);
+    expect(freshness(729)).toBeLessThan(0.01);
+  });
+  it('clamps negative ages (future-dated) to full trust', () => {
+    expect(Object.is(freshness(-5), 1)).toBe(true);
+  });
+});
+
+describe('crowdingFactorWater — R² reservoir-vs-loss factor, damped (spec A2.5b/A5.3)', () => {
+  it('is exactly neutral at R = R_REF (normalized form: (1+B)/(1+B) = 1, then ^p, then band)', () => {
+    expect(Object.is(crowdingFactorWater(R_REF), 1)).toBe(true);
+  });
+  it('is < 1 for a crowded plant (R > R_REF) and > 1 for a roomy one (R < R_REF)', () => {
+    expect(crowdingFactorWater(3)).toBeLessThan(1);
+    expect(crowdingFactorWater(1)).toBeGreaterThan(1);
+  });
+  it('is bounded to [0.75, 1.3]', () => {
+    expect(crowdingFactorWater(100)).toBeGreaterThanOrEqual(0.75);
+    expect(crowdingFactorWater(0.01)).toBeLessThanOrEqual(1.3);
+  });
+  it('is a GRADIENT, not a 3-valued enum: distinct, unclipped values across realistic R', () => {
+    // Un-clipped window is R ∈ [0.86, 3.19]; sample inside it and assert strictly monotone, strictly
+    // inside the band — the root-bound monstera (R≈3) must NOT read the same as a mild case (R≈2.5).
+    const samples = [1.5, 2.0, 2.5, 3.0].map(crowdingFactorWater);
+    for (let i = 1; i < samples.length; i++) expect(samples[i]).toBeLessThan(samples[i - 1]);
+    expect(crowdingFactorWater(2.5)).toBeGreaterThan(0.75); // ≈0.883, live
+    expect(crowdingFactorWater(3.0)).toBeGreaterThan(0.75); // ≈0.784, live
+    expect(crowdingFactorWater(2.5)).not.toBeCloseTo(crowdingFactorWater(3.0), 3);
+  });
+});
+
+// Golden literals captured from `main` (pre-feature) for `{ ...neutral, growthHabit: 'upright',
+// potSizeCm: 20 }` — the "pot size, no height" plant, which is almost every real plant. Captured BEFORE
+// scheduling.ts was touched; never regenerate them from the new code (that is what makes this a
+// backcompat test rather than a tautology).
+const GOLDEN_NO_HEIGHT = { days: 10, confidence: 0.28, effectiveCenter: 10.204562030948559 };
+
+describe('WATER crowding in the optional channel (spec A5.3 / A.7)', () => {
+  it('scale invariance: crowding reads D only through R — λ a power of two keeps it EXACT', () => {
+    const base = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 30 });
+    for (const lam of [0.25, 0.5, 2, 4, 8]) {
+      const scaled = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 * lam, heightCm: 30 * lam });
+      expect(Object.is(base.perFactor.crowding, scaled.perFactor.crowding)).toBe(true);
+    }
+  });
+  it('BACKCOMPAT: a plant with potSizeCm and NO heightCm is bit-for-bit identical to pre-feature main', () => {
+    const plan = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 });
+    expect(Object.is(plan.perFactor.crowding, 1)).toBe(true);
+    expect(Object.is(plan.days, GOLDEN_NO_HEIGHT.days)).toBe(true);
+    expect(Object.is(plan.confidence, GOLDEN_NO_HEIGHT.confidence)).toBe(true);
+    expect(Object.is(plan.effectiveCenter, GOLDEN_NO_HEIGHT.effectiveCenter)).toBe(true);
+  });
+  it('a stale height (freshness 0) is bit-for-bit identical to no height: crowding ** 0 === 1', () => {
+    const stale = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 60, heightAgeDays: 730 });
+    const noHeight = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 });
+    expect(Object.is(stale.perFactor.crowding, 1)).toBe(true);
+    expect(Object.is(stale.days, noHeight.days)).toBe(true);
+    expect(Object.is(stale.effectiveCenter, noHeight.effectiveCenter)).toBe(true);
+  });
+  it('a FRESH height on a crowded plant is the ONLY population whose interval moves — it shortens', () => {
+    const crowded = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 90, heightAgeDays: 0 });
+    const noHeight = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 });
+    expect(crowded.perFactor.crowding).toBeLessThan(1);
+    expect(crowded.days).toBeLessThan(noHeight.days); // 9 vs 10 — a real, observable move
+  });
+  it('a trailing habit yields no crowding signal even with a fresh height and a pot size', () => {
+    const plan = computeWateringPlan({ ...neutral, growthHabit: 'trailing', potSizeCm: 20, heightCm: 90, heightAgeDays: 0 });
+    expect(Object.is(plan.perFactor.crowding, 1)).toBe(true);
+  });
+  it('NO CLIFF: sampling the days either side of every freshness breakpoint moves the interval ≤ 1 day', () => {
+    const at = (age: number) => computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 90, heightAgeDays: age }).days;
+    for (const bp of [90, 730]) {
+      expect(Math.abs(at(bp) - at(bp - 1))).toBeLessThanOrEqual(1);
+      expect(Math.abs(at(bp) - at(bp + 1))).toBeLessThanOrEqual(1);
+    }
+  });
+  it('at constant R, crowding is exactly constant and days is monotone NON-DECREASING in pot size', () => {
+    // R fixed at 2 (height = 2× pot, upright): only potFactor varies, and it saturates at its band.
+    let prev = -Infinity;
+    let firstCrowding: number | null = null;
+    for (const D of [10, 15, 20, 30, 40, 50]) {
+      const plan = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: D, heightCm: 2 * D, heightAgeDays: 0 });
+      if (firstCrowding === null) firstCrowding = plan.perFactor.crowding;
+      else expect(Object.is(plan.perFactor.crowding, firstCrowding)).toBe(true); // exactly constant
+      expect(plan.days).toBeGreaterThanOrEqual(prev);
+      prev = plan.days;
+    }
+  });
+  it('W_TOTAL is untouched: adding a fresh height does NOT change optionalDataConfidence', () => {
+    // The spine of A5.3 — crowding rides on W_POT. Confidence must be identical with and without height.
+    const withHeight = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20, heightCm: 90, heightAgeDays: 0 });
+    const without = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: 20 });
+    expect(Object.is(withHeight.confidence, without.confidence)).toBe(true);
   });
 });

@@ -33,6 +33,10 @@ export interface ScheduleInput {
   nearHeater?: boolean | null;
   growthHabit?: GrowthHabit | null;
   ageMonths?: number | null;
+  // Crowding (spec E, Area A). heightCm = latest sized progress entry; heightAgeDays = its age in days
+  // (drives `freshness`). Both absent/neutral by default so missing data never shifts the schedule.
+  heightCm?: number | null;
+  heightAgeDays?: number | null;
   // Spec-B feedback coupling (§3.6). Wired here, fed in Spec B. feedbackFactor multiplies the center;
   // feedbackConfidence raises confidence (widening the guardrail). Defaults are neutral (1 / 0).
   feedbackFactor?: number;
@@ -83,6 +87,72 @@ const W_POT = 3, W_AIRFLOW = 3, W_LIGHT = 3, W_SOIL = 1, W_DRAIN = 1, W_HEATER =
 const W_TOTAL = W_POT + W_AIRFLOW + W_LIGHT + W_SOIL + W_DRAIN + W_HEATER + W_HABIT; // 12.5
 
 const band = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+// ---- Crowding index (spec E, Area A). R = height / pot diameter, normalized into the canonical habit
+// space where R_REF ≈ 2 is defined (A5.2). Null whenever R is not computable — missing height, missing
+// pot size, an absent habit, or a `trailing` habit for which height is not the relevant dimension. The
+// engine treats null as "no signal" (factor 1, weight 0). ----
+export const R_REF = 2; // habit-normalized crowding neutral point; height ≤ 2× pot depth (A2.6). CONVENTION.
+// Per-habit normalizer, DEFINED as HABIT_REF[h] ≡ typical(H/D for habit h) / R_REF. Raw R is DIVIDED by
+// this, so a TYPICAL specimen of any habit normalizes to exactly R_REF (factor 1) — no per-class bias.
+// Derived from typical H/D (rosette ~0.5, upright ~2, shrub ~2.5, climber ~5, tree ~6). TUNED, not
+// convention: these typical figures are our estimates (no citation), and growthHabit is a PlantProfile
+// field NOT in the species record, so there is NO seed data to calibrate against.
+const HABIT_REF: Record<GrowthHabit, number | null> = {
+  upright: 1.0, clumping: 0.75, other: 1.0,            // typical H/D 2.0, 1.5, 2.0
+  rosette: 0.25, shrub: 1.25, tree: 3.0, climber: 2.5, // typical H/D 0.5, 2.5, 6.0, 5.0
+  trailing: null, // height is not the relevant dimension → no crowding signal (wc = 0)
+};
+
+export function crowdingIndex(
+  heightCm: number | null | undefined,
+  potSizeCm: number | null | undefined,
+  growthHabit: GrowthHabit | null | undefined,
+): number | null {
+  if (heightCm == null || potSizeCm == null || growthHabit == null) return null;
+  const ref = HABIT_REF[growthHabit];
+  if (ref == null) return null; // trailing (or any future habit mapped to null)
+  return heightCm / potSizeCm / ref;
+}
+
+// Height comes from the latest sized progress entry and may be months old (A5.5). Staleness damps the
+// crowding factor's AUTHORITY (its exponent), never its value. `freshness` ∈ [0,1] is a continuous curve
+// of the measurement's age in days: full trust on a plateau, a linear ramp, then a HARD ZERO — so a stale
+// height gives `crowdingFactor ** 0 === 1` EXACTLY (bit-for-bit backcompat). One curve, shared by WATER,
+// REPOT's `wc`, and Spec F's routing.
+const HEIGHT_FRESH_DAYS = 90;  // TUNED: a height ≤ ~3 months old is fully trusted.
+const HEIGHT_STALE_DAYS = 730; // TUNED: a height ≥ 2 years old is ignored (hard zero, A5.5).
+export function freshness(ageDays: number): number {
+  if (ageDays <= HEIGHT_FRESH_DAYS) return 1;
+  if (ageDays >= HEIGHT_STALE_DAYS) return 0;
+  return (HEIGHT_STALE_DAYS - ageDays) / (HEIGHT_STALE_DAYS - HEIGHT_FRESH_DAYS);
+}
+
+// Shared crowding SHAPE constants (WATER here, REPOT below). The normalized form
+// ((1+B)/(1 + B·(R/R_REF)^n))^p is physics-motivated (n=2 is A2.5b's R² reservoir-vs-loss law) and DAMPED
+// by p exactly as VPD_EXP damps the VPD response — undamped it saturated to a 3-valued enum across the
+// whole realistic range. Because the R term is (R/R_REF)^n, the neutral elasticity is ∝ n, so REPOT (n=3)
+// is 1.5× steeper than WATER (n=2) for ALL B,p.
+const CROWD_B = 1;     // TUNED softening (shape). Un-clipped WATER window R ∈ [0.86, 3.19] at these values.
+const CROWD_EXP = 0.5; // TUNED damping, VPD_EXP family (same magnitude as VPD_EXP).
+function crowdingResponse(r: number, rRef: number, n: number): number {
+  return ((1 + CROWD_B) / (1 + CROWD_B * (r / rRef) ** n)) ** CROWD_EXP; // exactly 1 at r === rRef
+}
+
+// WATER reads R² (transpiring area per reservoir, A2.5b) — NOT R³ (REPOT's biomass-per-volume question).
+// Neutral (=1, returned literally via (1+B)/(1+B)) at R = R_REF. Bounded like its siblings.
+export function crowdingFactorWater(r: number): number {
+  return band(crowdingResponse(r, R_REF, 2), 0.75, 1.3);
+}
+
+// The staleness-damped WATER crowding factor for the optional channel. Neutral 1.0 when R is not
+// computable OR the height is stale (freshness 0 → factor ** 0 === 1, bit-for-bit). It multiplies into
+// optionalFactor and rides on W_POT — it adds NOTHING to W_TOTAL (A5.3).
+function crowdingFactorWaterEffective(input: ScheduleInput): number {
+  const r = crowdingIndex(input.heightCm, input.potSizeCm, input.growthHabit);
+  if (r == null) return 1;
+  return crowdingFactorWater(r) ** freshness(input.heightAgeDays ?? 0);
+}
 
 // ---- Optional-channel factors (each neutral 1.0 when its datum is absent) ----
 function potFactor(potType: PotType | null | undefined, potSizeCm: number | null | undefined): number {
@@ -154,10 +224,11 @@ export interface WateringPlan {
   effectiveCenter: number;
   confidence: number;
   alwaysOn: number; // vpd × placeLight × season
-  optionalFactor: number; // pot × airflow × lightRefinement × soil × drainage × heater × habit × feedback
+  optionalFactor: number; // pot × airflow × lightRefinement × soil × drainage × heater × habit × crowding × feedback
   perFactor: {
     pot: number; airflow: number; lightRefinement: number; soil: number;
     drainage: number; heater: number; habit: number; feedback: number;
+    crowding: number;
     vpd: number; placeLight: number; season: number;
   };
 }
@@ -175,6 +246,7 @@ export function computeWateringPlan(input: ScheduleInput): WateringPlan {
     heater: heaterFactor(input.nearHeater),
     habit: habitFactor(input.growthHabit),
     feedback: input.feedbackFactor ?? 1,
+    crowding: crowdingFactorWaterEffective(input),
     // always-on channel
     vpd: vpdFactor(input),
     placeLight: placeLightFactor(input),
@@ -188,7 +260,7 @@ export function computeWateringPlan(input: ScheduleInput): WateringPlan {
   // Optional (exponent = confidence): new physical + feedback data, partial data → partial authority.
   const optionalFactor =
     perFactor.pot * perFactor.airflow * perFactor.lightRefinement * perFactor.soil *
-    perFactor.drainage * perFactor.heater * perFactor.habit * perFactor.feedback;
+    perFactor.drainage * perFactor.heater * perFactor.habit * perFactor.crowding * perFactor.feedback;
 
   const confidence = combineConfidence(optionalDataConfidence(input), input.feedbackConfidence ?? 0);
   const effectiveCenter = input.baseIntervalDays * alwaysOn * Math.pow(optionalFactor, confidence);
