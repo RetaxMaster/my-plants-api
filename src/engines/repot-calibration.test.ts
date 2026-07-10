@@ -72,8 +72,13 @@ describe('logPhi — relative precision + continuous two-term asymptotic tail (s
 });
 
 describe('sigmaObs — variance-additive (Brownian) drift in ln R* (spec F5.2/F5.2b)', () => {
-  it('is exactly S_OBS at age 0', () => {
+  it('is exactly S_OBS at age 0 — via a SHORT-CIRCUIT, not via sqrt(S_OBS**2)', () => {
+    // `Math.sqrt(S_OBS ** 2)` round-trips for 0.2 by LUCK (`0.2 ** 2` is 0.04000000000000001), and nothing
+    // guarantees it for an arbitrary S_OBS. The `Object.is` pin is only legal because age 0 returns the
+    // constant literally.
     expect(Object.is(sigmaObs(0), S_OBS)).toBe(true);
+    expect(Object.is(sigmaObs(-5), S_OBS)).toBe(true); // a future-dated height floors to "fresh", never NaN
+    expect(Number.isNaN(sigmaObs(-5))).toBe(false);
   });
   it('grows as sqrt(S_OBS^2 + DRIFT_OBS^2 * years) — variance-additive, NOT sigma-linear', () => {
     // at 365 days: sqrt(0.20^2 + 0.50^2 * 1) = sqrt(0.29)

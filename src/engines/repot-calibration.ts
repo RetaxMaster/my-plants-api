@@ -81,8 +81,13 @@ const GRID_MIN_RESOLUTION = 4; // assert sigma_post / h >= 4 (the F5.2 grid-reso
 // second, incompatible model of one physical drift. `age` is the HEIGHT MEASUREMENT's age, not the
 // inspection event's (F5.3) — they differ exactly in the case that matters (a fresh inspection of a plant
 // whose height was recorded two years ago).
+//
+// SHORT-CIRCUIT at age 0, so a fresh observation's noise is S_OBS *literally*. `Math.sqrt(S_OBS ** 2)`
+// happens to round-trip for 0.2, but only by luck: `0.2 ** 2` is already 0.04000000000000001, and nothing
+// guarantees the square root lands back on the same float for an arbitrary S_OBS. The feature's standing
+// rule — assert `Object.is` only on values the code returns literally — needs this branch to be legal.
 export const sigmaObs = (ageDays: number | null | undefined): number =>
-  Math.sqrt(S_OBS ** 2 + (DRIFT_OBS ** 2 * (ageDays ?? 0)) / 365);
+  ageDays != null && ageDays > 0 ? Math.sqrt(S_OBS ** 2 + (DRIFT_OBS ** 2 * ageDays) / 365) : S_OBS;
 
 // One inspection, projected from a CareEvent by the care-plan caller. `R` is the habit-normalized R_obs
 // SNAPSHOTTED at inspection time (F5.3), never recomputed from current profile values. `could-not-check`
