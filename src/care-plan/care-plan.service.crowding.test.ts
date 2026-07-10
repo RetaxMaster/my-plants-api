@@ -87,6 +87,9 @@ describe('WATER crowding wiring (spec A5.3)', () => {
   });
 
   it('BACKCOMPAT: a plant with a pot size and no height waters exactly as before the feature', async () => {
+    // Honest scope: `days` is rounded, so this alone would not catch a small wrong factor (a bogus 0.9
+    // crowding still rounds back to 10 here). The BIT-EXACT guarantee lives in scheduling.test.ts's
+    // GOLDEN_NO_HEIGHT pin, captured from `main`. This asserts the wiring reaches the same day.
     const { svc, dues } = setup({ profile: CROWDED_PROFILE, sized: null });
     await svc.recomputePlant('pl1');
     expect(daysBetween(ACQUIRED, dues.WATER)).toBe(10); // the plain species base interval

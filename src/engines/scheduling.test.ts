@@ -569,11 +569,14 @@ describe('WATER crowding in the optional channel (spec A5.3 / A.7)', () => {
     expect(Math.abs(rejectedHardGate(91) - rejectedHardGate(90))).toBeGreaterThan(0.01);
   });
   it('at constant R, crowding is exactly constant and days is monotone NON-DECREASING in pot size', () => {
-    // R fixed at 2 (height = 2× pot, upright): only potFactor varies, and it saturates at its band.
+    // R is fixed OFF the neutral point (height = 3× pot ⇒ R = 3, since HABIT_REF.upright is 1). At R = 2
+    // the factor would be the trivial neutral 1.0 for every D, and "exactly constant" would say nothing
+    // about the response's shape. `3 * D / D` is exact in IEEE-754 for every integer D used here.
     let prev = -Infinity;
     let firstCrowding: number | null = null;
     for (const D of [10, 15, 20, 30, 40, 50]) {
-      const plan = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: D, heightCm: 2 * D, heightAgeDays: 0 });
+      const plan = computeWateringPlan({ ...neutral, growthHabit: 'upright', potSizeCm: D, heightCm: 3 * D, heightAgeDays: 0 });
+      expect(plan.perFactor.crowding).toBeLessThan(1); // off-neutral: a real, non-trivial value (≈0.784)
       if (firstCrowding === null) firstCrowding = plan.perFactor.crowding;
       else expect(Object.is(plan.perFactor.crowding, firstCrowding)).toBe(true); // exactly constant
       expect(plan.days).toBeGreaterThanOrEqual(prev);
@@ -596,9 +599,14 @@ describe('crowdingFactorRepot — R³ biomass-per-volume prior, damped (spec A2.
     expect(Object.is(crowdingFactorRepot(R_REF, R_REF), 1)).toBe(true);
     expect(Object.is(crowdingFactorRepot(5, 5), 1)).toBe(true);
   });
-  it('is < 1 for a crowded plant and > 1 for a roomy one', () => {
-    expect(crowdingFactorRepot(3, R_REF)).toBeLessThan(1);
-    expect(crowdingFactorRepot(1, R_REF)).toBeGreaterThan(1);
+  it('is < 1 for a crowded plant and > 1 for a roomy one — sampled INSIDE the live window', () => {
+    // R = 3 and R = 1 both sit OUTSIDE the un-clipped window [1.517, 2.509], so the band would flatten
+    // them to 0.82 / 1.18 and the assertion would only prove the band exists and the sign is not
+    // inverted. 2.4 and 1.7 are strictly inside, so this actually exercises the R³ response.
+    expect(crowdingFactorRepot(2.4, R_REF)).toBeLessThan(1); // ≈0.856
+    expect(crowdingFactorRepot(2.4, R_REF)).toBeGreaterThan(0.82); // ...and not resting on the floor
+    expect(crowdingFactorRepot(1.7, R_REF)).toBeGreaterThan(1); // ≈1.113
+    expect(crowdingFactorRepot(1.7, R_REF)).toBeLessThan(1.18);
   });
   it('is bounded to [0.82, 1.18] — tighter than the watering band (A2.7)', () => {
     expect(crowdingFactorRepot(100, R_REF)).toBe(0.82);
@@ -608,8 +616,15 @@ describe('crowdingFactorRepot — R³ biomass-per-volume prior, damped (spec A2.
     expect(Object.is(crowdingFactorRepot(2.3), crowdingFactorRepot(2.3, R_REF))).toBe(true);
   });
   it('honours the R_REF_plant seam: a higher per-plant threshold makes the same R less crowded', () => {
-    // If the seam were ignored, both calls would return the same value and this fails.
-    expect(crowdingFactorRepot(3, 2)).toBeLessThan(crowdingFactorRepot(3, 4));
+    // Both sides UN-CLIPPED, so this measures the seam's magnitude instead of comparing two band edges
+    // (cfR(3,2) and cfR(3,4) are 0.82 and 1.18 — both saturated). The same R = 2.4 reads 0.856 against the
+    // R_REF convention and 1.058 against a taller per-plant threshold. An implementation that ignored
+    // `rRefPlant` would return the same value twice.
+    const againstConvention = crowdingFactorRepot(2.4, 2);
+    const againstTaller = crowdingFactorRepot(2.4, 2.6);
+    expect(againstConvention).toBeGreaterThan(0.82); // strictly inside the band...
+    expect(againstTaller).toBeLessThan(1.18); // ...on both sides
+    expect(againstConvention).toBeLessThan(againstTaller);
   });
 });
 

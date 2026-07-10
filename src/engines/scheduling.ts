@@ -34,7 +34,10 @@ export interface ScheduleInput {
   growthHabit?: GrowthHabit | null;
   ageMonths?: number | null;
   // Crowding (spec E, Area A). heightCm = latest sized progress entry; heightAgeDays = its age in days
-  // (drives `freshness`). Both absent/neutral by default so missing data never shifts the schedule.
+  // (drives `freshness`). A MISSING heightCm is neutral, so missing data never shifts the schedule.
+  // ⚠️ These two travel together. A heightCm supplied WITHOUT a heightAgeDays defaults to age 0, i.e.
+  // FULL authority, not neutrality — pass both or neither. `latestSizedHeight()` always returns the pair,
+  // which is why no production caller can get this wrong.
   heightCm?: number | null;
   heightAgeDays?: number | null;
   // Spec-B feedback coupling (§3.6). Wired here, fed in Spec B. feedbackFactor multiplies the center;

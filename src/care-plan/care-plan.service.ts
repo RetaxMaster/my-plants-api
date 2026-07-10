@@ -197,9 +197,11 @@ export class CarePlanService {
   }
 
   // The SAME watering-feedback window, read as a root-bound signal for REPOT (spec E, A2.8/A5.4). The only
-  // difference is where the window starts: strictly AFTER the last REPOT DONE, so a repot resets the
-  // evidence — otherwise, the day after a repot, ten pre-repot dry-soil events still testify that the
-  // plant is root-bound. One window implementation, an injected lower bound: no fork to drift.
+  // difference is where the window starts: at the REPOT anchor — the last REPOT DONE, or `acquiredOn` for
+  // a plant that has never been repotted. A repot therefore RESETS the evidence; otherwise, the day after
+  // a repot, ten pre-repot dry-soil events would still testify that the plant is root-bound. Because
+  // `occurredOn` is a DATE column, `gt` also excludes waterings recorded ON the repot day itself, which is
+  // what we want: they describe the old root ball. One window implementation, an injected lower bound.
   private async repotResidualSignal(plantId: string, sinceExclusive: Date): Promise<RepotResidualSignal> {
     return deriveRepotResidual(await this.waterFeedbackWindow(plantId, sinceExclusive));
   }
