@@ -265,11 +265,12 @@ describe('FeedbackService — REPOT inspection flow (spec F.3/F5.3/F.6)', () => 
     expect(adjustmentUpserts).toHaveLength(1);
   });
 
-  it('at freshness 0.516 (age 400 d) it STILL takes the fallback — the calibration would be weaker there', async () => {
-    // freshness(400) = (730-400)/(730-90) = 0.5156. Above zero, above 0.5 — and still below ROUTE_MIN = 0.6,
-    // because at that age sigma_obs has grown to 0.566 and one inspection moves R_REF_plant so little that
-    // the calibration's marginal authority (-35.5 d) is BELOW the fallback's step (-37.2 d). This test is
-    // what pins ROUTE_MIN above the measured crossover at freshness 0.5187.
+  it('at freshness 0.516 (age 400 d) it STILL takes the fallback — ROUTE_MIN is conservative by design', async () => {
+    // freshness(400) = (730-400)/(730-90) = 0.5156: above zero, above 0.5, and still below ROUTE_MIN = 0.6.
+    // Paired with the 300-day case below, this brackets the threshold to (0.5156, 0.672] — lowering it to
+    // 0.5 or raising it to 0.7 breaks one of the two. `0.6` is a deliberately conservative choice, NOT the
+    // crossover (which is state-dependent: 0.358 for a neutral plant, ~1.0 for a band-clamped one). See the
+    // derivation in feedback.service.ts.
     const age400 = new Date(Date.now() - 400 * 86_400_000);
     const { svc, adjustmentUpserts, created } = build({
       potSizeCm: 20, growthHabit: 'upright', sizeCm: 60, sizedOccurredOn: age400, currentMultiplier: 1,

@@ -30,8 +30,10 @@ describe('logPhi — relative precision + continuous two-term asymptotic tail (s
   // z^2..z^10) which agrees to 13 decimals from the 3rd term on. The tolerance is now 1e-13 / 1e-10, tight
   // enough that a single mistyped `erfccheb` coefficient fails this test.
   it('matches an independent reference to ~1 ulp on the direct branch (z >= -10)', () => {
+    // `z = 5` is deliberately ABSENT: there `Φ(5) ≈ 1 - 2.87e-7`, so `ln Φ(5)` is a catastrophic
+    // cancellation and NO double-precision value can meet a 1e-13 RELATIVE tolerance. Including it would
+    // have forced the "reference" to be the code's own output — the exact circularity this test rejects.
     const cases: [number, number][] = [
-      [5, -2.866516130081049e-7],
       [0, -0.6931471805599453],
       [-2, -3.7831843336820312],
       [-6, -20.736768949974703],
@@ -40,6 +42,17 @@ describe('logPhi — relative precision + continuous two-term asymptotic tail (s
     for (const [z, ref] of cases) {
       expect(Math.abs((logPhi(z) - ref) / ref)).toBeLessThan(1e-13);
     }
+  });
+
+  it('is accurate in ABSOLUTE terms on the upper tail, where ln Phi(z) cancels catastrophically', () => {
+    // ln Φ(5) = -2.8665161296376e-7 to 120 digits. The double nearest that is -2.866516130081049e-7, whose
+    // RELATIVE error is 1.5e-10 — irreducible. What matters is the absolute error, since this term is added
+    // to a log-likelihood: 4.4e-17 nats is nothing.
+    expect(Math.abs(logPhi(5) - -2.8665161296376e-7)).toBeLessThan(1e-15);
+    // Φ(0) = 1/2 *mathematically*, but `erfccheb` has RELATIVE precision ~1e-15, not exactness, so
+    // `0.5 * erfc(0)` is 0.5 only to 1 ulp. Pinning `Object.is(logPhi(0), Math.log(0.5))` would be exactly
+    // the kind of unearned exactness claim this feature's rules forbid. Assert the ulp instead.
+    expect(Math.abs(logPhi(0) - Math.log(0.5))).toBeLessThan(2 * Number.EPSILON);
   });
 
   it('the two-term asymptotic branch is accurate to 5e-12 relative at z = -40', () => {

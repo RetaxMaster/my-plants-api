@@ -16,23 +16,40 @@ const POSTPONE_WINDOW_DAYS = 60;
 // ---- REPOT inspection constants (spec F.6/F6.4). Each has a §7.10 ledger row. ----
 //
 // Route an inspection to the F.5 calibration iff the height's `freshness` is at least this; otherwise send
-// it to the fallback tracker. §F.6 is normative: the threshold must be chosen so the calibration channel's
-// MARGINAL authority at ROUTE_MIN EXCEEDS what the fallback would have contributed — otherwise a nearly-
-// stale height goes to a channel where it does less, AND is denied the one where it would have done more.
+// it to the fallback tracker. §F.6 asks that the calibration's MARGINAL authority at the threshold exceed
+// what the fallback would have contributed — otherwise a nearly-stale height goes to a channel where it does
+// less AND is denied the one where it would have done more.
 //
-// Measured on the reference case (a NEUTRAL plant, R = R_REF, where `crowdingFactorRepot` is unclamped so
-// the whole shift IS the inspection's own contribution; a 600-day cadence). The binding direction is
-// `needed-cannot-now`, whose fallback step is -37.2 d against `not-needed-yet`'s +9.7 d:
+// Both sides must be measured as MARGINAL EFFECTS ON THE DUE DATE OF THE PLANT BEING ROUTED. That is subtler
+// than it looks, twice over:
 //
-//   freshness  height age   calibration marginal   fallback step
-//     0.70        282 d          -55.2 d              -37.2 d
-//     0.60        346 d          -44.8 d              -37.2 d   <- ROUTE_MIN: a 1.20x margin
-//     0.5187      398 d          -37.2 d              -37.2 d   <- the true crossover
-//     0.50        410 d          -35.5 d              -37.2 d   <- fallback WINS: 0.5 would violate F.6
+//  (a) The fallback multiplier's authority is itself damped by `(1 - wc)` (F6.0a), and any plant that
+//      REACHES this decision has a computable R, hence `wc = freshness > 0`. So the fallback's raw step
+//      (-37.2 d on a 600-day cadence) is the step of a plant with `wc = 0` — one whose R is NOT computable,
+//      which is routed to the fallback by `rObs == null` and never consults this threshold at all.
+//  (b) `crowdingFactorRepot` is clamped to [0.82, 1.18]. A plant already pinned at a band edge cannot move
+//      further in that direction, so the calibration's marginal authority there is ~zero regardless of
+//      freshness.
 //
-// `sigma_obs` grows with the height's age, so an old observation moves `R_REF_plant` less; a derivation that
-// ignores that (or that reads a plant whose factor is already clamped at the band edge) overstates the
-// calibration's authority. See docs/care-engine.md §7.10.
+// Measured on the NEUTRAL reference plant (R = R_REF, factor unclamped, 600-day cadence). The binding
+// direction is `needed-cannot-now` (the `not-needed-yet` crossover sits far lower, at freshness 0.157):
+//
+//   freshness  height age   calibration marginal   fallback marginal (damped by 1-wc)
+//     0.70        282 d          -55.2 d                 -11.2 d
+//     0.60        346 d          -44.8 d                 -14.9 d     <- ROUTE_MIN: a 3.0x margin
+//     0.50        410 d          -35.5 d                 -18.6 d        (1.9x — 0.5 also satisfies F.6)
+//     0.40        474 d          -27.2 d                 -22.3 d        (1.2x)
+//     0.358       501 d          -23.9 d                 -23.9 d     <- the crossover, for THIS plant
+//
+// ⚠️ There is NO freshness threshold that satisfies F.6 for every plant, because the crossover is
+// STATE-DEPENDENT: it is 0.358 at R = R_REF, but 0.395 at R = 1.5 and ~1.0 for a band-clamped plant
+// (R >= 2.5), where the calibration is saturated and the fallback is the better channel at ANY freshness.
+// Given that, a HIGHER threshold is the safer error: routing a band-clamped plant to the calibration loses
+// its lesson entirely (marginal ~0 AND the fallback is denied), whereas routing a neutral plant to the
+// fallback merely damps its lesson to a still-useful (1 - wc) fraction. `0.6` is therefore a deliberately
+// CONSERVATIVE choice, not the crossover; it also reads plainly as "the height is more trusted than not"
+// and admits heights up to ~11.5 months old. Routing on the marginal effect itself — computable here at
+// submit time — is the honest improvement, and is deferred (docs/care-engine.md §7.11).
 const REPOT_ROUTE_MIN = 0.6;
 
 // The floor a postpone writes, per reason. A typed exhaustive record keyed by the shared vocabulary: a
