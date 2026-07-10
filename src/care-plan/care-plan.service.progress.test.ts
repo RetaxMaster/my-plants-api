@@ -38,6 +38,9 @@ function setup(opts: { lastProgressOn?: Date; acquiredOn: Date }) {
         frequencies: [],
       }),
     },
+    // No size-bearing progress entry → crowdingIndex is null → the crowding factor is
+    // neutral, so these fixtures keep their pre-crowding expectations (spec E, A5.3).
+    plantProgressEntry: { findFirst: async () => null },
     careEvent: {
       findFirst: async ({ where }: any) =>
         where.task === 'PROGRESS' && opts.lastProgressOn ? { occurredOn: opts.lastProgressOn } : null,

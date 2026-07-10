@@ -4,8 +4,11 @@ import type { Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { WeatherService } from '../weather/weather.service.js';
 import { effectiveConditions, humidityBand, type EffectiveConditions } from '../engines/indoor-climate.js';
-import { computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue, computeProgressDue } from '../engines/scheduling.js';
-import { deriveFeedback, type FeedbackWindowEvent } from '../engines/adaptation.js';
+import {
+  computeCadenceDue, computeFertilizingDue, computeMistingDue, computeNextDue, computeProgressDue,
+  computeRepotDue, crowdingFactorRepot, crowdingIndex, freshness,
+} from '../engines/scheduling.js';
+import { deriveFeedback, deriveRepotResidual, type FeedbackWindowEvent, type RepotResidualSignal } from '../engines/adaptation.js';
 import { hemisphereForLatitude, seasonForDate, type Hemisphere } from '../common/season/season.js';
 import { startOfTomorrowUtc } from '../common/time/local-date.js';
 import { lightRank, placeLightRank } from '../places/place-conditions.js';
@@ -42,6 +45,19 @@ export class CarePlanService {
 
     const waterFeedback = await this.waterFeedbackSignal(plantId);
 
+    // The plant's most recent SIZE-bearing progress entry (spec E, Area A). A later note-only entry never
+    // blanks a real height — same canonical tiebreak as plants.service. `heightAgeDays` drives `freshness`,
+    // which damps the crowding factor's authority rather than its value.
+    const latestSized = await this.prisma.plantProgressEntry.findFirst({
+      where: { plantId, sizeCm: { not: null } },
+      orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+      select: { sizeCm: true, occurredOn: true },
+    });
+    const heightCm = latestSized?.sizeCm ?? null;
+    const heightAgeDays = latestSized
+      ? Math.max(0, Math.floor((Date.now() - latestSized.occurredOn.getTime()) / 86_400_000))
+      : null;
+
     for (const task of SCHEDULED_TASKS) {
       // ROTATE / CLEAN_LEAVES are optional cadences — skip when the species has none, clearing any
       // stale due so a previously-scheduled cadence does not linger after the species loses it.
@@ -64,6 +80,29 @@ export class CarePlanService {
       // PlantTaskFrequency override — replaces the species base interval at this seam. The ROTATE/
       // CLEAN_LEAVES skip/clear checks already `continue` above, so an override on a skipped optional
       // task never reaches here (it stays inert — spec §4.5). It tunes how often, never whether.
+      // REPOT's optional channel (spec E, A5.4): the crowding PRIOR (R³, habit-normalized, freshness-
+      // weighted) and the watering model's measured RESIDUAL, windowed to events strictly after the last
+      // REPOT DONE so a repot resets the evidence. `wc` is 0 whenever R is not computable — including a
+      // fresh height with no pot size, which is load-bearing for Spec F's fallback routing.
+      let repotCrowdingFactor = 1;
+      let repotResidualFactor = 1;
+      let repotWc = 0;
+      let repotWr = 0;
+      if (task === 'REPOT') {
+        const r = crowdingIndex(
+          heightCm,
+          plant.profile?.potSizeCm ?? null,
+          (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
+        );
+        if (r != null) {
+          repotCrowdingFactor = crowdingFactorRepot(r); // rRefPlant defaults to R_REF (the Spec F seam)
+          repotWc = freshness(heightAgeDays ?? 0);
+        }
+        const resid = await this.repotResidualSignal(plantId, anchor);
+        repotResidualFactor = resid.residualFactor;
+        repotWr = resid.residualConfidence;
+      }
+
       const frequencyDays = plant.frequencies.find((f) => f.task === task)?.intervalDays;
       const due = this.dueForTask(task, record, {
         effective,
@@ -83,8 +122,14 @@ export class CarePlanService {
         nearHeater: plant.profile?.nearHeater ?? null,
         growthHabit: (plant.profile?.growthHabit ?? null) as GrowthHabit | null,
         ageMonths: plant.profile?.ageMonths ?? null,
+        heightCm,
+        heightAgeDays,
         feedbackFactor: task === 'WATER' ? waterFeedback.feedbackFactor : undefined,
         feedbackConfidence: task === 'WATER' ? waterFeedback.feedbackConfidence : undefined,
+        repotCrowdingFactor,
+        repotResidualFactor,
+        repotWc,
+        repotWr,
       }, frequencyDays);
       await this.upsertDue(plantId, task, due);
     }
@@ -154,8 +199,27 @@ export class CarePlanService {
   // two-column projection over one plant's lifetime WATER events is tiny, and the JS loop stops at 10
   // reason-bearing matches regardless of how many plain rows precede them.
   private async waterFeedbackSignal(plantId: string): Promise<{ feedbackFactor: number; feedbackConfidence: number }> {
+    return deriveFeedback(await this.waterFeedbackWindow(plantId));
+  }
+
+  // The SAME watering-feedback window, read as a root-bound signal for REPOT (spec E, A2.8/A5.4). The only
+  // difference is where the window starts: strictly AFTER the last REPOT DONE, so a repot resets the
+  // evidence — otherwise, the day after a repot, ten pre-repot dry-soil events still testify that the
+  // plant is root-bound. One window implementation, an injected lower bound: no fork to drift.
+  private async repotResidualSignal(plantId: string, sinceExclusive: Date): Promise<RepotResidualSignal> {
+    return deriveRepotResidual(await this.waterFeedbackWindow(plantId, sinceExclusive));
+  }
+
+  // The single row→window mapping shared by both signals above. `sinceExclusive` is bound as a native Date
+  // (never an ISO string — MariaDB would parse it in the session timezone and shift the day boundary).
+  private async waterFeedbackWindow(plantId: string, sinceExclusive?: Date): Promise<FeedbackWindowEvent[]> {
     const rows = await this.prisma.careEvent.findMany({
-      where: { plantId, task: 'WATER', type: { in: ['DONE', 'POSTPONED', 'SYMPTOM'] } },
+      where: {
+        plantId,
+        task: 'WATER',
+        type: { in: ['DONE', 'POSTPONED', 'SYMPTOM'] },
+        ...(sinceExclusive ? { occurredOn: { gt: sinceExclusive } } : {}),
+      },
       orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
       select: { type: true, payload: true },
     });
@@ -169,9 +233,12 @@ export class CarePlanService {
       } else if (r.type === 'SYMPTOM' && p?.symptom) {
         window.push({ kind: 'symptom', symptom: p.symptom });
       }
-      if (window.length >= 10) break; // last-10 (spec B §3.3), newest-first
+      // last-10 (spec B §3.3), newest-first. Without this slice, "every event since the last REPOT DONE"
+      // is up to 24 months: a fern watered every 3–4 days would saturate the residual within weeks and
+      // pin its repot date for the whole cycle.
+      if (window.length >= 10) break;
     }
-    return deriveFeedback(window);
+    return window;
   }
 
   private dueForTask(
@@ -193,8 +260,15 @@ export class CarePlanService {
       nearHeater?: boolean | null;
       growthHabit?: GrowthHabit | null;
       ageMonths?: number | null;
+      heightCm?: number | null;
+      heightAgeDays?: number | null;
       feedbackFactor?: number;
       feedbackConfidence?: number;
+      // REPOT's optional channel (spec E, A5.4) — neutral (1 / 1 / 0 / 0) for every other task.
+      repotCrowdingFactor?: number;
+      repotResidualFactor?: number;
+      repotWc?: number;
+      repotWr?: number;
     },
     frequencyDays?: number, // PlantTaskFrequency override — replaces the species base interval
   ): Date {
@@ -226,6 +300,8 @@ export class CarePlanService {
         nearHeater: ctx.nearHeater,
         growthHabit: ctx.growthHabit,
         ageMonths: ctx.ageMonths,
+        heightCm: ctx.heightCm,
+        heightAgeDays: ctx.heightAgeDays,
         feedbackFactor: ctx.feedbackFactor,
         feedbackConfidence: ctx.feedbackConfidence,
       });
@@ -240,14 +316,26 @@ export class CarePlanService {
         reduceInDormancy: record.fertilizing.reduceInDormancy,
       });
     }
-    // REPOT / ROTATE / CLEAN_LEAVES: pure cadence. The override replaces the species cadenceDays.
+    // REPOT: two-channel (spec E, A5.4) — the species cadence is the always-on base; crowding + the
+    // watering residual ride an optional, evidence-weighted channel. ROTATE / CLEAN_LEAVES stay on
+    // computeCadenceDue, untouched, so they cannot drift.
+    if (task === 'REPOT') {
+      return computeRepotDue({
+        cadenceDays: frequencyDays ?? record.repotting.typicalIntervalMonths * 30,
+        adjustment: ctx.adjustment,
+        anchor: ctx.anchor,
+        crowdingFactor: ctx.repotCrowdingFactor ?? 1,
+        residualFactor: ctx.repotResidualFactor ?? 1,
+        wc: ctx.repotWc ?? 0,
+        wr: ctx.repotWr ?? 0,
+      });
+    }
+    // ROTATE / CLEAN_LEAVES: pure cadence. The override replaces the species cadenceDays.
     const cadenceDays =
       frequencyDays ??
-      (task === 'REPOT'
-        ? record.repotting.typicalIntervalMonths * 30
-        : task === 'ROTATE'
-          ? (record.maintenance.rotationDays as number)
-          : (record.maintenance.leafCleaningDays as number));
+      (task === 'ROTATE'
+        ? (record.maintenance.rotationDays as number)
+        : (record.maintenance.leafCleaningDays as number));
     return computeCadenceDue({ cadenceDays, adjustment: ctx.adjustment, anchor: ctx.anchor });
   }
 

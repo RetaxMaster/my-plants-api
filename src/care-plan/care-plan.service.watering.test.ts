@@ -29,6 +29,9 @@ function setup(opts: { profile?: any; airflow?: string | null }) {
   };
   const prisma = {
     plant: { findUniqueOrThrow: async () => plant },
+    // No size-bearing progress entry → crowdingIndex is null → the crowding factor is
+    // neutral, so these fixtures keep their pre-crowding expectations (spec E, A5.3).
+    plantProgressEntry: { findFirst: async () => null },
     careEvent: { findFirst: async () => null, findMany: async () => [] },
     dueCache: {
       upsert: async ({ where, create }: any) => { dues[where.plantId_task.task] = create?.nextDueOn ?? null; },

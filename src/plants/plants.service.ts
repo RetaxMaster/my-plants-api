@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { parseSpeciesRecord, primaryCommonName, type PlantProfile, type SoilDryness } from '@retaxmaster/my-plants-species-schema';
+import { parseSpeciesRecord, primaryCommonName, type GrowthHabit, type PlantProfile, type SoilDryness } from '@retaxmaster/my-plants-species-schema';
+import { crowdingIndex, freshness } from '../engines/scheduling.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -103,6 +104,10 @@ export class PlantsService {
     // The species' soil-dryness-before-watering slug (e.g. 'mostly-dry'), surfaced so the plant page's
     // WATER info modal can show a species-specific line without a second /species round-trip. Additive.
     soilDrynessBeforeWatering: SoilDryness;
+    // The plant-to-pot crowding index (spec E, Area A). `index` is the habit-normalized R (null when it
+    // is not computable); `usedByEngine` drives the height dot on "care is based on"; `repotSigns` is the
+    // species checklist the owner needs at inspection time. Additive.
+    crowding: { index: number | null; usedByEngine: boolean; repotSigns: string[] };
   }> {
     const plant = await this.prisma.plant.findFirst({
       where: { id, ...this.owner.ownerFilter() },
@@ -164,7 +169,36 @@ export class PlantsService {
         : null,
     );
 
-    return { plantId: id, tasks, viability, soilDrynessBeforeWatering: record.watering.soilDrynessBeforeWatering };
+    // Crowding (spec E, Area A). Same canonical reads as `get()`: the profile's pot size + growth habit,
+    // and the most recent SIZE-bearing progress entry (a later note-only entry never blanks a real height).
+    const [profileRow, latestSized] = await Promise.all([
+      this.prisma.plantProfile.findUnique({ where: { plantId: id } }),
+      this.prisma.plantProgressEntry.findFirst({
+        where: { plantId: id, sizeCm: { not: null } },
+        orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
+        select: { sizeCm: true, occurredOn: true },
+      }),
+    ]);
+    const r = crowdingIndex(
+      latestSized?.sizeCm ?? null,
+      profileRow?.potSizeCm ?? null,
+      (profileRow?.growthHabit ?? null) as GrowthHabit | null,
+    );
+    // The dot is green only when the engine is ACTUALLY using the height: R computable AND the measurement
+    // still carries authority. A stale height gives freshness 0 → `crowdingFactor ** 0 === 1` → the engine
+    // is not using it, so a green dot would be a lie.
+    const heightAgeDays = latestSized
+      ? Math.max(0, Math.floor((Date.now() - latestSized.occurredOn.getTime()) / 86_400_000))
+      : null;
+    const crowdingUsed = r != null && freshness(heightAgeDays ?? 0) > 0;
+
+    return {
+      plantId: id,
+      tasks,
+      viability,
+      soilDrynessBeforeWatering: record.watering.soilDrynessBeforeWatering,
+      crowding: { index: r, usedByEngine: crowdingUsed, repotSigns: record.repotting.signs },
+    };
   }
 
   async create(dto: CreatePlantDto) {

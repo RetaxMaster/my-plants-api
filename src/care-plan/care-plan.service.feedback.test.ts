@@ -27,6 +27,9 @@ function setup(waterEvents: { type: string; payload: unknown }[]) {
   };
   const prisma = {
     plant: { findUniqueOrThrow: async () => plant },
+    // No size-bearing progress entry → crowdingIndex is null → the crowding factor is
+    // neutral, so these fixtures keep their pre-crowding expectations (spec E, A5.3).
+    plantProgressEntry: { findFirst: async () => null },
     careEvent: {
       // recomputePlant reads the per-task last-DONE anchor (findFirst) AND the feedback window (findMany).
       findFirst: async () => null,
