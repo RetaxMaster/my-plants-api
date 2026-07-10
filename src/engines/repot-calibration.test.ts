@@ -19,20 +19,33 @@ const nd = (R: number, ageDays?: number) => ({ kind: 'needed' as const, R, ageDa
 const cnc = () => ({ kind: 'could-not-check' as const, R: null });
 
 describe('logPhi — relative precision + continuous two-term asymptotic tail (spec F5.2)', () => {
-  // High-precision reference values of ln Φ(z) — a REFERENCE (mpmath: ln(0.5*erfc(-z/sqrt(2))), 30 digits),
-  // not this code's own output.
-  it('matches the reference to <1e-6 relative error at representative z', () => {
+  // ⚠️ CORRECTED 2026-07-09 during implementation. The reference tuples this test shipped with were
+  // introduced as "high-precision (mpmath, 30 digits)". They are NOT: they deviate from the true ln Φ(z) by
+  // 1.13e-7 at z = -6, 1.62e-6 at z = -10 and 2.61e-5 at z = -40. Those magnitudes are the signature of an
+  // Abramowitz-Stegun erf (ABSOLUTE error 1.5e-7) — the exact low-precision function this whole module
+  // exists to avoid. The old 1e-6 relative tolerance was wide enough to hide it.
+  //
+  // The values below are independent: for z >= -10 they are C-library `erfc` (double, ~1 ulp); for z = -40,
+  // where libm's erfc underflows to 0, the converged Mills series (5 terms: -1, 3, -15, 105, -945 over
+  // z^2..z^10) which agrees to 13 decimals from the 3rd term on. The tolerance is now 1e-13 / 1e-10, tight
+  // enough that a single mistyped `erfccheb` coefficient fails this test.
+  it('matches an independent reference to ~1 ulp on the direct branch (z >= -10)', () => {
     const cases: [number, number][] = [
-      [5, -2.8665157e-7],
+      [5, -2.866516130081049e-7],
       [0, -0.6931471805599453],
-      [-2, -3.7831843336589535],
-      [-6, -20.736769063317405],
-      [-10, -53.23128676945526],
-      [-40, -804.6084680851445],
+      [-2, -3.7831843336820312],
+      [-6, -20.736768949974703],
+      [-10, -53.231285150512463],
     ];
     for (const [z, ref] of cases) {
-      expect(Math.abs((logPhi(z) - ref) / ref)).toBeLessThan(1e-6);
+      expect(Math.abs((logPhi(z) - ref) / ref)).toBeLessThan(1e-13);
     }
+  });
+
+  it('the two-term asymptotic branch is accurate to 5e-12 relative at z = -40', () => {
+    // Converged reference from the Mills series; the two-term truncation error there is 3.7e-9 nats.
+    const converged = -804.6084420137538;
+    expect(Math.abs((logPhi(-40) - converged) / converged)).toBeLessThan(5e-12);
   });
 
   it('is continuous across the z = -10 branch cutoff (branch jump < 1e-5 nats)', () => {
