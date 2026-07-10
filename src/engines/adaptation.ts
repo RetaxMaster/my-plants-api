@@ -1,4 +1,9 @@
-import { JUSTIFIED_EARLY_WATER_REASON, JUSTIFIED_POSTPONE_REASON } from '@retaxmaster/my-plants-species-schema';
+import {
+  JUSTIFIED_EARLY_WATER_REASON,
+  JUSTIFIED_POSTPONE_REASON,
+  JUSTIFIED_REPOT_REASONS,
+  type RepotPostponeReason,
+} from '@retaxmaster/my-plants-species-schema';
 
 export interface AdaptationInput {
   current: number; // current multiplier
@@ -104,4 +109,46 @@ export function deriveRepotResidual(window: FeedbackWindowEvent[]): RepotResidua
     residualFactor: clamp(1 + net, REPOT_RESID_LO, REPOT_RESID_HI),
     residualConfidence: clamp(justified / REPOT_CONFIDENCE_FULL, 0, 1),
   };
+}
+
+// ---- Spec F §F6.2: the REPOT fallback learner — a Robbins–Monro quantile tracker (Robbins & Monro, 1951).
+// Used ONLY when an inspection has no fresh R_obs to feed the F.5 calibration (routing is decided at submit
+// time and persisted as payload.routedTo). We do not want the due date at the MEAN time-to-root-bound; we
+// want it at a chosen LOW quantile q — "I accept arriving late q of the time". Sizing the two steps so that
+// E[step] = 0 exactly there gives E[step] = 0 <=> P(needed) = q, i.e. the multiplier's fixed point IS the
+// q-quantile of this plant's true time-to-root-bound:
+//
+//   not-needed-yet     -> +alpha*q        (the engine was early -> lengthen)
+//   needed-cannot-now  -> -alpha*(1-q)    (the engine was NOT early -> shorten)
+//   could-not-check    ->  0              (logistics, not information — the F1.2 justification gate)
+//
+// Run on ln(multiplier): the additive step on a multiplicative quantity would otherwise vary 4x across
+// [0.5, 2]. CRITICAL (F6.2a): postponeNudge/cadenceNudge do NOT participate. If they did,
+// E[step] = alpha*(q - p) + 0.05*E[recentPostpones] > 0 ALWAYS, the ratchet returns fed by the justified
+// reasons themselves, and the tracker has no fixed point. That is why REPOT gets its own function rather
+// than a branch inside nextAdjustment (which is left untouched for WATER/FERTILIZE/ROTATE/CLEAN_LEAVES).
+//
+// NOTE (F6.2b): with a CONSTANT alpha this does not converge — it converges IN DISTRIBUTION, random-walking
+// around the q-quantile. A test asserting "the multiplier converges" is flaky by construction; assert the
+// stationarity of P(needed) instead.
+export const REPOT_ALPHA = 0.08; // TUNED gain. Stability: max single ln-step alpha*max(q,1-q) = 0.064
+//                                  (a 6.6% multiplier change) against a band width ln2 - ln0.5 = 1.386,
+//                                  so ~22 steps to cross the whole band; an adversarial monotone run is
+//                                  pinned by the clamp, never divergent. Simulated P(needed) = 0.200.
+export const REPOT_Q = 0.2; // TUNED target quantile — a stated risk posture ("root-bound 1 inspection in 5").
+const REPOT_MULT_LO = 0.5;
+const REPOT_MULT_HI = 2.0;
+const JUSTIFIED_REPOT = new Set<string>(JUSTIFIED_REPOT_REASONS);
+
+// True for the two inspection outcomes that carry ground truth. `could-not-check` is pure logistics and is
+// the F1.2 gate: it must never move the cadence.
+export const isJustifiedRepotReason = (reason: string): boolean => JUSTIFIED_REPOT.has(reason);
+
+export function nextRepotAdjustment(current: number, reason: RepotPostponeReason): number {
+  let step = 0;
+  if (reason === 'not-needed-yet') step = REPOT_ALPHA * REPOT_Q;
+  else if (reason === 'needed-cannot-now') step = -REPOT_ALPHA * (1 - REPOT_Q);
+  // could-not-check (and any non-justified reason) -> step stays 0; `current` is returned LITERALLY.
+  if (step === 0) return current;
+  return clamp(Math.exp(Math.log(current) + step), REPOT_MULT_LO, REPOT_MULT_HI);
 }
