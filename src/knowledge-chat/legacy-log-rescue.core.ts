@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile, rename, open, rm } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rename, open, rm, stat, chmod } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
@@ -37,16 +37,40 @@ const DONE_STATUS_BY_RUN_STATUS: Record<string, DoneStatus> = {
 
 const sha256 = (serialized: string) => createHash('sha256').update(serialized).digest('hex');
 
+// A run log is SECRET-GRADE: it carries the user's prompt, the agent's full output, and a stderr tail. The
+// engine creates them `0600` on purpose. A rescued log must not be more readable than the log it replaces
+// — and `rename` carries the TEMP file's permissions onto the target, so a temp created at the umask
+// default (typically 0644) would silently publish an admin's conversation transcript to every local user.
+const SECRET_GRADE_MODE = 0o600;
+
 // Replace `path` with `content` ATOMICALLY: write to a sibling temp file on the SAME filesystem, fsync it
 // durable, then rename() over the target. `rename` within one directory is atomic on every filesystem we
 // run on — the original is either the OLD bytes or the NEW bytes, in full, never a truncated mix. A plain
 // `writeFile(path, …)` truncates the one and only original the instant it opens the file: a crash, a full
 // disk, or an I/O error mid-write leaves a half-written NDJSON and destroys BOTH the legacy original and
 // the conversion, and the engine's reader is fail-closed — one bad line bricks the whole conversation.
+//
+// PERMISSIONS ARE PART OF THE REPLACEMENT. We preserve the ORIGINAL file's mode (a rescue must not change
+// who can read a transcript, in either direction), falling back to 0600 — the engine's own, restrictive
+// default — if the target's mode cannot be read. The temp is created 0600 from the very first byte, so the
+// content is never briefly world-readable on disk even before the chmod.
 async function atomicReplaceFile(path: string, content: string): Promise<void> {
   const tmpPath = join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomUUID()}`);
+
+  // The mode to land on the target: the original's, or the secret-grade default. Never the umask's.
+  let targetMode = SECRET_GRADE_MODE;
   try {
-    await writeFile(tmpPath, content, 'utf8');
+    targetMode = (await stat(path)).mode & 0o777;
+  } catch {
+    // No original (or unreadable metadata) → fail SAFE, not open.
+  }
+
+  try {
+    // `mode` on writeFile only applies at CREATION, and it is masked by the umask — so we chmod explicitly
+    // below rather than trust it. Creating at 0600 first means the window before the chmod is the tight
+    // one, not the permissive one.
+    await writeFile(tmpPath, content, { encoding: 'utf8', mode: SECRET_GRADE_MODE });
+    await chmod(tmpPath, targetMode);
     const fh = await open(tmpPath, 'r');
     try {
       await fh.sync();
@@ -57,6 +81,46 @@ async function atomicReplaceFile(path: string, content: string): Promise<void> {
   } catch (err) {
     await rm(tmpPath, { force: true });
     throw err;
+  }
+}
+
+// ADOPT the log into the engine's durable index, then BACKFILL the run row — the two steps that make a
+// converted log actually READABLE, wrapped so that neither can kill the batch.
+//
+// ADOPTION IS MANDATORY, not optional cleanup. The engine resolves logs by runId through its DURABLE INDEX,
+// never by path — that invariant is what stops a host bug from serving another conversation's file. A
+// converted log sitting in logRoot that was never adopted is INVISIBLE to the engine: the symptom is
+// `OwnRunLogUnavailableError: no log path in the durable run index`, a 500 whose message never points back
+// at this migration. (`beginRun` cannot be reused here — it creates the log with O_CREAT|O_EXCL and throws
+// against a file that already exists.)
+//
+// THE BACKFILL is OURS, and it is on no upstream checklist. Our own all-or-nothing membership rule
+// (`runsForSession` in knowledge-chat-orchestrator.ts) EXCLUDES a run whose providerSessionId is null and
+// sessionTracked is false — exactly what every pre-1.0 row looks like before this write. Without it the
+// rescued log is byte-perfect and adopted, and the conversation still never reads it.
+//
+// WHY THE TRY/CATCH: `adoptExistingLog` throws on any door-check failure, and this is a BATCH maintenance
+// job. A throw that escapes the per-file loop takes every REMAINING file down with it — a single
+// unforeseen bad log would silently halve a migration. Predicates can only exclude the cases we thought
+// of; fault isolation holds for the ones we did not, which is why it is the more fundamental guarantee of
+// the two. Failure here is also SAFE to defer: the canonical bytes are already valid on disk, so the next
+// run repairs the file through the repair branch.
+async function adoptAndBackfill(
+  prisma: PrismaClient,
+  index: LogIndex,
+  entry: { runId: string; path: string; startedAtMs: number; providerSessionId: string; expect: LogExpectation },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const { runId, path, startedAtMs, providerSessionId, expect } = entry;
+  try {
+    index.adoptExistingLog({ logPath: path, startedAtMs, expect });
+    await prisma.knowledgeChatRun.update({
+      where: { id: runId },
+      data: { providerSessionId, sessionTracked: true },
+    });
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: `adoption/backfill failed (the canonical file is intact; a later re-run will repair it): ${message}` };
   }
 }
 
@@ -128,12 +192,27 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
       if (scan.sawIdentity) {
         // Provably engine-spawned: NOT a rescue candidate, regardless of `sessionTracked`. Never call
         // `adoptExistingLog` on it — the package explicitly refuses a run it spawned, and that call would
-        // throw and abort the whole batch. Reported via `skipped` (not silently folded into
-        // `alreadyCanonical`) because an untracked session on a genuinely-run conversation is worth an
-        // operator's attention, even though it is not this script's job to fix it.
+        // throw. Reported via `skipped` (not silently folded into `alreadyCanonical`) because an untracked
+        // session on a genuinely-run conversation is worth an operator's attention, even though it is not
+        // this script's job to fix it.
         report.skipped.push({
           runId,
           reason: 'canonical file was spawned by this engine (carries a runner identity) — not a legacy-rescue candidate; sessionTracked=false here is unrelated to the pre-1.0 migration and should be investigated separately',
+        });
+        continue;
+      }
+      // NO identity is still not enough to call this a partial rescue. The engine writes the log's
+      // {header, lead} pair BEFORE it tries to start the runner, so a run that failed PRE-SPAWN (a failing
+      // `onRun`, a failed spawn, an unreadable /proc identity, a missing first report) leaves a canonical,
+      // TERMINAL log behind that has no `log.identity` AND no `session.started` — and migration 0017 left
+      // its row at `sessionTracked = false` just like a real pre-1.0 row. A rescued log, by contrast, ALWAYS
+      // carries a `session.started` (the translator synthesizes one from the session id we hand it). So the
+      // positive marker of "this is rescue output" is `sawSessionStarted`, and its absence means a pre-spawn
+      // engine failure — which `adoptExistingLog` rejects for having no matching `session.started`.
+      if (!scan.sawSessionStarted) {
+        report.skipped.push({
+          runId,
+          reason: 'canonical file has no session.started — this is an engine run that failed BEFORE spawning (the engine writes the header+lead pre-spawn), not a partially-rescued legacy log; nothing to adopt',
         });
         continue;
       }
@@ -154,12 +233,13 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
       }
 
       const expect: LogExpectation = { runId, provider: scan.header.provider, providerSessionId };
-      index.adoptExistingLog({ logPath: path, startedAtMs: scan.header.startedAtMs, expect });
-
-      await prisma.knowledgeChatRun.update({
-        where: { id: runId },
-        data: { providerSessionId, sessionTracked: true },
+      const outcome = await adoptAndBackfill(prisma, index, {
+        runId, path, startedAtMs: scan.header.startedAtMs, providerSessionId, expect,
       });
+      if (!outcome.ok) {
+        report.skipped.push({ runId, reason: outcome.reason });
+        continue;
+      }
 
       report.repaired.push(runId);
       continue;
@@ -225,28 +305,19 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
     // a full disk, or an I/O error mid-write.
     await atomicReplaceFile(path, canonical);
 
-    // ADOPTION IS MANDATORY, not optional cleanup. The engine resolves logs by runId through its DURABLE
-    // INDEX, never by path — that invariant is what stops a host bug from serving another conversation's
-    // file. A converted log sitting in logRoot that was never adopted is INVISIBLE to the engine: the
-    // symptom is `OwnRunLogUnavailableError: no log path in the durable run index`, a 500 whose message
-    // never points back at this migration. `beginRun` cannot be reused here — it creates the log with
-    // O_CREAT|O_EXCL and throws against a file that already exists.
-    //
-    // If the process dies right here — after the write, before this call or the backfill below — the file
-    // is now canonical but still `sessionTracked: false` on its run row. The NEXT run of this script picks
-    // that exact state up in the `!legacy` branch above and repairs it: that is precisely why the
-    // idempotency gate could not stay `isLegacyLog` alone (FIX 1).
-    index.adoptExistingLog({ logPath: path, startedAtMs, expect });
-
-    // BACKFILL THE RUN ROW — this step is OURS, and it is on no upstream checklist. Our own all-or-nothing
-    // membership rule (`runsForSession` in knowledge-chat-orchestrator.ts) EXCLUDES a run whose
-    // providerSessionId is null and sessionTracked is false — which is exactly what every pre-1.0 row looks
-    // like before this write. Without it the rescued log is byte-perfect and adopted, and the conversation
-    // still never reads it: `runsForSession` never counts it as a member of the session it belongs to.
-    await prisma.knowledgeChatRun.update({
-      where: { id: runId },
-      data: { providerSessionId, sessionTracked: true },
+    // ADOPT + BACKFILL. Both steps, and their fault isolation, live in `adoptAndBackfill` — see its
+    // comment. If the process dies between the write above and those steps, the file is now canonical but
+    // still `sessionTracked: false` on its run row; the NEXT run of this script picks that exact state up
+    // in the `!legacy` branch above and repairs it (FIX 1).
+    const outcome = await adoptAndBackfill(prisma, index, {
+      runId, path, startedAtMs, providerSessionId, expect,
     });
+    if (!outcome.ok) {
+      // The canonical bytes are already on disk and are VALID (we validated them above), so this is not a
+      // loss — the next run repairs it through the `!legacy` branch. Report it and keep going.
+      report.skipped.push({ runId, reason: outcome.reason });
+      continue;
+    }
 
     report.rescued.push(runId);
     // Rescued ≠ lossless. Say so when it wasn't: a line the translator could not read came back as an

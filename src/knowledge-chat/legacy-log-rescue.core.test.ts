@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, readOwnRunLog, type AgentsRealtimeServer } from '@retaxmaster/agents-realtime-server';
@@ -256,6 +256,129 @@ describe('rescueLegacyLogs — a canonical file is not automatically "done" (FIX
     expect(report.skipped[0]?.reason).toMatch(/runner identity|spawned/i);
     // The file is completely untouched.
     expect(await readFile(path, 'utf8')).toBe(withIdentity);
+  });
+
+  // FIX A: `sawIdentity === false` is STILL not proof of a partial rescue. The engine writes the log's
+  // {header, lead} pair BEFORE it tries to start the runner, so a run that failed PRE-SPAWN leaves a
+  // canonical, terminal log with NO `log.identity` AND NO `session.started` — and 0017 left its row at
+  // sessionTracked=false. Adopting it would throw (the package requires a matching session.started).
+  // `sawSessionStarted` is the positive marker of translated (rescue) output; its absence means pre-spawn.
+  it('SKIPS a pre-spawn engine failure (no identity, no session.started) and still rescues the next file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kc-rescue-'));
+    const prespawnPath = join(dir, 'run-prespawn.ndjson');
+
+    // Build genuine canonical bytes, then STRIP the `session.started` line — leaving exactly the shape the
+    // engine leaves behind when it wrote the header+lead and then failed before the runner ever came up.
+    await writeFile(prespawnPath, LEGACY);
+    await rescueLegacyLogs(fakePrisma([{
+      id: 'run-prespawn', provider: 'claude', prompt: 'p', status: 'FAILED',
+      startedAt: new Date(30), createdAt: new Date(30),
+      providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-prespawn' },
+    }]) as never, dir, { adoptExistingLog: vi.fn() });
+    const stripped = (await readFile(prespawnPath, 'utf8'))
+      .split('\n')
+      .filter((l) => l.trim() !== '' && !l.includes('"session.started"'))
+      .join('\n') + '\n';
+    await writeFile(prespawnPath, stripped);
+    expect(stripped).not.toContain('session.started');
+    expect(stripped).not.toContain('log.identity'); // neither marker — the pre-spawn shape
+
+    // ...and a perfectly good LEGACY file right after it in the same batch. The whole point: one bad file
+    // must not take the rest of the migration down with it.
+    await writeFile(join(dir, 'run-good.ndjson'), LEGACY);
+
+    const prisma = fakePrisma([
+      { id: 'run-prespawn', provider: 'claude', prompt: 'p', status: 'FAILED', startedAt: new Date(30), createdAt: new Date(30), providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-prespawn' } },
+      { id: 'run-good', provider: 'claude', prompt: 'g', status: 'SUCCEEDED', startedAt: new Date(40), createdAt: new Date(40), providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-good' } },
+    ]);
+    const index = { adoptExistingLog: vi.fn() };
+
+    const report = await rescueLegacyLogs(prisma as never, dir, index);
+
+    // The pre-spawn log is skipped with a clear reason — never adopted (which would have thrown).
+    expect(report.skipped.map((s) => s.runId)).toEqual(['run-prespawn']);
+    expect(report.skipped[0]?.reason).toMatch(/session\.started/i);
+    expect(report.repaired).toEqual([]);
+    // ...and the BATCH CONTINUED: the good file was still rescued.
+    expect(report.rescued).toEqual(['run-good']);
+    expect(index.adoptExistingLog).toHaveBeenCalledTimes(1);
+    expect(index.adoptExistingLog).toHaveBeenCalledWith(expect.objectContaining({
+      logPath: join(dir, 'run-good.ndjson'),
+    }));
+    // The pre-spawn file itself was left completely untouched.
+    expect(await readFile(prespawnPath, 'utf8')).toBe(stripped);
+  });
+});
+
+// FIX A, second half — and the more fundamental of the two. A predicate can only exclude the failures we
+// FORESAW. Fault isolation holds for the ones we did not: `adoptExistingLog` throws on any door-check
+// failure, and an escaping throw in a BATCH job takes every remaining file down with it.
+describe('rescueLegacyLogs — one bad file never kills the batch (fault isolation)', () => {
+  it('records a THROWING adoptExistingLog as skipped and keeps processing the rest', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kc-rescue-'));
+    await writeFile(join(dir, 'run-boom.ndjson'), LEGACY);
+    await writeFile(join(dir, 'run-after.ndjson'), LEGACY);
+
+    const prisma = fakePrisma([
+      { id: 'run-boom', provider: 'claude', prompt: 'a', status: 'SUCCEEDED', startedAt: new Date(1), createdAt: new Date(1), providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-boom' } },
+      { id: 'run-after', provider: 'claude', prompt: 'b', status: 'SUCCEEDED', startedAt: new Date(2), createdAt: new Date(2), providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-after' } },
+    ]);
+    // Explodes on ONE specific file — standing in for any door-check failure we did not foresee. Keyed by
+    // runId rather than call order, so the test does not silently depend on readdir's ordering.
+    const index = {
+      adoptExistingLog: vi.fn((entry: { expect: { runId: string } }) => {
+        if (entry.expect.runId === 'run-boom') throw new Error('some unforeseen door-check failure');
+      }),
+    };
+
+    const report = await rescueLegacyLogs(prisma as never, dir, index);
+
+    // The thrower is reported, not swallowed and not fatal.
+    expect(report.skipped.map((s) => s.runId)).toEqual(['run-boom']);
+    expect(report.skipped[0]?.reason).toContain('some unforeseen door-check failure');
+    // The batch survived it.
+    expect(report.rescued).toEqual(['run-after']);
+    expect(index.adoptExistingLog).toHaveBeenCalledTimes(2);
+  });
+});
+
+// FIX C: a run log is SECRET-GRADE (prompt + full agent output + stderr tail); the engine creates them
+// 0600. `rename` carries the TEMP file's mode onto the target, so a temp born at the umask default (0644)
+// would silently make a rescued admin transcript world-readable.
+describe('rescueLegacyLogs — the atomic replace preserves the log file permissions (FIX C)', () => {
+  it('keeps a 0600 log at 0600 after the rescue rewrites it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kc-rescue-'));
+    const path = join(dir, 'run-secret.ndjson');
+    await writeFile(path, LEGACY, { mode: 0o600 });
+    await chmod(path, 0o600); // defeat the umask — the engine's real logs are exactly this
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+
+    const prisma = fakePrisma([{
+      id: 'run-secret', provider: 'claude', prompt: 'secret prompt', status: 'SUCCEEDED',
+      startedAt: new Date(1), createdAt: new Date(1),
+      providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-secret' },
+    }]);
+
+    const report = await rescueLegacyLogs(prisma as never, dir, { adoptExistingLog: vi.fn() });
+    expect(report.rescued).toEqual(['run-secret']);
+
+    // The rescued file was fully rewritten — and is STILL 0600, not 0644.
+    expect(await readFile(path, 'utf8')).toContain('secret prompt');
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it('leaves no temp file behind in the log directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kc-rescue-'));
+    await writeFile(join(dir, 'run-tmp.ndjson'), LEGACY);
+    const prisma = fakePrisma([{
+      id: 'run-tmp', provider: 'claude', prompt: 'p', status: 'SUCCEEDED',
+      startedAt: new Date(1), createdAt: new Date(1),
+      providerSessionId: null, sessionTracked: false, session: { providerSessionId: 'sess-tmp' },
+    }]);
+
+    await rescueLegacyLogs(prisma as never, dir, { adoptExistingLog: vi.fn() });
+
+    expect(await readdir(dir)).toEqual(['run-tmp.ndjson']);
   });
 });
 

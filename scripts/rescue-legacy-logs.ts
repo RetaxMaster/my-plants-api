@@ -13,38 +13,50 @@ import { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledg
 import { buildEngineConfig } from '../src/knowledge-chat/engine/knowledge-chat-engine.config.js';
 import { rescueLegacyLogs } from '../src/knowledge-chat/legacy-log-rescue.core.js';
 
-// Prove the engine is NOT running by trying to bind its own port on localhost. The durable run index has
-// exactly ONE legitimate writer; if something is already listening on this port, that is either the API
-// (whose embedded engine holds the index open) or an engine instance left running some other way — either
-// way, adopting logs from here would race it. EADDRINUSE is the ONLY signal we treat as "already up": any
-// other bind failure (e.g. permission) is a real, unrelated error and is rethrown as-is rather than
-// mis-reported as "the API is running".
-async function assertEngineNotRunning(port: number): Promise<void> {
+// CLAIM the engine's port and HOLD it for the entire rescue — this is a LOCK, not a check.
+//
+// The durable run index has exactly ONE legitimate writer. A probe that binds and immediately releases
+// only proves the engine was down at one instant: the API (or a second copy of this script) can start
+// inside the gap between the check and the work, and then two processes write that one index — the exact
+// race the guard exists to prevent (TOCTOU). So we keep the socket LISTENING for the whole run and close
+// it in a `finally`. While we hold it, the API cannot start its engine (it would hit EADDRINUSE on this
+// very port) and neither can a second copy of this script. That turns "please stop the API" from a polite
+// request into real mutual exclusion.
+//
+// EADDRINUSE is the ONLY signal we treat as "already up": any other bind failure (e.g. permission) is a
+// real, unrelated error and is rethrown as-is rather than mis-reported as "the API is running".
+async function acquireEngineLock(port: number): Promise<{ release: () => Promise<void> }> {
+  const lock = createTcpProbe();
   await new Promise<void>((resolve, reject) => {
-    const probe = createTcpProbe();
-    probe.once('error', (err: NodeJS.ErrnoException) => {
+    lock.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         reject(new Error(
           `Refusing to run: 127.0.0.1:${port} is already bound, which means the knowledge-chat engine ` +
-          `(embedded in the API process) is up. The durable run index has exactly one writer — running ` +
-          `this script while the API is live would corrupt it. Stop the API first (in production: ` +
+          `(embedded in the API process) — or another copy of this script — is up. The durable run index ` +
+          `has exactly one writer, so running now would corrupt it. Stop the API first (in production: ` +
           `\`pm2 stop my-plants-api\`) and re-run this script. No file was touched.`,
         ));
         return;
       }
       reject(err);
     });
-    probe.once('listening', () => probe.close(() => resolve()));
-    probe.listen(port, '127.0.0.1');
+    lock.once('listening', () => resolve());
+    lock.listen(port, '127.0.0.1');
   });
+
+  return {
+    release: () => new Promise<void>((resolve) => lock.close(() => resolve())),
+  };
 }
 
 async function main() {
   const env = loadEnv();
 
-  // MUST run before anything else — including constructing the Prisma client — so a positive detection
-  // exits without touching a single file.
-  await assertEngineNotRunning(env.KNOWLEDGE_CHAT_ENGINE_PORT);
+  // MUST come before anything else — including constructing the Prisma client — so a refusal exits without
+  // touching a single file. And it is HELD (not released) until the `finally` below: for as long as this
+  // script runs, nothing else can bring the engine up.
+  const lock = await acquireEngineLock(env.KNOWLEDGE_CHAT_ENGINE_PORT);
+  console.log(`Holding 127.0.0.1:${env.KNOWLEDGE_CHAT_ENGINE_PORT} for the duration — the API cannot start while this runs.`);
 
   const prisma = new PrismaClient();
   try {
@@ -73,6 +85,9 @@ async function main() {
     }
   } finally {
     await prisma.$disconnect();
+    // Release the single-writer lock LAST: the API must not be able to come up until every adoption and
+    // backfill above has landed.
+    await lock.release();
   }
 }
 
