@@ -1,8 +1,9 @@
 import { BadRequestException, Body, Controller, Delete, Get, Header, Param, Post, Query, UseGuards } from '@nestjs/common';
+import type { AgentProvider } from '@retaxmaster/agents-realtime-protocol';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { CreateRunDto, CreateSessionDto } from './knowledge-chat.dto.js';
-import { KnowledgeChatEngineService } from './engine/knowledge-chat-engine.service.js';
+import { KNOWLEDGE_CHAT_PROVIDERS, KnowledgeChatEngineService } from './engine/knowledge-chat-engine.service.js';
 import { KnowledgeChatService } from './knowledge-chat.service.js';
 
 @Controller('knowledge-chat')
@@ -22,6 +23,16 @@ export class KnowledgeChatController {
   @Get('provider-status')
   providerStatus(@Query('force') force?: string) {
     return this.engine.providerStatus({ force: force === '1' || force === 'true' });
+  }
+
+  // The agent's command catalog, proxied behind our admin auth (the browser never touches the engine's
+  // control plane). Drives the composer's `/` autocomplete.
+  @Get('commands')
+  async commands(@Query('provider') provider: string, @Query('force') force?: string) {
+    if (!(KNOWLEDGE_CHAT_PROVIDERS as readonly string[]).includes(provider)) {
+      throw new BadRequestException(`Unknown provider: ${provider}`);
+    }
+    return this.engine.commandCatalog(provider as AgentProvider, { force: force === '1' || force === 'true' });
   }
 
   @Get('sessions')

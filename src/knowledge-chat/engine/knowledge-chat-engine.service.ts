@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { mkdir } from 'node:fs/promises';
 import { createServer, type AgentsRealtimeServer } from '@retaxmaster/agents-realtime-server';
-import type { AgentCommand, AgentProvider, AgentProviderStatus, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
+import type { AgentCommand, AgentProvider, AgentProviderStatus, CommandCatalog, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
 import { ENV } from '../../config/config.module.js';
 import type { Env } from '../../config/env.js';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
@@ -85,6 +85,20 @@ export class KnowledgeChatEngineService implements OnModuleInit, OnModuleDestroy
     if (!server) return []; // engine disabled → no agent is runnable; the UI renders "none available"
     if (!opts?.force) return server.getAllProviderStatus();
     return Promise.all(KNOWLEDGE_CHAT_PROVIDERS.map((p) => server.getProviderStatus(p, { force: true })));
+  }
+
+  // The agent's command catalog — what the composer autocompletes over. Read IN-PROCESS, like
+  // providerStatus: we are co-located with the engine, so proxying our own secret-gated HTTP back to
+  // ourselves would only add a hop and a way for the two answers to disagree.
+  //
+  // The engine NEVER rejects here: an unharvestable catalog resolves to an empty list, and the composer
+  // then degrades to plain prose (it never blocks input). An `unsupported` entry — `/clear` — is LISTED,
+  // greyed and explained rather than hidden: hiding it would not stop a user typing it from muscle memory,
+  // it would only stop us explaining why it is refused.
+  async commandCatalog(provider: AgentProvider, opts?: { force?: boolean }): Promise<CommandCatalog> {
+    const server = this.server;
+    if (!server) return { provider, commands: [] }; // engine disabled → nothing to autocomplete
+    return server.getCommandCatalog(provider, opts);
   }
 
   // A conversation's history, rebuilt by the engine as CANONICAL AgentEvents. Because we wired the

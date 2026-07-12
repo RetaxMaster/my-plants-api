@@ -18,6 +18,7 @@ function setup() {
     providerStatus: vi.fn(async () => [
       { provider: 'claude', installed: true, authenticated: true, available: true },
     ]),
+    commandCatalog: vi.fn(async () => ({ provider: 'claude', commands: [] as { name: string; support: string }[] })),
   };
   return { svc, engine, ctrl: new KnowledgeChatController(svc as any, engine as any) };
 }
@@ -40,6 +41,21 @@ describe('KnowledgeChatController', () => {
     expect(engine.providerStatus).toHaveBeenCalledWith({ force: false });
     await ctrl.providerStatus('1');
     expect(engine.providerStatus).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('delegates commands → engine.commandCatalog(provider)', async () => {
+    const { engine, ctrl } = setup();
+    engine.commandCatalog.mockResolvedValue({ provider: 'claude', commands: [{ name: 'compact', support: 'supported' }] });
+    expect(await ctrl.commands('claude')).toEqual({
+      provider: 'claude',
+      commands: [{ name: 'compact', support: 'supported' }],
+    });
+    expect(engine.commandCatalog).toHaveBeenCalledWith('claude', { force: false });
+  });
+
+  it('rejects an unknown provider with a 400', async () => {
+    const { ctrl } = setup();
+    await expect(ctrl.commands('gemini')).rejects.toThrow(BadRequestException);
   });
 
   it('delegates resume → resume(id, { prompt }, provider?)', async () => {
