@@ -3,6 +3,8 @@ import { Test } from '@nestjs/testing';
 import { ValidationPipe, type INestApplication } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
@@ -22,9 +24,16 @@ describe('Knowledge Chat (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let orchestrator: KnowledgeChatOrchestrator;
-  const executeCalls: unknown[] = [];
+  const executeCalls: { runId: string; logPath: string; prompt?: string; command?: { name: string; args: string } }[] = [];
   const fakeEngine = {
-    execute: async (req: unknown) => { executeCalls.push(req); },
+    // The double honors the ONE side effect the real engine has at this seam: it CREATES the run's log
+    // itself (O_CREAT|O_EXCL) and writes the header before streaming — the host never pre-creates it. Without
+    // that, `GET /runs/:id/log` has no file to serve and the endpoint looks broken when it is not.
+    execute: async (req: { runId: string; logPath: string }) => {
+      executeCalls.push(req);
+      await mkdir(dirname(req.logPath), { recursive: true });
+      await writeFile(req.logPath, `{"type":"log.header","schemaVersion":"1.0.0","runId":"${req.runId}"}\n`, { flag: 'wx' });
+    },
     onModuleInit: async () => {},
     onModuleDestroy: async () => {},
     get isRunning() { return false; },
@@ -96,15 +105,21 @@ describe('Knowledge Chat (e2e)', () => {
   });
 
   it('POST /sessions creates a session + first active run, mints a ticket, and calls /execute', async () => {
+    // `provider` is REQUIRED: since agents-realtime 1.0.0 the engine spawns a provider-neutral runner and
+    // cannot guess which agent to drive. (This spec omitted it and had been failing 400 ever since — silently,
+    // because the e2e suite runs under its own config and is not part of `npm test`.)
     const res = await asAdmin(request(server()).post('/knowledge-chat/sessions'))
-      .send({ prompt: 'Research Monstera deliciosa care' })
+      .send({ prompt: 'Research Monstera deliciosa care', provider: 'claude' })
       .expect(201);
     expect(res.body.sessionId).toBeTruthy();
     expect(res.body.runId).toBeTruthy();
     expect(res.body.ticket).toBeTruthy();
     sessionId = res.body.sessionId;
     runId = res.body.runId;
-    expect(executeCalls.at(-1)).toMatchObject({ runId, resumeSessionId: null });
+    // The agent travels on every /execute — and a prompt turn carries NO command.
+    expect(executeCalls.at(-1)).toMatchObject({ runId, provider: 'claude', resumeSessionId: null });
+    expect(executeCalls.at(-1)).toHaveProperty('prompt', 'Research Monstera deliciosa care');
+    expect(executeCalls.at(-1)?.command).toBeUndefined();
   });
 
   it('GET /sessions lists it newest-first with the latest-run status + turns count', async () => {
@@ -115,12 +130,36 @@ describe('Knowledge Chat (e2e)', () => {
 
   it('GET /sessions/:id returns ordered turns with isActive + logUrl', async () => {
     const res = await asAdmin(request(server()).get(`/knowledge-chat/sessions/${sessionId}`)).expect(200);
-    expect(res.body.claudeSessionId).toBeNull();
+    // Renamed in the agents-realtime 1.0.0 migration: with two agents, `claudeSessionId` was a lie for half
+    // the rows. This assertion still read the old name — so it asserted `undefined === null` and passed by
+    // accident once the request above started 400ing.
+    expect(res.body.providerSessionId).toBeNull();
     expect(res.body.turns[0]).toEqual({ runId, prompt: 'Research Monstera deliciosa care', command: null, status: 'QUEUED', isActive: true, logUrl: `/knowledge-chat/runs/${runId}/log` });
   });
 
-  it('POST /sessions/:id/runs → 422 while the session has no Claude session id yet', async () => {
-    await asAdmin(request(server()).post(`/knowledge-chat/sessions/${sessionId}/runs`)).send({ prompt: 'follow-up' }).expect(422);
+  // The 422 this test used to assert ("the session has no Claude session id yet") DIED with agents-realtime
+  // 1.0.0: a conversation whose opening turn never reached an agent is no longer a dead end — it is RETRIED,
+  // possibly on the other agent. What actually blocks a second send here is the single-active-run rule, and
+  // that is a 409.
+  it('POST /sessions/:id/runs → 409 while a run is already active', async () => {
+    await asAdmin(request(server()).post(`/knowledge-chat/sessions/${sessionId}/runs`)).send({ prompt: 'follow-up' }).expect(409);
+  });
+
+  it('POST /sessions/:id/runs → 400 when the body carries both a prompt AND a command', async () => {
+    // Exactly one, or it is not a turn. The engine answers the same 400 — we decide it here so a malformed
+    // body never reaches it wearing a valid shape.
+    await asAdmin(request(server()).post(`/knowledge-chat/sessions/${sessionId}/runs`))
+      .send({ prompt: 'hi', command: { name: 'compact', args: '' } })
+      .expect(400);
+  });
+
+  it('POST /sessions/:id/runs → 422 for a COMMAND on a conversation with no agent session', async () => {
+    // A command acts on a live agent session: there is nothing to compact and no session whose model to
+    // switch. Refused before any run is created — note it beats the 409 above, which is why it is reachable
+    // while the opening run is still active.
+    await asAdmin(request(server()).post(`/knowledge-chat/sessions/${sessionId}/runs`))
+      .send({ command: { name: 'compact', args: '' } })
+      .expect(422);
   });
 
   it('DELETE /sessions/:id → 409 while a run is active', async () => {
@@ -148,6 +187,19 @@ describe('Knowledge Chat (e2e)', () => {
 
     // Finalize the resume run too so delete is unblocked.
     await orchestrator.runFinished(resume.body.runId, { exitCode: 0, stopped: false, stderrTail: null });
+
+    // NOW a command is legal: the conversation has an agent session for it to act on. It must reach /execute
+    // in its OWN field, with NO prompt — that mutual exclusion is the whole contract. And the run row must
+    // record it as a command, not as the text "/compact".
+    const cmd = await asAdmin(request(server()).post(`/knowledge-chat/sessions/${sessionId}/runs`))
+      .send({ command: { name: 'compact', args: '' } })
+      .expect(201);
+    const sent = executeCalls.at(-1)!;
+    expect(sent).toMatchObject({ runId: cmd.body.runId, command: { name: 'compact', args: '' }, resumeSessionId: 'uuid-e2e-abc' });
+    expect(sent.prompt).toBeUndefined();
+    const cmdRun = await prisma.knowledgeChatRun.findUnique({ where: { id: cmd.body.runId } });
+    expect(cmdRun).toMatchObject({ prompt: null, commandName: 'compact', commandArgs: '' });
+    await orchestrator.runFinished(cmd.body.runId, { exitCode: 0, stopped: false, stderrTail: null });
     await asAdmin(request(server()).delete(`/knowledge-chat/sessions/${sessionId}`)).expect(200);
     await asAdmin(request(server()).get(`/knowledge-chat/sessions/${sessionId}`)).expect(404);
   });
