@@ -147,7 +147,7 @@ describe('KnowledgeChatService.resume', () => {
 
   it('adds a run and calls /execute with resumeSessionId = providerSessionId', async () => {
     const { svc, run, engine } = setup(seedResumable());
-    const out = await run(() => svc.resume('s1', 'follow-up question'));
+    const out = await run(() => svc.resume('s1', { prompt: 'follow-up question' }));
     expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId, resumeSessionId: 'uuid-1' }));
   });
 
@@ -159,7 +159,7 @@ describe('KnowledgeChatService.resume', () => {
       sessions: [session({ providerSessionId: null })],
       runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'agent was signed out' })],
     });
-    const out = await run(() => svc.resume('s1', 'try again'));
+    const out = await run(() => svc.resume('s1', { prompt: 'try again' }));
     // A retry, not a resume: there is no agent session to resume FROM.
     expect(engine.execute).toHaveBeenCalledWith(
       expect.objectContaining({ runId: out.runId, provider: 'claude', resumeSessionId: null }),
@@ -171,7 +171,7 @@ describe('KnowledgeChatService.resume', () => {
       sessions: [session({ providerSessionId: null })], // originally created on claude
       runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'claude was signed out' })],
     });
-    await run(() => svc.resume('s1', 'try codex instead', 'codex'));
+    await run(() => svc.resume('s1', { prompt: 'try codex instead' }, 'codex'));
     expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ provider: 'codex', resumeSessionId: null }));
     expect(rows.get('s1')?.provider).toBe('codex'); // the row names the agent that actually ran
   });
@@ -179,7 +179,7 @@ describe('KnowledgeChatService.resume', () => {
   // Once a real agent session exists the conversation is FINAL: a client cannot hand a Claude memory to Codex.
   it('IGNORES a provider on resume once an agent session exists (the conversation owns its agent)', async () => {
     const { svc, run, engine } = setup(seedResumable());
-    await run(() => svc.resume('s1', 'next', 'codex'));
+    await run(() => svc.resume('s1', { prompt: 'next' }, 'codex'));
     expect(engine.execute).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'claude', resumeSessionId: 'uuid-1' }),
     );
@@ -189,13 +189,13 @@ describe('KnowledgeChatService.resume', () => {
 describe('single-active-run guard (DB-enforced, atomic)', () => {
   it('409 when a genuinely live (recent) run is active — the unique insert is rejected', async () => {
     const { svc, run } = setup({ sessions: [session()], runs: [activeRun()] });
-    await expect(run(() => svc.resume('s1', 'x'))).rejects.toBeInstanceOf(ConflictException);
+    await expect(run(() => svc.resume('s1', { prompt: 'x' }))).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('reconciles a STALE active run to FAILED (activeKey cleared), then proceeds', async () => {
     const old = new Date(Date.now() - 3 * 3_600_000); // 3h ago, past timeout+buffer
     const { svc, run, engine, runs } = setup({ sessions: [session({ createdAt: old, updatedAt: old })], runs: [activeRun({ startedAt: old, createdAt: old })] });
-    const out = await run(() => svc.resume('s1', 'x'));
+    const out = await run(() => svc.resume('s1', { prompt: 'x' }));
     expect(runs.get('r1')!.status).toBe('FAILED'); // reconciled
     expect(runs.get('r1')!.activeKey).toBeNull(); // slot freed
     expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId }));
@@ -203,7 +203,7 @@ describe('single-active-run guard (DB-enforced, atomic)', () => {
 
   it('two concurrent starts on one session → exactly one succeeds, the other gets 409', async () => {
     const { svc, run } = setup({ sessions: [session()], runs: [doneRun()] });
-    const results = await run(() => Promise.allSettled([svc.resume('s1', 'a'), svc.resume('s1', 'b')]));
+    const results = await run(() => Promise.allSettled([svc.resume('s1', { prompt: 'a' }), svc.resume('s1', { prompt: 'b' })]));
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
     expect(rejected).toHaveLength(1);
@@ -254,7 +254,7 @@ describe('KnowledgeChatService list/detail', () => {
     const detail = await run(() => svc.getSession('s1'));
     expect(detail.providerSessionId).toBe('uuid-1');
     expect(detail.provider).toBe('claude');
-    expect(detail.turns[0]).toEqual({ runId: 'r1', prompt: 'p1', status: 'RUNNING', isActive: true, logUrl: '/knowledge-chat/runs/r1/log' });
+    expect(detail.turns[0]).toEqual({ runId: 'r1', prompt: 'p1', command: null, status: 'RUNNING', isActive: true, logUrl: '/knowledge-chat/runs/r1/log' });
   });
 });
 
@@ -318,11 +318,47 @@ describe('KnowledgeChatService.resume — the retry race', () => {
     });
     // The original Claude run wins the race and seals the conversation just as the user retries on Codex.
     rows.get('s1')!.providerSessionId = 'uuid-late';
-    await run(() => svc.resume('s1', 'retry on codex', 'codex'));
+    await run(() => svc.resume('s1', { prompt: 'retry on codex' }, 'codex'));
     // It must CONTINUE the Claude session that now exists — not launch Codex against a memory it cannot read.
     expect(engine.execute).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'claude', resumeSessionId: 'uuid-late' }),
     );
     expect(rows.get('s1')?.provider).toBe('claude');
+  });
+});
+
+// A turn is a prompt XOR a command, all the way to /execute (agents-realtime 2.0.0's system commands). A
+// command is a control instruction to the agent's RUNTIME, never text for the model — so it must never be
+// representable as a `prompt` string at any hop we own.
+describe('KnowledgeChatService.resume — commands (prompt XOR command)', () => {
+  it('sends a COMMAND to /execute — never as a prompt', async () => {
+    // A sealed conversation (it has an agent session), which is the only place a command is allowed.
+    const { svc, run, engine, runs } = setup({
+      sessions: [session({ providerSessionId: 'claude-uuid-1' })],
+      runs: [doneRun()],
+    });
+
+    const out = await run(() => svc.resume('s1', { command: { name: 'compact', args: '' } }));
+
+    const sent = (engine.execute as any).mock.calls[0][0];
+    expect(sent.command).toEqual({ name: 'compact', args: '' });
+    expect(sent.prompt).toBeUndefined(); // the whole point: mutually exclusive at every hop
+    const created = runs.get(out.runId)!;
+    expect(created.prompt).toBeNull();
+    expect((created as any).commandName).toBe('compact');
+    expect((created as any).commandArgs).toBe('');
+  });
+
+  it('REFUSES a command on a conversation that has no agent session yet', async () => {
+    // No providerSessionId → its opening turn never reached an agent. There is nothing to compact, nothing
+    // to switch the model of, and no session for the command to act on.
+    const { svc, run, engine } = setup({
+      sessions: [session({ providerSessionId: null })],
+      runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'x' })],
+    });
+
+    await expect(run(() => svc.resume('s1', { command: { name: 'compact', args: '' } })))
+      .rejects.toThrow(UnprocessableEntityException);
+    expect(engine.execute).not.toHaveBeenCalled();
   });
 });

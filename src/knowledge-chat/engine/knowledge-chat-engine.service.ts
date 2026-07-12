@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { mkdir } from 'node:fs/promises';
 import { createServer, type AgentsRealtimeServer } from '@retaxmaster/agents-realtime-server';
-import type { AgentProvider, AgentProviderStatus, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
+import type { AgentCommand, AgentProvider, AgentProviderStatus, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
 import { ENV } from '../../config/config.module.js';
 import type { Env } from '../../config/env.js';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
@@ -12,15 +12,16 @@ import { buildEngineConfig } from './knowledge-chat-engine.config.js';
 // `provider` values all derive from it, so a third agent is added in exactly one place.
 export const KNOWLEDGE_CHAT_PROVIDERS = ['claude', 'codex'] as const satisfies readonly AgentProvider[];
 
-export interface ExecuteRequest {
+// A turn is EITHER a prompt OR a command — never both, never neither. The engine answers 400 on a body that
+// carries both or neither, so we make that unrepresentable here instead of discovering it at runtime.
+export type ExecuteRequest = {
   runId: string;
-  // Which agent runs this turn. REQUIRED since agents-realtime 1.0.0 — the engine spawns a provider-
-  // neutral runner and cannot guess. Omitting it makes /execute reject the run with 422.
+  // Which agent runs this turn. REQUIRED since agents-realtime 1.0.0 — the engine spawns a provider-neutral
+  // runner and cannot guess. Omitting it makes /execute reject the run with 422.
   provider: AgentProvider;
-  prompt: string;
   logPath: string;
   resumeSessionId: string | null;
-}
+} & ({ prompt: string; command?: never } | { command: AgentCommand; prompt?: never });
 
 // Owns the embedded realtime engine lifecycle. On boot it builds config, ensures the log + state dirs
 // exist, and listen()s (binding 127.0.0.1). listen() also re-adopts still-running runners via the

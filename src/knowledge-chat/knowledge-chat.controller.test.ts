@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Reflector } from '@nestjs/core';
+import { BadRequestException } from '@nestjs/common';
 import { ROLES_KEY } from '../auth/roles.decorator.js';
 import { KnowledgeChatController } from './knowledge-chat.controller.js';
 
@@ -41,10 +42,28 @@ describe('KnowledgeChatController', () => {
     expect(engine.providerStatus).toHaveBeenCalledWith({ force: true });
   });
 
-  it('delegates resume → resume(id, prompt, provider?)', async () => {
+  it('delegates resume → resume(id, { prompt }, provider?)', async () => {
     const { svc, ctrl } = setup();
     expect(await ctrl.resume('s1', { prompt: 'more' } as any)).toEqual({ runId: 'r2', ticket: 'tk2' });
-    expect(svc.resume).toHaveBeenCalledWith('s1', 'more', undefined);
+    expect(svc.resume).toHaveBeenCalledWith('s1', { prompt: 'more' }, undefined);
+  });
+
+  it('delegates resume → resume(id, { command }, provider?) for a command turn', async () => {
+    const { svc, ctrl } = setup();
+    const dto = { command: { name: 'compact', args: '' } } as any;
+    expect(await ctrl.resume('s1', dto)).toEqual({ runId: 'r2', ticket: 'tk2' });
+    expect(svc.resume).toHaveBeenCalledWith('s1', { command: { name: 'compact', args: '' } }, undefined);
+  });
+
+  it('400s when a run body carries BOTH prompt and command', () => {
+    const { ctrl } = setup();
+    expect(() => ctrl.resume('s1', { prompt: 'x', command: { name: 'compact', args: '' } } as any))
+      .toThrow(BadRequestException);
+  });
+
+  it('400s when a run body carries NEITHER prompt nor command', () => {
+    const { ctrl } = setup();
+    expect(() => ctrl.resume('s1', {} as any)).toThrow(BadRequestException);
   });
 
   it('delegates list/detail/delete/log/ticket', async () => {

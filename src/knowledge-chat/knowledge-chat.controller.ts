@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Header, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { CreateRunDto, CreateSessionDto } from './knowledge-chat.dto.js';
@@ -48,7 +48,15 @@ export class KnowledgeChatController {
 
   @Post('sessions/:id/runs')
   resume(@Param('id') id: string, @Body() dto: CreateRunDto) {
-    return this.chat.resume(id, dto.prompt, dto.provider);
+    // Both, or neither, is a malformed turn — the same 400 the engine's own /execute answers. Deciding it
+    // here means a bad body never reaches the engine wearing a valid shape.
+    if (!!dto.prompt === !!dto.command) {
+      throw new BadRequestException('Send exactly one of `prompt` or `command`.');
+    }
+    const input = dto.command
+      ? { command: { name: dto.command.name, args: dto.command.args } }
+      : { prompt: dto.prompt! };
+    return this.chat.resume(id, input, dto.provider);
   }
 
   @Delete('sessions/:id')

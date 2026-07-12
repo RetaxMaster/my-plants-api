@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { AgentProvider, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
+import type { AgentCommand, AgentProvider, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
 import { SessionNotFoundError } from '@retaxmaster/agents-realtime-server';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -40,6 +40,9 @@ function isHistoryGone(err: unknown): boolean {
 // agent's error; nothing is corrupted and no history is lost). So: when the flag is true, we KNOW; when it
 // is absent, we simply do not claim to know.
 export type KnowledgeChatHistory = SessionHistory & { agentSessionMissing?: boolean };
+
+// What a turn actually carries. The XOR is the contract, and it is the same one the wire and the DB enforce.
+export type TurnInput = { prompt: string; command?: never } | { command: AgentCommand; prompt?: never };
 
 const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 // The value in `activeKey` while a run is non-terminal. Cleared to null on every terminal transition
@@ -97,7 +100,7 @@ export class KnowledgeChatService {
   private async insertActiveRun(
     sessionId: string,
     provider: AgentProvider,
-    prompt: string,
+    input: TurnInput,
     opts?: { onlyWhileUnsealed?: boolean },
   ): Promise<string | null> {
     await this.reconcileStaleActive(sessionId);
@@ -125,7 +128,16 @@ export class KnowledgeChatService {
           // The agent is recorded ON the run: it is the only thing that knows which agent produced the
           // session id it later reports, and the orchestrator seals `provider` + `providerSessionId` from
           // that same row, atomically, so the pair can never describe two different agents.
-          data: { sessionId, provider, prompt, status: 'QUEUED', activeKey: ACTIVE_KEY },
+          data: {
+            sessionId,
+            provider,
+            // Exactly one side is populated; the other is explicitly null. Never a "/name" in `prompt`.
+            prompt: input.command ? null : input.prompt,
+            commandName: input.command?.name ?? null,
+            commandArgs: input.command?.args ?? null,
+            status: 'QUEUED',
+            activeKey: ACTIVE_KEY,
+          },
         });
         await tx.knowledgeChatSession.update({
           where: { id: sessionId },
@@ -174,6 +186,7 @@ export class KnowledgeChatService {
       turns: session.runs.map((r) => ({
         runId: r.id,
         prompt: r.prompt,
+        command: r.commandName ? { name: r.commandName, args: r.commandArgs ?? '' } : null,
         status: r.status,
         isActive: (ACTIVE as readonly string[]).includes(r.status),
         logUrl: `/knowledge-chat/runs/${r.id}/log`,
@@ -191,8 +204,8 @@ export class KnowledgeChatService {
     const session = await this.prisma.knowledgeChatSession.create({
       data: { title, provider, createdByUserId: actor?.userId ?? null },
     });
-    const runId = (await this.insertActiveRun(session.id, provider, prompt))!;
-    const ticket = await this.launch(runId, provider, prompt, null);
+    const runId = (await this.insertActiveRun(session.id, provider, { prompt }))!;
+    const ticket = await this.launch(runId, provider, { prompt }, null);
     return { sessionId: session.id, runId, ticket };
   }
 
@@ -210,22 +223,30 @@ export class KnowledgeChatService {
   // session on Codex would hand an agent a memory it cannot read.
   async resume(
     sessionId: string,
-    prompt: string,
+    input: TurnInput,
     provider?: AgentProvider,
   ): Promise<{ runId: string; ticket: string }> {
     const session = await this.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
     if (!session) throw new NotFoundException(`Unknown session: ${sessionId}`);
 
     if (!session.providerSessionId) {
+      // A command needs a live agent session to act ON: there is nothing to compact, and no session whose
+      // model to switch. The un-sealed branch below RETRIES the opening turn — and an opening turn is a
+      // prompt, by construction. Refuse here rather than launch a run that can only fail obscurely.
+      if (input.command) {
+        throw new UnprocessableEntityException(
+          'A command needs an established agent session — send a message first.',
+        );
+      }
       // The opening turn never established an agent session → retry it, on whichever agent is asked for
       // (defaulting to the one originally chosen). Not a resume: there is nothing to resume FROM, so the
       // run starts a FRESH agent session (resumeSessionId = null). The whole claim — re-point the agent,
       // create the run, take the seal — is decided atomically against one row, so an abandoned run's late
       // report cannot slip in between and pin the conversation to the agent being replaced.
       const retryProvider = provider ?? (session.provider as AgentProvider);
-      const runId = await this.insertActiveRun(sessionId, retryProvider, prompt, { onlyWhileUnsealed: true });
+      const runId = await this.insertActiveRun(sessionId, retryProvider, input, { onlyWhileUnsealed: true });
       if (runId) {
-        const ticket = await this.launch(runId, retryProvider, prompt, null);
+        const ticket = await this.launch(runId, retryProvider, input, null);
         return { runId, ticket };
       }
       // Lost the race: an agent session appeared while we were claiming. The conversation now HAS a memory,
@@ -239,8 +260,8 @@ export class KnowledgeChatService {
     // Atomic single-active-run claim (reconcile stale → insert; P2002 → 409). Unguarded, so it always
     // returns a run id.
     const sessionProvider = session.provider as AgentProvider;
-    const runId = (await this.insertActiveRun(sessionId, sessionProvider, prompt))!;
-    const ticket = await this.launch(runId, sessionProvider, prompt, session.providerSessionId!);
+    const runId = (await this.insertActiveRun(sessionId, sessionProvider, input))!;
+    const ticket = await this.launch(runId, sessionProvider, input, session.providerSessionId!);
     return { runId, ticket };
   }
 
@@ -249,7 +270,7 @@ export class KnowledgeChatService {
   private async launch(
     runId: string,
     provider: AgentProvider,
-    prompt: string,
+    input: TurnInput,
     resumeSessionId: string | null,
   ): Promise<string> {
     const logPath = this.logPath(runId);
@@ -266,7 +287,11 @@ export class KnowledgeChatService {
     try {
       await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
       const ticket = await this.tickets.mint(runId);
-      await this.engine.execute({ runId, provider, prompt, logPath, resumeSessionId });
+      await this.engine.execute(
+        input.command
+          ? { runId, provider, command: input.command, logPath, resumeSessionId }
+          : { runId, provider, prompt: input.prompt, logPath, resumeSessionId },
+      );
       return ticket;
     } catch (err) {
       await this.prisma.knowledgeChatRun.updateMany({

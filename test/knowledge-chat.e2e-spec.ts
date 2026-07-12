@@ -116,7 +116,7 @@ describe('Knowledge Chat (e2e)', () => {
   it('GET /sessions/:id returns ordered turns with isActive + logUrl', async () => {
     const res = await asAdmin(request(server()).get(`/knowledge-chat/sessions/${sessionId}`)).expect(200);
     expect(res.body.claudeSessionId).toBeNull();
-    expect(res.body.turns[0]).toEqual({ runId, prompt: 'Research Monstera deliciosa care', status: 'QUEUED', isActive: true, logUrl: `/knowledge-chat/runs/${runId}/log` });
+    expect(res.body.turns[0]).toEqual({ runId, prompt: 'Research Monstera deliciosa care', command: null, status: 'QUEUED', isActive: true, logUrl: `/knowledge-chat/runs/${runId}/log` });
   });
 
   it('POST /sessions/:id/runs → 422 while the session has no Claude session id yet', async () => {
