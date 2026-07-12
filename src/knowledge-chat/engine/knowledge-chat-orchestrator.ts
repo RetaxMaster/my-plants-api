@@ -191,7 +191,36 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
     if (members.length + orphans.length !== settled.length) return [];
     if (members.some((r) => resolver.resolveLogPath(r.id) === null)) return [];
 
-    return members.map((r) => ({ runId: r.id, startedAtMs: r.startedAt!.getTime() }));
+    // A REFUSED COMMAND is a member too — and it is the one turn the rules above cannot see.
+    //
+    // The engine refuses a command like `/clear` BEFORE it spawns anything: no runner, no agent session, no
+    // `startedAt`. What it does produce is a real, completed run with a complete canonical log carrying the
+    // `command.rejected` line and its reason. Every filter above misses it: `settled` requires a `startedAt`,
+    // and membership is keyed on naming this conversation's agent session — which a refusal, by construction,
+    // never does.
+    //
+    // Dropping it is not a cosmetic loss. The refusal is written INTO THE LOG precisely so it survives a
+    // reload — a toast dies, a logged run does not — and a user who reopens the conversation tomorrow is still
+    // owed the answer to "why didn't /clear work?". Excluding it silently deleted the only place that answer
+    // lives.
+    //
+    // It cannot be confused with an orphan or a failed launch: it has a command name, it reached a terminal
+    // state, and its log EXISTS in the durable index (a launch that failed before the engine accepted the run
+    // has no log at all, so `resolveLogPath` returns null and it is excluded here). It is ordered by
+    // `createdAt` because it has no `startedAt` — it never started; it was refused.
+    const refusedCommands = session.runs.filter(
+      (r) =>
+        !(ACTIVE as readonly string[]).includes(r.status) &&
+        r.startedAt === null &&
+        r.commandName !== null &&
+        r.providerSessionId === null &&
+        resolver.resolveLogPath(r.id) !== null,
+    );
+
+    return [
+      ...members.map((r) => ({ runId: r.id, startedAtMs: r.startedAt!.getTime() })),
+      ...refusedCommands.map((r) => ({ runId: r.id, startedAtMs: r.createdAt.getTime() })),
+    ].sort((a, b) => a.startedAtMs - b.startedAtMs);
   }
 
   // Boot re-adoption: still-RUNNING children survive a NestJS restart (spawned under setsid). Return

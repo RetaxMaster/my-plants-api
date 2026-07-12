@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
 
 type Status = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
-interface Run { id: string; sessionId: string; provider: string; providerSessionId?: string | null; sessionTracked?: boolean; createdAt?: Date; status: Status; activeKey: string | null; pid: number | null; procStartTime: string | null; startedAt: Date | null; finishedAt: Date | null; exitCode: number | null; error: string | null }
+interface Run { id: string; sessionId: string; provider: string; providerSessionId?: string | null; sessionTracked?: boolean; commandName?: string | null; createdAt?: Date; status: Status; activeKey: string | null; pid: number | null; procStartTime: string | null; startedAt: Date | null; finishedAt: Date | null; exitCode: number | null; error: string | null }
 interface Session { id: string; provider?: string; providerSessionId: string | null; pendingRunId?: string | null }
 
 function makePrismaFake(runs: Run[], sessions: Session[]) {
@@ -302,6 +302,42 @@ describe('KnowledgeChatOrchestrator.runsForSession — orphaned runs from a retr
     const retry = term('r2', 2000); // the retry that actually established the session
     const orch = orchWith([orphan, retry], [sess()], () => true);
     expect(await orch.runsForSession('claude', 'uuid-1')).toEqual([{ runId: 'r2', startedAtMs: 2000 }]);
+  });
+
+  // A REFUSED COMMAND (`/clear`) is refused by the engine BEFORE it spawns anything: no runner, no agent
+  // session, no startedAt — but a real, completed run whose log carries the refusal and its reason. Every
+  // other rule here misses it, and dropping it deleted the only place the answer to "why didn't /clear work?"
+  // survives a reload. It is a member.
+  it('INCLUDES a refused command (no agent session, no startedAt) — the refusal must survive a reload', async () => {
+    const first = term('r1', 1000);
+    const refused = term('r2', 0, {
+      commandName: 'clear',
+      providerSessionId: null,
+      startedAt: null, // it never started; it was refused
+      createdAt: new Date(1500),
+    });
+    const orch = orchWith([first, refused], [sess()], () => true);
+    expect(await orch.runsForSession('claude', 'uuid-1')).toEqual([
+      { runId: 'r1', startedAtMs: 1000 },
+      { runId: 'r2', startedAtMs: 1500 }, // ordered by createdAt — it has no startedAt to order by
+    ]);
+  });
+
+  // The discriminator must not swallow a LAUNCH FAILURE that happens to be a command: that run never got a
+  // log at all (the engine never accepted it), so claiming it would hand the engine a runId it cannot
+  // resolve and fail the whole history read.
+  it('EXCLUDES a command run whose launch failed before the engine ever created its log', async () => {
+    const first = term('r1', 1000);
+    const neverLaunched = term('r2', 0, {
+      commandName: 'compact',
+      providerSessionId: null,
+      startedAt: null,
+      createdAt: new Date(1500),
+      status: 'FAILED',
+    });
+    // r2 has no log in the durable index — that is exactly what makes it not a refusal.
+    const orch = orchWith([first, neverLaunched], [sess()], (id) => id !== 'r2');
+    expect(await orch.runsForSession('claude', 'uuid-1')).toEqual([{ runId: 'r1', startedAtMs: 1000 }]);
   });
 
   it('EXCLUDES an orphan left by a CROSS-AGENT retry (its log is another agent entirely)', async () => {
