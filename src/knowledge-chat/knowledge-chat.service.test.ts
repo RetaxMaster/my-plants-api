@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { SessionNotFoundError } from '@retaxmaster/agents-realtime-server';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ClsService } from 'nestjs-cls';
 import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
@@ -12,8 +13,8 @@ import { KnowledgeChatService } from './knowledge-chat.service.js';
 type Status = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
 // NOTE: `activeKey` mirrors the DB column — 'ACTIVE' on a non-terminal run, null once terminal; the
 // fake enforces the @@unique([sessionId, activeKey]) constraint on create (null is exempt).
-interface Run { id: string; sessionId: string; prompt: string; status: Status; activeKey: string | null; startedAt: Date | null; finishedAt: Date | null; createdAt: Date; error: string | null; pid: number | null; procStartTime: string | null; exitCode: number | null }
-interface Session { id: string; claudeSessionId: string | null; title: string; createdByUserId: string | null; createdAt: Date; updatedAt: Date }
+interface Run { id: string; sessionId: string; provider: string; prompt: string; status: Status; activeKey: string | null; startedAt: Date | null; finishedAt: Date | null; createdAt: Date; error: string | null; pid: number | null; procStartTime: string | null; exitCode: number | null }
+interface Session { id: string; provider: string; providerSessionId: string | null; pendingRunId?: string | null; title: string; createdByUserId: string | null; createdAt: Date; updatedAt: Date }
 
 const actor = (userId = 'admin-user') => ({ userId, username: 'root', ownerId: 'o', role: 'ADMIN' as const, jti: 'j', exp: 9e9 });
 const uniqueViolation = () =>
@@ -40,8 +41,16 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
   };
   const db = {
     knowledgeChatSession: {
-      create: async ({ data }: any) => { const s: Session = { id: nextId('s'), claudeSessionId: null, createdAt: new Date(), updatedAt: new Date(), createdByUserId: null, ...data }; sessions.set(s.id, s); return s; },
+      create: async ({ data }: any) => { const s: Session = { id: nextId('s'), provider: 'claude', providerSessionId: null, createdAt: new Date(), updatedAt: new Date(), createdByUserId: null, ...data }; sessions.set(s.id, s); return s; },
       findUnique: async ({ where, include }: any) => withRuns(sessions.get(where.id), include),
+      update: async ({ where, data }: any) => { const s = sessions.get(where.id)!; Object.assign(s, data); return s; },
+      updateMany: async ({ where, data }: any) => {
+        const s = sessions.get(where.id);
+        // Mirrors the real guard: the write only lands while the conversation still has no agent session.
+        if (!s || (where.providerSessionId === null && s.providerSessionId !== null)) return { count: 0 };
+        Object.assign(s, data);
+        return { count: 1 };
+      },
       findMany: async ({ include }: any = {}) => [...sessions.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((s) => withRuns(s, include)),
       delete: async ({ where }: any) => { const s = sessions.get(where.id); sessions.delete(where.id); for (const [k, r] of runs) if (r.sessionId === where.id) runs.delete(k); return s; },
     },
@@ -61,9 +70,11 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
       update: async ({ where, data }: any) => { const r = runs.get(where.id); if (!r) throw new Error(`run not found: ${where.id}`); Object.assign(r, data); return r; },
       updateMany: async ({ where, data }: any) => { let count = 0; for (const r of runs.values()) { const active = where.status?.in ? where.status.in.includes(r.status) : true; if ((where.id ? r.id === where.id : where.sessionId ? r.sessionId === where.sessionId : true) && active) { Object.assign(r, data); count++; } } return { count }; },
     },
+    // The fake is already in-memory and single-threaded, so a transaction is just "run the callback".
+    $transaction: async (fn: any) => fn(db),
   } as any;
 
-  const engine = { execute: vi.fn(async () => {}) };
+  const engine = { execute: vi.fn(async () => {}), loadHistory: vi.fn(async () => ({ provider: 'claude', providerSessionId: 'uuid-1', turns: [] })) };
   const tickets = { mint: vi.fn(async (_runId: string) => 'raw-ticket') };
   const logDir = mkdtempSync(join(tmpdir(), 'kchat-'));
   const env = { KNOWLEDGE_CHAT_LOG_DIR: logDir, KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: 1_800_000, KNOWLEDGE_CHAT_RUN_BUFFER_MS: 120_000 } as any;
@@ -76,34 +87,45 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
 }
 
 // Seed helpers — an ACTIVE run carries activeKey 'ACTIVE'; a terminal run carries null.
-const activeRun = (over: Partial<Run> = {}): Run => ({ id: 'r1', sessionId: 's1', prompt: 'p', status: 'RUNNING', activeKey: 'ACTIVE', startedAt: new Date(), finishedAt: null, createdAt: new Date(), error: null, pid: 10, procStartTime: '1', exitCode: null, ...over });
-const doneRun = (over: Partial<Run> = {}): Run => ({ id: 'r1', sessionId: 's1', prompt: 'p', status: 'SUCCEEDED', activeKey: null, startedAt: new Date(), finishedAt: new Date(), createdAt: new Date(), error: null, pid: null, procStartTime: null, exitCode: 0, ...over });
-const session = (over: Partial<Session> = {}): Session => ({ id: 's1', claudeSessionId: 'uuid-1', title: 't', createdByUserId: null, createdAt: new Date(), updatedAt: new Date(), ...over });
+const activeRun = (over: Partial<Run> = {}): Run => ({ id: 'r1', sessionId: 's1', provider: 'claude', prompt: 'p', status: 'RUNNING', activeKey: 'ACTIVE', startedAt: new Date(), finishedAt: null, createdAt: new Date(), error: null, pid: 10, procStartTime: '1', exitCode: null, ...over });
+const doneRun = (over: Partial<Run> = {}): Run => ({ id: 'r1', sessionId: 's1', provider: 'claude', prompt: 'p', status: 'SUCCEEDED', activeKey: null, startedAt: new Date(), finishedAt: new Date(), createdAt: new Date(), error: null, pid: null, procStartTime: null, exitCode: 0, ...over });
+const session = (over: Partial<Session> = {}): Session => ({ id: 's1', provider: 'claude', providerSessionId: 'uuid-1', title: 't', createdByUserId: null, createdAt: new Date(), updatedAt: new Date(), ...over });
 
 describe('KnowledgeChatService.createSession', () => {
-  it('creates a session + first (active) run, truncates the log file, mints a ticket, and calls /execute', async () => {
+  it('creates a session + first (active) run on the CHOSEN agent, mints a ticket, and calls /execute', async () => {
     const { svc, run, engine, tickets, sessions, runs, logDir } = setup();
-    const out = await run(() => svc.createSession('Research Monstera deliciosa care'));
+    const out = await run(() => svc.createSession('Research Monstera deliciosa care', 'codex'));
+    expect(sessions.get(out.sessionId)?.pendingRunId).toBe(out.runId); // the run that may seal it
     expect(out.ticket).toBe('raw-ticket');
     expect(sessions.get(out.sessionId)?.title).toBe('Research Monstera deliciosa care');
     expect(sessions.get(out.sessionId)?.createdByUserId).toBe('admin-user');
+    expect(sessions.get(out.sessionId)?.provider).toBe('codex'); // the conversation remembers its agent
     expect(runs.get(out.runId)?.activeKey).toBe('ACTIVE'); // holds the unique slot
-    expect(existsSync(join(logDir, `${out.runId}.ndjson`))).toBe(true); // created/truncated
     expect(tickets.mint).toHaveBeenCalledWith(out.runId);
-    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId, resumeSessionId: null, logPath: join(logDir, `${out.runId}.ndjson`) }));
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId, provider: 'codex', resumeSessionId: null, logPath: join(logDir, `${out.runId}.ndjson`) }));
+  });
+
+  // REGRESSION GUARD (agents-realtime 1.0.0). The engine creates the run log itself, exclusively
+  // (O_CREAT|O_EXCL), and rejects a logPath that already exists — that exclusivity is what stops two runs
+  // from sharing one log. The host used to pre-create/truncate the file here; doing so now makes the
+  // engine reject EVERY run with a 422. So: the file must NOT exist when we call /execute.
+  it('does NOT pre-create the run log — the engine owns it (O_EXCL); a pre-created file would 422 the run', async () => {
+    const { svc, run, logDir } = setup();
+    const out = await run(() => svc.createSession('hi', 'claude'));
+    expect(existsSync(join(logDir, `${out.runId}.ndjson`))).toBe(false);
   });
 
   it('truncates the title to ~160 chars', async () => {
     const { svc, run, sessions } = setup();
     const long = 'x'.repeat(500);
-    const out = await run(() => svc.createSession(long));
+    const out = await run(() => svc.createSession(long, 'claude'));
     expect(sessions.get(out.sessionId)!.title.length).toBe(160);
   });
 
   it('marks the run FAILED (activeKey cleared) and rethrows when /execute fails (never leaves it QUEUED)', async () => {
     const { svc, run, engine, runs } = setup();
     engine.execute.mockRejectedValueOnce(new Error('engine down'));
-    await expect(run(() => svc.createSession('boom'))).rejects.toThrow();
+    await expect(run(() => svc.createSession('boom', 'claude'))).rejects.toThrow();
     const r = [...runs.values()][0];
     expect(r.status).toBe('FAILED');
     expect(r.activeKey).toBeNull(); // slot freed so the session isn't permanently blocked
@@ -112,7 +134,7 @@ describe('KnowledgeChatService.createSession', () => {
   it('also frees the slot when a PRE-/execute step fails (e.g. ticket mint throws) — never stuck QUEUED', async () => {
     const { svc, run, tickets, engine, runs } = setup();
     tickets.mint.mockRejectedValueOnce(new Error('mint failed'));
-    await expect(run(() => svc.createSession('boom'))).rejects.toThrow();
+    await expect(run(() => svc.createSession('boom', 'claude'))).rejects.toThrow();
     const r = [...runs.values()][0];
     expect(r.status).toBe('FAILED');
     expect(r.activeKey).toBeNull();
@@ -123,22 +145,44 @@ describe('KnowledgeChatService.createSession', () => {
 describe('KnowledgeChatService.resume', () => {
   const seedResumable = () => ({ sessions: [session({ createdByUserId: 'admin-user' })], runs: [doneRun({ prompt: 'first' })] });
 
-  it('adds a run and calls /execute with resumeSessionId = claudeSessionId', async () => {
+  it('adds a run and calls /execute with resumeSessionId = providerSessionId', async () => {
     const { svc, run, engine } = setup(seedResumable());
     const out = await run(() => svc.resume('s1', 'follow-up question'));
     expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId, resumeSessionId: 'uuid-1' }));
   });
 
-  it('422 when claudeSessionId is null (not yet resumable) — real HTTP status, not just the class', async () => {
-    const { svc, run } = setup({ sessions: [session({ claudeSessionId: null })], runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'x' })] });
-    const err = await run(() => svc.resume('s1', 'x')).catch((e) => e);
-    expect(err).toBeInstanceOf(UnprocessableEntityException);
-    expect(err.getStatus()).toBe(422);
+  // REGRESSION: this USED to 422 forever, which trapped the conversation on an agent that never ran — the
+  // user's only escape was deleting it. A conversation with no agent session has no memory to protect, so
+  // its opening turn is simply retried.
+  it('retries the OPENING turn when no agent session was ever established (never a permanent 422)', async () => {
+    const { svc, run, engine } = setup({
+      sessions: [session({ providerSessionId: null })],
+      runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'agent was signed out' })],
+    });
+    const out = await run(() => svc.resume('s1', 'try again'));
+    // A retry, not a resume: there is no agent session to resume FROM.
+    expect(engine.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: out.runId, provider: 'claude', resumeSessionId: null }),
+    );
   });
 
-  it('404 for an unknown session', async () => {
-    const { svc, run } = setup();
-    await expect(run(() => svc.resume('nope', 'x'))).rejects.toBeInstanceOf(NotFoundException);
+  it('lets the retry switch AGENTS, and records the agent that actually ran', async () => {
+    const { svc, run, engine, sessions: rows } = setup({
+      sessions: [session({ providerSessionId: null })], // originally created on claude
+      runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'claude was signed out' })],
+    });
+    await run(() => svc.resume('s1', 'try codex instead', 'codex'));
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ provider: 'codex', resumeSessionId: null }));
+    expect(rows.get('s1')?.provider).toBe('codex'); // the row names the agent that actually ran
+  });
+
+  // Once a real agent session exists the conversation is FINAL: a client cannot hand a Claude memory to Codex.
+  it('IGNORES a provider on resume once an agent session exists (the conversation owns its agent)', async () => {
+    const { svc, run, engine } = setup(seedResumable());
+    await run(() => svc.resume('s1', 'next', 'codex'));
+    expect(engine.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'claude', resumeSessionId: 'uuid-1' }),
+    );
   });
 });
 
@@ -202,13 +246,83 @@ describe('KnowledgeChatService list/detail', () => {
       runs: [doneRun({ id: 'r1', createdAt: new Date(1000), startedAt: new Date(1000) }), activeRun({ id: 'r2', prompt: 'p2', startedAt: new Date(2000), createdAt: new Date(2000), pid: 1 })],
     });
     const list = await run(() => svc.listSessions());
-    expect(list[0]).toEqual(expect.objectContaining({ id: 's1', claudeSessionId: 'uuid-1', title: 'A', status: 'RUNNING', turns: 2 }));
+    expect(list[0]).toEqual(expect.objectContaining({ id: 's1', provider: 'claude', providerSessionId: 'uuid-1', title: 'A', status: 'RUNNING', turns: 2 }));
   });
 
   it('detail maps ordered turns with isActive + logUrl', async () => {
     const { svc, run } = setup({ sessions: [session({ title: 'A' })], runs: [activeRun({ prompt: 'p1', pid: 1 })] });
     const detail = await run(() => svc.getSession('s1'));
-    expect(detail.claudeSessionId).toBe('uuid-1');
+    expect(detail.providerSessionId).toBe('uuid-1');
+    expect(detail.provider).toBe('claude');
     expect(detail.turns[0]).toEqual({ runId: 'r1', prompt: 'p1', status: 'RUNNING', isActive: true, logUrl: '/knowledge-chat/runs/r1/log' });
+  });
+});
+
+
+// REGRESSION (agents-realtime 1.0.0). Reopening a PRE-UPGRADE conversation threw OwnRunLogUnavailableError
+// out of the engine → an unhandled 500, an empty screen, AND a "can't be continued" message the database
+// flatly contradicted. A transcript we cannot READ is not a conversation that is BROKEN: the agent still
+// holds the session, so it is still resumable — only our view of the past is missing.
+describe('KnowledgeChatService.getSessionHistory', () => {
+  it('returns the engine canonical history for a readable conversation', async () => {
+    const { svc, run, engine } = setup({ sessions: [session()], runs: [doneRun()] });
+    const history = await run(() => svc.getSessionHistory('s1'));
+    expect(engine.loadHistory).toHaveBeenCalledWith('claude', 'uuid-1');
+    expect(history.providerSessionId).toBe('uuid-1');
+  });
+
+  // The agent itself no longer holds the session: the transcript is gone AND the conversation cannot be
+  // continued (a resume would hand the agent a session id it rejects). We report BOTH facts, so the UI can
+  // say so plainly instead of inviting a message that is guaranteed to fail.
+  it('degrades a transcript that is genuinely GONE — never a 500 — and flags it as un-continuable', async () => {
+    const { svc, run, engine } = setup({ sessions: [session()], runs: [doneRun()] });
+    engine.loadHistory.mockRejectedValueOnce(new SessionNotFoundError('gone'));
+    const history = await run(() => svc.getSessionHistory('s1'));
+    expect(history).toEqual({
+      provider: 'claude',
+      providerSessionId: 'uuid-1',
+      turns: [],
+      agentSessionMissing: true,
+    });
+  });
+
+  // A broken engine is NOT "your old chat is empty". Dressing an outage up as lost history is how a real
+  // defect hides in plain sight, so anything that is not a typed "it's gone" stays LOUD.
+  it('rethrows a REAL engine failure instead of disguising it as an empty transcript', async () => {
+    const { svc, run, engine } = setup({ sessions: [session()], runs: [doneRun()] });
+    engine.loadHistory.mockRejectedValueOnce(new Error('EACCES: permission denied'));
+    await expect(run(() => svc.getSessionHistory('s1'))).rejects.toThrow(/EACCES/);
+  });
+
+  it('422 for a conversation whose first run never opened an agent session (no history will ever exist)', async () => {
+    const { svc, run } = setup({ sessions: [session({ providerSessionId: null })], runs: [doneRun({ status: 'FAILED' })] });
+    await expect(run(() => svc.getSessionHistory('s1'))).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('404 for an unknown conversation', async () => {
+    const { svc, run } = setup();
+    await expect(run(() => svc.getSessionHistory('nope'))).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+
+// REGRESSION (race). A retry reads "no agent session", but the ORIGINAL run may establish one in the gap
+// before the retry writes. Re-pointing the conversation at another agent then would strand a real memory
+// with an agent that cannot read a word of it. The conditional write is the guard: it matches zero rows,
+// and the call degrades into the ordinary resume it has become.
+describe('KnowledgeChatService.resume — the retry race', () => {
+  it('does NOT switch agents when a session appears between the read and the write', async () => {
+    const { svc, run, engine, sessions: rows } = setup({
+      sessions: [session({ providerSessionId: null })],
+      runs: [doneRun({ status: 'FAILED', exitCode: 1, error: 'x' })],
+    });
+    // The original Claude run wins the race and seals the conversation just as the user retries on Codex.
+    rows.get('s1')!.providerSessionId = 'uuid-late';
+    await run(() => svc.resume('s1', 'retry on codex', 'codex'));
+    // It must CONTINUE the Claude session that now exists — not launch Codex against a memory it cannot read.
+    expect(engine.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'claude', resumeSessionId: 'uuid-late' }),
+    );
+    expect(rows.get('s1')?.provider).toBe('claude');
   });
 });

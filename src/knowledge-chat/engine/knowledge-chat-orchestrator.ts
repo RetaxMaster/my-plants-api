@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { join } from 'node:path';
-import type { Orchestrator, ActiveRun } from '@retaxmaster/claude-realtime-server';
+import type { Orchestrator, ActiveRun, OwnRunLocator, RunLogResolver } from '@retaxmaster/agents-realtime-server';
+import type { AgentProvider } from '@retaxmaster/agents-realtime-protocol';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { ENV } from '../../config/config.module.js';
 import type { Env } from '../../config/env.js';
@@ -8,10 +9,15 @@ import { KnowledgeChatTicketService } from './knowledge-chat-ticket.service.js';
 
 const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 
-// The four seams the embedded engine uses to reach the host — implemented in-process against Prisma
+// The seams the embedded engine uses to reach the host — implemented in-process against Prisma
 // (retaxmaster's Node↔Laravel HTTP callback layer disappears). No network, no retry: direct DB writes.
+//
+// It also implements OwnRunLocator: the engine keys its logs by runId and has no idea which conversation
+// they belonged to — we do. Handing it run IDENTITY (never a path) is what lets the engine rebuild a
+// reopened conversation from ITS OWN canonical logs, so a restored transcript keeps the rich tool cards
+// and diffs the live stream produced instead of degrading to plain text.
 @Injectable()
-export class KnowledgeChatOrchestrator implements Orchestrator {
+export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
   private readonly logger = new Logger(KnowledgeChatOrchestrator.name);
 
   constructor(
@@ -25,7 +31,7 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
   }
 
   // Called TWICE per run (spec §3.2): first with sessionId=null at spawn, then with the real UUID
-  // once it appears in the stream. Idempotent — stamps startedAt/claudeSessionId only the first time,
+  // once it appears in the stream. Idempotent — stamps startedAt/providerSessionId only the first time,
   // and only touches a run that is still active (a late call never resurrects a terminal run).
   async runStarted(runId: string, info: { pid: number; procStartTime: string; sessionId: string | null }): Promise<void> {
     const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId } });
@@ -40,11 +46,33 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
       },
     });
     if (info.sessionId) {
-      // Capture the born-with-it UUID exactly once (claudeSessionId null → set). A late/different
-      // uuid never clobbers because the where-clause no longer matches once it is set.
+      // Record on the RUN which agent session it took part in. This is a plain fact about the run — not a
+      // claim about the conversation — and it is what later lets history membership be answered exactly:
+      // a run belongs to a conversation's memory iff it names that conversation's agent session. A run that
+      // never reached the agent keeps NULL and is correctly excluded.
+      await this.prisma.knowledgeChatRun.updateMany({
+        where: { id: runId, providerSessionId: null },
+        data: { providerSessionId: info.sessionId },
+      });
+
+      // SEAL the conversation to its agent — in ONE conditional statement. Three properties, all
+      // enforced by the where-clause rather than by anything we check beforehand:
+      //
+      // 1. `pendingRunId: runId` — only the run that still HOLDS the claim may seal. A conversation whose
+      //    opening turn never reached an agent can be retried on a different agent, and the abandoned run
+      //    may still report its `session.started` afterwards. Reading "am I the newest run?" and then
+      //    writing is a TOCTOU: the old run can pass that check and seal a conversation the retry already
+      //    owns, pinning it to the agent the user just walked away from. Claiming a run REPLACES
+      //    pendingRunId, so a superseded run's write matches zero rows — the race has no window to lose.
+      //
+      // 2. `providerSessionId: null` — the first seal wins; a later or repeated report never clobbers it.
+      //
+      // 3. `provider` and `providerSessionId` are written TOGETHER, from the SAME run, so the pair can
+      //    never describe two different agents (a row claiming Codex while holding a Claude memory). The
+      //    run carries the agent it was launched with precisely so this write is self-consistent.
       await this.prisma.knowledgeChatSession.updateMany({
-        where: { id: run.sessionId, claudeSessionId: null },
-        data: { claudeSessionId: info.sessionId },
+        where: { id: run.sessionId, providerSessionId: null, pendingRunId: runId },
+        data: { providerSessionId: info.sessionId, provider: run.provider },
       });
     }
   }
@@ -56,18 +84,18 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
   async runFinished(runId: string, info: { exitCode: number; stopped: boolean; stderrTail: string | null }): Promise<void> {
     const status = info.stopped ? 'CANCELLED' : info.exitCode === 0 ? 'SUCCEEDED' : 'FAILED';
     // Observability: a FAILED run must never be reduced to a bare error with nothing actionable. When
-    // the engine captured a stderr tail we persist it; when it is ABSENT (e.g. the shell redirection
-    // itself failed before claude ran — a missing/unwritable log dir), we synthesize a diagnostic that
-    // names the most likely cause and the knob to check, so the next spawn/redirection failure is
-    // debuggable from the run's `error` alone.
+    // the engine captured a stderr tail we persist it; when it is ABSENT the agent process died before
+    // it said anything, so we synthesize a diagnostic naming the likely causes and the knobs to check —
+    // the run's `error` alone must be enough to debug a spawn failure.
     const error =
       status !== 'FAILED'
         ? null
         : info.stderrTail && info.stderrTail.trim()
           ? info.stderrTail.slice(0, 1000)
-          : `claude exited ${info.exitCode} with no stderr captured — likely a spawn/redirection failure ` +
-            `(check KNOWLEDGE_CHAT_LOG_DIR is an absolute, writable directory; the engine runs claude in ` +
-            `KNOWLEDGE_ENGINE_CWD, so a relative or missing log dir makes the shell redirect fail before claude runs).`;
+          : `The agent exited ${info.exitCode} with no stderr captured — likely a spawn failure. Check that ` +
+            `the agent binary is installed and on PATH (CLAUDE_BIN / CODEX_BIN) and authenticated, that ` +
+            `KNOWLEDGE_ENGINE_CWD exists, and that KNOWLEDGE_CHAT_LOG_DIR (the engine's logRoot) and ` +
+            `KNOWLEDGE_CHAT_STATE_DIR are absolute, writable directories.`;
     const { count } = await this.prisma.knowledgeChatRun.updateMany({
       where: { id: runId, status: { in: [...ACTIVE] } },
       data: {
@@ -88,6 +116,84 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
     }
   }
 
+  // Late-bound because of a construction cycle: the engine is built FROM this orchestrator, so its run
+  // index cannot exist yet when this class is constructed. The engine service injects it right after
+  // createServer(). Absent → we claim no own runs (every session restores through the agent's own native
+  // transcript), which is the safe direction: best-effort history, never a broken read.
+  private runLogResolver: RunLogResolver | null = null;
+
+  setRunLogResolver(resolver: RunLogResolver): void {
+    this.runLogResolver = resolver;
+  }
+
+  // OwnRunLocator (spec 5 §4): which runs WE executed for an agent session, oldest→newest, by identity
+  // and order only — never a path (the engine resolves runId → logPath through its own durable index, so
+  // a bug here can never make it read the wrong file).
+  //
+  // TERMINAL runs only. A still-active run is being streamed live over the socket, which replays its log
+  // from offset 0; handing it to the history authority too would render that turn TWICE — once seeded
+  // (truncated, since the log is still being written) and once streamed. History is the settled past; the
+  // socket owns the present.
+  //
+  // ALL-OR-NOTHING on resolvability, and this is the subtle part. Runs predating the agents-realtime 1.0.0
+  // upgrade exist in OUR database but NOT in the engine's durable run index (that index did not exist
+  // before 1.0.0), so the engine cannot resolve their logs. The package treats whatever we return as the
+  // COMPLETE set of our runs and reconstructs the conversation from exactly those — it only falls back to
+  // the agent's own native transcript when we claim NOTHING. So returning a PARTIAL list is the worst of
+  // both worlds: a conversation with old runs plus one new run would come back containing only the new
+  // turn, with the older ones silently missing and no error anywhere. Claiming none instead sends the whole
+  // conversation down the native path, where the agent's own transcript still holds every turn.
+  //
+  // Hence: if we cannot resolve EVERY settled run, we claim NONE. Complete, or external — never partial.
+  async runsForSession(
+    provider: AgentProvider,
+    providerSessionId: string,
+  ): Promise<Array<{ runId: string; startedAtMs: number }>> {
+    const session = await this.prisma.knowledgeChatSession.findUnique({
+      where: { providerSessionId },
+      include: { runs: { orderBy: { createdAt: 'asc' } } },
+    });
+    // Belt and braces: providerSessionId is globally unique, but a row whose provider disagrees with the
+    // one being asked about is not ours to answer for.
+    if (!session || session.provider !== provider) return [];
+    const resolver = this.runLogResolver;
+    if (!resolver) return [];
+
+    const settled = session.runs.filter(
+      (r) => !(ACTIVE as readonly string[]).includes(r.status) && r.startedAt !== null,
+    );
+
+    // MEMBERSHIP is a fact, not an inference: a run is part of this conversation's memory iff it names this
+    // conversation's agent session. Anything else is not ours to hand over.
+    const members = settled.filter(
+      (r) => r.provider === provider && r.providerSessionId === providerSessionId,
+    );
+
+    // An ORPHAN is a run we can PROVE never reached the agent (cancelled or killed before it opened a
+    // session): it names no session, and it contributed NOTHING to the agent's memory. Excluding it loses
+    // nothing — the agent never saw it — so it must NOT trigger the fallback below. This is exactly the run
+    // a retried opening turn leaves behind, and claiming it used to make the engine fail the ENTIRE history
+    // read (its log holds no session), which silently bricked the conversation's transcript for good.
+    //
+    // `sessionTracked` is what makes it a PROOF instead of a guess. A run from before we recorded that fact
+    // is ALSO null here, but its null means "unknown", not "never happened" — it may well have reached the
+    // agent. Such a run is deliberately NOT an orphan: it falls through to the completeness check below and
+    // sends the whole conversation to the agent's own transcript, where its turn still exists.
+    const orphans = settled.filter(
+      (r) => r.sessionTracked && r.providerSessionId === null && resolver.resolveLogPath(r.id) !== null,
+    );
+
+    // Anything neither a member nor an orphan is a turn that DID reach an agent but that we cannot serve
+    // from our own logs — a pre-1.0.0 run (absent from the engine's durable index), or one belonging to a
+    // different agent session. Handing back a partial set would rebuild the conversation with those turns
+    // silently missing, because the package treats our answer as COMPLETE and only falls back to the agent's
+    // own transcript when we claim nothing at all. So: complete, or external — never partial.
+    if (members.length + orphans.length !== settled.length) return [];
+    if (members.some((r) => resolver.resolveLogPath(r.id) === null)) return [];
+
+    return members.map((r) => ({ runId: r.id, startedAtMs: r.startedAt!.getTime() }));
+  }
+
   // Boot re-adoption: still-RUNNING children survive a NestJS restart (spawned under setsid). Return
   // only rows with the identity the engine needs (pid/procStartTime/startedAt); a QUEUED row has no
   // pid so it is naturally excluded. startedAtMs re-arms the ORIGINAL deadline (never Date.now()).
@@ -96,13 +202,31 @@ export class KnowledgeChatOrchestrator implements Orchestrator {
       where: { status: 'RUNNING', pid: { not: null }, procStartTime: { not: null }, startedAt: { not: null } },
       include: { session: true },
     });
+
+    // REPAIR THE SEAL CLAIM for any run that spans a restart. A run launched by the PREVIOUS process can be
+    // alive across a deploy — including one created after migration 0015 backfilled `pending_run_id` but
+    // before this process took over — and such a run holds no claim. It would be re-adopted and stream
+    // normally, yet its `session.started` could never seal its conversation, leaving it permanently
+    // "unsealed": the picker unlocked, and every later turn treated as a retry of the opening one.
+    //
+    // A live run IS its conversation's current attempt, by definition — and the @@unique([sessionId,
+    // activeKey]) constraint means there can only be one — so restoring the claim here is unambiguous.
+    for (const r of runs) {
+      if (r.session.pendingRunId !== r.id) {
+        await this.prisma.knowledgeChatSession.update({
+          where: { id: r.sessionId },
+          data: { pendingRunId: r.id },
+        });
+      }
+    }
+
     return runs.map((r) => ({
       runId: r.id,
       logPath: join(this.env.KNOWLEDGE_CHAT_LOG_DIR, `${r.id}.ndjson`),
       pid: r.pid!,
       procStartTime: r.procStartTime!,
       startedAtMs: r.startedAt!.getTime(),
-      sessionId: r.session.claudeSessionId,
+      sessionId: r.session.providerSessionId,
     }));
   }
 }

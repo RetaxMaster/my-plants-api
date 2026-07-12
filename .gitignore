@@ -7,3 +7,5 @@ prisma/.env
 .playwright-cli/
 # Host-owned knowledge-chat NDJSON transcripts (runtime artifacts, never committed)
 storage/knowledge-chat/
+# The engine's durable run index (runId → logPath) — runtime state, never committed.
+storage/knowledge-chat-state/

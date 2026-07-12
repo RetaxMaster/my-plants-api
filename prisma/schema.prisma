@@ -331,22 +331,57 @@ enum KnowledgeChatRunStatus {
 }
 
 model KnowledgeChatSession {
-  id              String             @id @default(cuid())
-  claudeSessionId String?            @unique @map("claude_session_id") // Claude's UUID; null until first run inits
-  title           String // first ~160 chars of the first prompt
-  createdByUserId String?            @map("created_by_user_id") // provenance only, NOT an access boundary
-  createdAt       DateTime           @default(now()) @map("created_at")
-  updatedAt       DateTime           @updatedAt @map("updated_at")
-  runs            KnowledgeChatRun[]
+  id String @id @default(cuid())
+  // WHICH AGENT owns this conversation ('claude' | 'codex' — the agents-realtime `AgentProvider` wire
+  // vocabulary, stored verbatim so the value we persist is the value we send on /execute). Chosen when
+  // the conversation is created and LOCKED once a run proves a real session exists, because a Claude
+  // session and a Codex thread cannot read each other's history — switching agents mid-conversation
+  // would make the screen lie about what the agent remembers. Deliberately a String, not an enum: the
+  // protocol package owns this vocabulary, and a DB enum would fork it.
+  provider          String             @default("claude")
+  // The AGENT's own session id (Claude's UUID / Codex's thread id) — null until the first run inits it.
+  // Renamed from `claude_session_id` in the agents-realtime 1.0.0 migration: with two agents the old
+  // name was a lie for half the rows.
+  providerSessionId String?            @unique @map("provider_session_id")
+  // The run that currently holds the right to SEAL this conversation (set when a run claims the session's
+  // active slot). It exists so the seal can be a SINGLE conditional UPDATE — `WHERE provider_session_id IS
+  // NULL AND pending_run_id = <the reporting run>` — instead of a read-then-write. Checking "is this the
+  // newest run?" before writing is a TOCTOU: an abandoned run can pass the check and then seal the
+  // conversation a retry has already claimed, pinning it to the agent the user just walked away from.
+  pendingRunId      String?            @map("pending_run_id")
+  title             String // first ~160 chars of the first prompt
+  createdByUserId   String?            @map("created_by_user_id") // provenance only, NOT an access boundary
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  runs              KnowledgeChatRun[]
 
   @@map("knowledge_chat_sessions")
 }
 
 model KnowledgeChatRun {
-  id            String                 @id @default(cuid())
-  sessionId     String                 @map("session_id")
-  session       KnowledgeChatSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  prompt        String                 @db.Text // raw user prompt
+  id        String               @id @default(cuid())
+  sessionId String               @map("session_id")
+  session   KnowledgeChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // The agent this run was LAUNCHED with. It lives on the run, not just the session, because the run is
+  // the only thing that knows which agent actually produced the session id it reports back: sealing the
+  // session's `provider` and `provider_session_id` from the SAME run, atomically, is what makes it
+  // impossible for those two columns to end up describing different agents (which a retry on a second
+  // agent, racing a late callback from the first, could otherwise do).
+  provider  String               @default("claude")
+  // The AGENT SESSION this run actually took part in (recorded when the run reports it). It is what makes
+  // "does this run belong to that conversation's memory?" a FACT rather than an inference. A run that never
+  // reached the agent — cancelled or killed before it opened a session — keeps NULL here: it contributed
+  // nothing to the agent's memory, its log holds no session, and claiming it as part of the conversation
+  // makes the engine fail the whole history read.
+  providerSessionId String?      @map("provider_session_id")
+  // Whether THIS run was executed by an engine that records the line above. It is what turns a NULL
+  // `providerSessionId` from ambiguous into decisive: with it TRUE, null PROVES the run never reached the
+  // agent (an orphan, safely excluded from history); with it FALSE, null means only "we never tracked it"
+  // — a run that may well have reached the agent, so the conversation must fall back to the agent's own
+  // transcript rather than quietly dropping that turn. Two very different facts wear the same NULL, and
+  // conflating them is a silent loss of history.
+  sessionTracked    Boolean      @default(true) @map("session_tracked")
+  prompt    String               @db.Text // raw user prompt
   status        KnowledgeChatRunStatus @default(QUEUED)
   // 'ACTIVE' while the run is non-terminal; null once terminal. With @@unique([sessionId, activeKey])
   // and MySQL/MariaDB's null-exempt unique semantics, this DB-enforces "at most ONE active run per

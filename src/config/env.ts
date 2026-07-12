@@ -47,8 +47,37 @@ export const envSchema = dbSchema.extend({
   // redirection fails before claude runs. Resolve to absolute here so no relative env value can ever
   // reintroduce that bug, regardless of which process (API vs spawned shell) touches the path.
   KNOWLEDGE_CHAT_LOG_DIR: z.string().min(1).default('storage/knowledge-chat').transform((v) => resolve(v)),
+  // The engine's DURABLE run index (runId → logPath) lives here — required by createServer since
+  // agents-realtime 1.0.0. It is what lets a run survive an API restart (the engine re-adopts the
+  // still-alive runner from this index), so it must be a persistent, writable, ABSOLUTE path — never
+  // a tmp dir that a reboot wipes. Kept out of KNOWLEDGE_CHAT_LOG_DIR: that dir is the engine's
+  // `logRoot` allow-list, and the index is not a run log.
+  KNOWLEDGE_CHAT_STATE_DIR: z.string().min(1).default('storage/knowledge-chat-state').transform((v) => resolve(v)),
   KNOWLEDGE_ENGINE_CWD: z.string().min(1), // required — isolated knowledge-engine checkout
   CLAUDE_BIN: z.string().min(1).default('claude'),
+  CODEX_BIN: z.string().min(1).default('codex'),
+  // Codex's sandbox when it runs the knowledge engine. The default is `danger-full-access`, and it must be
+  // understood for what it actually is.
+  //
+  // WHY: Codex's `workspace-write` sandbox disables NETWORK access, and web research is the knowledge
+  // engine's entire job — under it every curation run would fail to reach a single source.
+  //
+  // WHAT IT REALLY COSTS (state this honestly): `cwd` is where the agent STARTS, not a boundary it is
+  // confined to. Under full access the agent can read and write anything this API's Unix user can —
+  // including `.env` files, the engine's own state, and the production checkout. The blast radius is the
+  // PROCESS USER, not KNOWLEDGE_ENGINE_CWD. Combined with web research, prompt-injection from a fetched
+  // page is a real path to that access, and "only admins can type a prompt" does not close it.
+  //
+  // WHY WE SHIP IT ANYWAY: Claude ALREADY runs in that same checkout, as the same Unix user, with
+  // --dangerously-skip-permissions. So this grants Codex exactly the reach Claude has had all along — it
+  // does not open a new door, it declines to close an existing one. The real fix is a genuine boundary
+  // (a dedicated Unix user with no access to secrets or the product, or a container), which is a
+  // deliberate follow-up and is tracked as such — not something a sandbox string here can fake.
+  //
+  // Set this to `workspace-write` (accepting the loss of network) or `read-only` to narrow it.
+  KNOWLEDGE_CHAT_CODEX_SANDBOX: z
+    .enum(['read-only', 'workspace-write', 'danger-full-access'])
+    .default('danger-full-access'),
   KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
   KNOWLEDGE_CHAT_RUN_BUFFER_MS: z.coerce.number().int().positive().default(120_000),
   KNOWLEDGE_CHAT_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),

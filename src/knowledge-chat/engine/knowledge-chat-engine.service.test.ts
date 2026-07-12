@@ -9,8 +9,11 @@ const baseEnv = {
   WEB_ORIGIN: 'http://localhost:8001',
   KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: 1_800_000,
   KNOWLEDGE_CHAT_RUN_BUFFER_MS: 120_000,
+  KNOWLEDGE_CHAT_STATE_DIR: '/tmp/knowledge-chat-test-state',
   KNOWLEDGE_ENGINE_CWD: '/tmp/ke',
   CLAUDE_BIN: 'claude',
+  CODEX_BIN: 'codex',
+  KNOWLEDGE_CHAT_CODEX_SANDBOX: 'danger-full-access',
 } as any;
 
 describe('KnowledgeChatEngineService (disabled)', () => {
@@ -24,7 +27,15 @@ describe('KnowledgeChatEngineService (disabled)', () => {
     const svc = new KnowledgeChatEngineService(baseEnv, {} as any);
     await svc.onModuleInit();
     await expect(
-      svc.execute({ runId: 'r1', prompt: 'hi', logPath: '/tmp/r1.ndjson', resumeSessionId: null }),
+      svc.execute({ runId: 'r1', provider: 'claude', prompt: 'hi', logPath: '/tmp/r1.ndjson', resumeSessionId: null }),
     ).rejects.toThrow(/engine is not running/i);
+  });
+
+  // A disabled engine offers NO agent — the picker must render "none available" rather than a provider
+  // it would then refuse to run.
+  it('providerStatus() reports no agents when the engine is not running', async () => {
+    const svc = new KnowledgeChatEngineService(baseEnv, {} as any);
+    await svc.onModuleInit();
+    expect(await svc.providerStatus()).toEqual([]);
   });
 });

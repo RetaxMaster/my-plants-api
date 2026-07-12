@@ -13,7 +13,12 @@ function setup() {
     getRunLog: vi.fn(async () => 'ndjson'),
     mintSocketTicket: vi.fn(async () => ({ ticket: 'tk3' })),
   };
-  return { svc, ctrl: new KnowledgeChatController(svc as any) };
+  const engine = {
+    providerStatus: vi.fn(async () => [
+      { provider: 'claude', installed: true, authenticated: true, available: true },
+    ]),
+  };
+  return { svc, engine, ctrl: new KnowledgeChatController(svc as any, engine as any) };
 }
 
 describe('KnowledgeChatController', () => {
@@ -22,16 +27,24 @@ describe('KnowledgeChatController', () => {
     expect(roles).toEqual(['ADMIN']);
   });
 
-  it('delegates create → createSession(prompt)', async () => {
+  it('delegates create → createSession(prompt, provider)', async () => {
     const { svc, ctrl } = setup();
-    expect(await ctrl.create({ prompt: 'hi' } as any)).toEqual({ sessionId: 's1', runId: 'r1', ticket: 'tk' });
-    expect(svc.createSession).toHaveBeenCalledWith('hi');
+    expect(await ctrl.create({ prompt: 'hi', provider: 'codex' } as any)).toEqual({ sessionId: 's1', runId: 'r1', ticket: 'tk' });
+    expect(svc.createSession).toHaveBeenCalledWith('hi', 'codex');
   });
 
-  it('delegates resume → resume(id, prompt)', async () => {
+  it('proxies provider-status, and only forces a re-probe when asked', async () => {
+    const { engine, ctrl } = setup();
+    await ctrl.providerStatus();
+    expect(engine.providerStatus).toHaveBeenCalledWith({ force: false });
+    await ctrl.providerStatus('1');
+    expect(engine.providerStatus).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('delegates resume → resume(id, prompt, provider?)', async () => {
     const { svc, ctrl } = setup();
     expect(await ctrl.resume('s1', { prompt: 'more' } as any)).toEqual({ runId: 'r2', ticket: 'tk2' });
-    expect(svc.resume).toHaveBeenCalledWith('s1', 'more');
+    expect(svc.resume).toHaveBeenCalledWith('s1', 'more', undefined);
   });
 
   it('delegates list/detail/delete/log/ticket', async () => {
