@@ -381,7 +381,17 @@ model KnowledgeChatRun {
   // transcript rather than quietly dropping that turn. Two very different facts wear the same NULL, and
   // conflating them is a silent loss of history.
   sessionTracked    Boolean      @default(true) @map("session_tracked")
-  prompt    String               @db.Text // raw user prompt
+  // The user's message for this turn — NULL on a COMMAND turn, because a command is not text: it is an
+  // instruction to the agent's runtime and it travels in its own field, never inside a prompt. Exactly one
+  // of (prompt) / (commandName) is set on any row. The alternative — keeping this NOT NULL and storing the
+  // literal "/compact" — is a value that LOOKS like data and IS a sentinel, and it is the open door for
+  // some later code path to re-send it as a prompt. That is the precise bug agents-realtime 2.0.0 exists
+  // to delete, so we do not reintroduce it in our own table.
+  prompt      String?               @db.Text
+  // The command's bare name ("compact", "model", "postman:docs" — colons are legal, Claude namespaces its
+  // plugin skills) and its raw argument string, verbatim as typed. Set together, and only on a command turn.
+  commandName String?               @map("command_name")
+  commandArgs String?               @db.Text @map("command_args")
   status        KnowledgeChatRunStatus @default(QUEUED)
   // 'ACTIVE' while the run is non-terminal; null once terminal. With @@unique([sessionId, activeKey])
   // and MySQL/MariaDB's null-exempt unique semantics, this DB-enforces "at most ONE active run per
