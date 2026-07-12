@@ -23,11 +23,27 @@ export class IsValidCommandName implements ValidatorConstraintInterface {
   }
 }
 
+// MAX_COMMAND_ARGS_BYTES is a BYTE cap (it mirrors the engine's own pre-acceptance 413 check, which reads
+// the wire body as bytes). `@MaxLength` counts UTF-16 CODE UNITS, not bytes — so e.g. 8,000 emoji (each
+// 2 UTF-16 units, but 4 UTF-8 bytes) would sail through `@MaxLength(MAX_COMMAND_ARGS_BYTES)` and then get
+// rejected by the engine, turning a request we accepted into a run we create and immediately fail. Declared
+// BEFORE the DTO that uses it, same reason as `IsValidCommandName` above (decorator args evaluate at
+// class-definition time).
+@ValidatorConstraint({ name: 'isWithinCommandArgsByteLimit' })
+export class IsWithinCommandArgsByteLimit implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= MAX_COMMAND_ARGS_BYTES;
+  }
+  defaultMessage(): string {
+    return `args must not exceed ${MAX_COMMAND_ARGS_BYTES} bytes (UTF-8)`;
+  }
+}
+
 // A command as typed by the user: a bare name and its raw argument string, verbatim.
 export class AgentCommandDto {
   @IsString() @Validate(IsValidCommandName) name!: string;
 
-  @IsString() @MaxLength(MAX_COMMAND_ARGS_BYTES) args!: string;
+  @IsString() @Validate(IsWithinCommandArgsByteLimit) args!: string;
 }
 
 // A research prompt. Capped generously (research prompts can be long) but bounded to avoid abuse.
