@@ -13,6 +13,12 @@ export interface RescueReport {
   rescued: string[];
   skipped: { runId: string; reason: string }[];
   alreadyCanonical: number;
+  // Rescued, but NOT losslessly: `corrupt` counts legacy lines the translator could not understand, which
+  // survive in the canonical log as `unsupported` events rather than as their original content. The
+  // conversion never aborts on them, so without this the operator would see a clean "rescued" and never
+  // learn that part of the transcript came back as a placeholder. (Our own old sentinels — `claude_rt_*` and
+  // friends — are NOT counted here: they are ours, not content.)
+  degraded: { runId: string; corrupt: number; linesIn: number }[];
 }
 
 // Our DB status → the package's DoneStatus, 1:1. Deliberately NO default/fallback branch: a default would
@@ -36,7 +42,7 @@ const sha256 = (serialized: string) => createHash('sha256').update(serialized).d
 // cannot be skipped or reordered — a future "simplification" that drops one of them silently reintroduces
 // the exact failure mode this migration exists to fix.
 export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, index: LogIndex): Promise<RescueReport> {
-  const report: RescueReport = { rescued: [], skipped: [], alreadyCanonical: 0 };
+  const report: RescueReport = { rescued: [], skipped: [], alreadyCanonical: 0, degraded: [] };
 
   const entries = await readdir(logDir);
   const ndjsonFiles = entries.filter((f) => f.endsWith('.ndjson'));
@@ -100,7 +106,7 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
     const startedAtMs = (run.startedAt ?? run.createdAt).getTime();
     const expect: LogExpectation = { runId, provider: run.provider as AgentProvider, providerSessionId };
 
-    const { canonical } = translateLegacyClaudeLog({
+    const { canonical, stats } = translateLegacyClaudeLog({
       legacy: text,
       runId,
       providerSessionId,
@@ -141,6 +147,10 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
     });
 
     report.rescued.push(runId);
+    // Rescued ≠ lossless. Say so when it wasn't: a line the translator could not read came back as an
+    // `unsupported` placeholder, and the operator deserves to know which conversation is missing content
+    // rather than reading "rescued" and assuming it is whole.
+    if (stats.corrupt > 0) report.degraded.push({ runId, corrupt: stats.corrupt, linesIn: stats.linesIn });
   }
 
   return report;

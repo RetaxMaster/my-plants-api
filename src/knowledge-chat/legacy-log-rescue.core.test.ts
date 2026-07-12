@@ -4,12 +4,37 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rescueLegacyLogs } from './legacy-log-rescue.core.js';
 
-// A minimal PRE-1.0 log: raw Claude stream-json, no header line, and — critically — no user prompt and no
-// terminal. Those three facts live only in our DB, which is why the migration REQUIRES them as inputs.
+// A PRE-1.0 log: raw Claude stream-json, no header line, and — critically — no user prompt and no terminal.
+// Those three facts live only in our DB, which is why the migration REQUIRES them as inputs.
+//
+// This fixture is STRUCTURALLY FAITHFUL to the real thing, and that is the point. It was derived from a line
+// census of our four actual legacy logs, and it carries every shape they carry: the `stream_event` deltas
+// that are the BULK of a real file (150 of 167 lines in one of them), the `system/hook_*` and
+// `system/status` chatter, the benign `rate_limit_event`, and — the ones a hand-written fixture would never
+// think of — TWO generations of OUR OWN old sentinels (`claude_rt_exit`, `claude_rt_done`). The package
+// skips those as ours rather than counting them corrupt; a fixture without them would prove nothing about
+// the files we are actually going to convert.
+//
+// The CONTENT is synthetic on purpose: these repos are public, and a real transcript is not test data.
 const LEGACY = [
+  JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'SessionStart:startup' }),
+  JSON.stringify({ type: 'system', subtype: 'hook_response', hook_name: 'SessionStart:startup' }),
   JSON.stringify({ type: 'system', subtype: 'init', session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'system', subtype: 'status' }),
+  JSON.stringify({ type: 'rate_limit_event', status: 'allowed' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'message_start' }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 0 }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Sí, ' } }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'aquí estoy.' } }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'message_delta' }, session_id: 'stale-id-in-the-file' }),
+  JSON.stringify({ type: 'stream_event', event: { type: 'message_stop' }, session_id: 'stale-id-in-the-file' }),
   JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Sí, aquí estoy.' }] } }),
   JSON.stringify({ type: 'result', subtype: 'success' }),
+  // Ours, not content. The migration must skip these WITHOUT counting them as corrupt — counting them would
+  // inflate `stats.corrupt` on every real file and make an operator distrust a conversion that went fine.
+  JSON.stringify({ type: 'claude_rt_exit', exit_code: 0 }),
+  JSON.stringify({ type: 'claude_rt_done', status: 'succeeded' }),
 ].join('\n') + '\n';
 
 function fakePrisma(rows: unknown[]) {
@@ -37,6 +62,13 @@ describe('rescueLegacyLogs', () => {
     const report = await rescueLegacyLogs(prisma as never, dir, index);
 
     expect(report.rescued).toEqual(['run-1']);
+    // LOSSLESS. Nothing in a real legacy file may come back as an `unsupported` placeholder: not the
+    // `stream_event` deltas that carry the entire assistant reply, and not our own old `claude_rt_*`
+    // sentinels (the package must recognize those as ours and skip them — counting them corrupt would flag
+    // every real file we own and make an operator distrust a conversion that went perfectly).
+    expect(report.degraded).toEqual([]);
+    // And the assistant's words actually survived the trip — the whole reason the rescue exists.
+    expect(await readFile(join(dir, 'run-1.ndjson'), 'utf8')).toContain('aquí estoy.');
 
     // The converted file is canonical: it opens with the header and carries the USER PROMPT the legacy file
     // never had. Without that, every rescued turn shows the agent answering a blank question.

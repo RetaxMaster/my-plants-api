@@ -26,6 +26,11 @@ async function main() {
 
     console.log(`Rescued ${report.rescued.length} log(s): ${report.rescued.join(', ') || '(none)'}`);
     console.log(`Already canonical (untouched): ${report.alreadyCanonical}`);
+    // A rescued log is not necessarily a WHOLE log. Say which ones came back with holes, loudly, instead of
+    // letting "rescued" imply "intact".
+    for (const d of report.degraded) {
+      console.warn(`WARN: run ${d.runId} was rescued but is NOT lossless — ${d.corrupt} of ${d.linesIn} legacy lines could not be translated and are now 'unsupported' placeholders.`);
+    }
     for (const s of report.skipped) {
       console.warn(`WARN: skipped run ${s.runId} — ${s.reason}`);
     }
