@@ -77,3 +77,18 @@ describe('PlantsService name enrichment', () => {
     expect(p.speciesCommonNameEs).toBe('Lengua de suegra');
   });
 });
+
+describe('speciesGrowthHabit projection (spec §2.4)', () => {
+  it('projects null for a species with no curated growthHabit (legacy)', async () => {
+    const service = makeService([plantRow]); // record has no growthHabit
+    const out = await service.get('plant-1');
+    expect(out.speciesGrowthHabit).toBeNull();
+  });
+
+  it('projects the curated growthHabit key when present', async () => {
+    const habitRow = { ...plantRow, species: { ...plantRow.species, record: { ...record, growthHabit: 'trailing' } } };
+    const service = makeService([habitRow]);
+    const out = await service.get('plant-1');
+    expect(out.speciesGrowthHabit).toBe('trailing');
+  });
+});

@@ -37,6 +37,9 @@ export class PlantsService {
       speciesScientificName: species.scientificName,
       speciesCommonNameEs: primaryCommonName(record, 'es'),
       speciesCommonNameEn: primaryCommonName(record, 'en'),
+      // The species' growth habit (the key, or null) — display-only measurement guidance for the progress
+      // form's measure modal (spec §2.4). The web renders the text; the API only sends the key.
+      speciesGrowthHabit: record.growthHabit,
     };
   }
 
