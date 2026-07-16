@@ -228,6 +228,11 @@ model CareEvent {
   occurredOn DateTime      @map("occurred_on") @db.Date
   payload    Json?
   createdAt  DateTime      @default(now()) @map("created_at")
+  // Pairs a PROGRESS event to its progress entry — set ONLY on PROGRESS events (spec §3.3). @unique: exactly
+  // one paired event per entry. SetNull so deleting the entry never blocks; but the delete flow (Spec 2)
+  // removes the paired event conditionally BEFORE the entry, so a null-FK stray never lingers.
+  progressEntryId String?              @unique @map("progress_entry_id")
+  progressEntry   PlantProgressEntry?  @relation(fields: [progressEntryId], references: [id], onDelete: SetNull)
 
   @@index([plantId, task])
   @@map("care_events")
@@ -279,7 +284,8 @@ model PlantProgressEntry {
   tags         Json? // string[] of catalog keys (validated at the DTO/service, Phase 3)
   createdAt    DateTime       @default(now()) @map("created_at")
 
-  photos PlantProgressPhoto[]
+  photos    PlantProgressPhoto[]
+  careEvent  CareEvent?
 
   @@index([plantId, occurredOn])
   @@map("plant_progress_entries")
@@ -289,13 +295,45 @@ model PlantProgressPhoto {
   id             String             @id @default(cuid())
   entryId        String             @map("entry_id")
   entry          PlantProgressEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
-  imageUrl       String             @map("image_url")
-  imageObjectKey String             @map("image_object_key") // R2 key, persisted for later deletion
+  // NULLABLE now: a photo row exists BEFORE it has an R2 object. NON-NULL only when status = READY.
+  imageUrl       String?            @map("image_url")
+  imageObjectKey String?            @map("image_object_key") // R2 key, persisted for later deletion
+  // Per-photo processing state. Default READY for deploy-window compat (§3.1/§7): the OLD synchronous code
+  // inserts already-uploaded rows with no `status`, and READY makes those correctly terminal. New code
+  // ALWAYS writes status='PENDING' explicitly on the async path.
+  status         PhotoStatus        @default(READY)
+  inboxPath      String?            @map("inbox_path")        // absolute path to the staged raw bytes; null once consumed/expired
+  originalName   String?            @map("original_name")     // client filename, for the "IMG_6402.JPG failed" label
+  attempts       Int                @default(0)               // count of FAILED processing attempts (not claims)
+  nextAttemptAt  DateTime?          @map("next_attempt_at")   // earliest a retry may be re-claimed (native Date; NULL = eligible now)
+  claimToken     String?            @map("claim_token")       // set when a worker claims; cleared on terminal transition (§4.5)
+  claimedAt      DateTime?          @map("claimed_at")        // when the current claim started; stale claims are recoverable (§4.5)
+  failureKind    PhotoFailureKind?  @map("failure_kind")      // drives retryability
+  failureCode    String?            @map("failure_code")      // the failureCode union, e.g. 'image_too_large' — surfaced in the read shape
   sortOrder      Int                @default(0) @map("sort_order")
   createdAt      DateTime           @default(now()) @map("created_at")
+  // @default(now()) as well as @updatedAt: the DB-level CURRENT_TIMESTAMP(3) default lets a DEPLOY-WINDOW
+  // insert from the OLD synchronous client (which omits updated_at entirely) still succeed — mirroring the
+  // status='READY' default's deploy-window role (§3.1/§7). @updatedAt keeps the app bumping it on every
+  // write. Declaring the default here also keeps `prisma migrate diff` empty against 0020's DDL.
+  updatedAt      DateTime           @default(now()) @updatedAt @map("updated_at")
 
   @@index([entryId])
+  @@index([status, nextAttemptAt]) // the worker sweeps eligible rows by status
   @@map("plant_progress_photos")
+}
+
+enum PhotoStatus {
+  PENDING
+  PROCESSING
+  RECOVERING
+  READY
+  FAILED
+}
+
+enum PhotoFailureKind {
+  transient
+  permanent
 }
 
 model PlantTaskFrequency {

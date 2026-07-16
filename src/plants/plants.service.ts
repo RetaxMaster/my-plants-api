@@ -319,18 +319,26 @@ export class PlantsService {
       select: {
         id: true,
         occurredOn: true,
-        photos: { orderBy: { sortOrder: 'asc' }, select: { id: true, imageUrl: true, sortOrder: true } },
+        // READY-only gallery (spec §5.3): a still-processing/failed photo is not yet a gallery photo, and only
+        // a READY row has a non-null imageUrl. The null filter below narrows the type back to `string`.
+        photos: {
+          where: { status: 'READY', imageUrl: { not: null } },
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true, imageUrl: true, sortOrder: true },
+        },
       },
     });
 
     return entries.flatMap((entry) =>
-      entry.photos.map((photo) => ({
-        id: photo.id,
-        imageUrl: photo.imageUrl,
-        entryId: entry.id,
-        occurredOn: ymdFromUtcDate(entry.occurredOn),
-        sortOrder: photo.sortOrder,
-      })),
+      entry.photos
+        .filter((photo): photo is typeof photo & { imageUrl: string } => photo.imageUrl !== null)
+        .map((photo) => ({
+          id: photo.id,
+          imageUrl: photo.imageUrl,
+          entryId: entry.id,
+          occurredOn: ymdFromUtcDate(entry.occurredOn),
+          sortOrder: photo.sortOrder,
+        })),
     );
   }
 
