@@ -1,39 +1,28 @@
 import { BadRequestException } from '@nestjs/common';
+import {
+  PROGRESS_TAG_KEYS,
+  PROGRESS_TAG_GROUPS,
+  type ProgressTagGroup,
+} from '@retaxmaster/my-plants-species-schema/progress-tag-constants';
 
-export type ProgressTagGroup = 'positive' | 'negative';
+export type { ProgressTagGroup };
+// The wire contract is KEY-BASED (spec §1.2): the English label is GONE. The label is the web's i18n concern,
+// resolved from `key`; the catalog and the stored-tag round-trip carry only `{ key, group }`.
 export interface ProgressTag {
   key: string;
-  label: string;
   group: ProgressTagGroup;
 }
 
-// THE single source of truth for condition tags (spec §3.1). Keys + English labels (i18n deferred).
-// Exposed via GET /progress/catalog and consumed by the create-DTO validation AND the web — never
-// copied. Cheap to extend: add a row here and it is instantly valid + rendered.
-export const PROGRESS_TAGS: ProgressTag[] = [
-  // Positive / neutral
-  { key: 'NEW_LEAF', label: 'New leaf', group: 'positive' },
-  { key: 'FLOWERING', label: 'Flowering', group: 'positive' },
-  { key: 'SEEDLING', label: 'Seedling', group: 'positive' },
-  { key: 'LARGE_LEAVES', label: 'Large leaves', group: 'positive' },
-  { key: 'NEW_SHOOTS', label: 'New shoots', group: 'positive' },
-  { key: 'BLOOM_COMPLETED', label: 'Bloom completed', group: 'positive' },
-  // Negative
-  { key: 'FALLEN_LEAF', label: 'Fallen leaf', group: 'negative' },
-  { key: 'DROOPING', label: 'Drooping', group: 'negative' },
-  { key: 'DRY_LEAVES', label: 'Dry leaves', group: 'negative' },
-  { key: 'YELLOWING_LEAVES', label: 'Yellowing leaves', group: 'negative' },
-  { key: 'NOT_GROWING', label: 'Not growing', group: 'negative' },
-  { key: 'STUNTED_GROWTH', label: 'Stunted growth', group: 'negative' },
-  { key: 'LEANING', label: 'Leaning', group: 'negative' },
-  { key: 'PESTS', label: 'Pests', group: 'negative' },
-  { key: 'FUNGUS', label: 'Fungus', group: 'negative' },
-  { key: 'SPOTS', label: 'Spots', group: 'negative' },
-  { key: 'DISCOLORATION', label: 'Discoloration', group: 'negative' },
-];
+// THE single source of the tag vocabulary now lives in the shared package (spec §1.3). Build the catalog
+// from it so the API and the web can never disagree about which keys exist or their group. Add a tag by
+// editing the shared PROGRESS_TAG_KEYS + PROGRESS_TAG_GROUPS — never here.
+export const PROGRESS_TAGS: ProgressTag[] = PROGRESS_TAG_KEYS.map((key) => ({
+  key,
+  group: PROGRESS_TAG_GROUPS[key],
+}));
 
-const TAG_KEYS = new Set(PROGRESS_TAGS.map((t) => t.key));
-const TAG_BY_KEY = new Map(PROGRESS_TAGS.map((t) => [t.key, t]));
+const TAG_KEYS = new Set<string>(PROGRESS_TAG_KEYS);
+const TAG_BY_KEY = new Map<string, ProgressTag>(PROGRESS_TAGS.map((t) => [t.key, t]));
 
 // Parse the single JSON-encoded multipart `tags` field and validate every key against the catalog.
 // Fixing the wire format as one JSON string field (not repeated tags[]) removes multipart array
@@ -56,7 +45,7 @@ export function parseProgressTags(raw: string | undefined | null): string[] {
   return parsed as string[];
 }
 
-// Resolve stored keys back to catalog entries (label + group) for the entry-detail response.
+// Resolve stored keys back to catalog entries ({ key, group }) for the entry-detail response.
 // Silently drops any key no longer in the catalog (e.g. a removed tag) so old entries still read.
 export function resolveProgressTags(keys: string[]): ProgressTag[] {
   return keys.map((k) => TAG_BY_KEY.get(k)).filter((t): t is ProgressTag => t !== undefined);

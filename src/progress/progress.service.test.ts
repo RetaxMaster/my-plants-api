@@ -142,7 +142,7 @@ describe('ProgressService.getEntry', () => {
     const { svc, run } = setup();
     await run(actor('owner-1'), async () => {
       const e = await svc.getEntry('p1', 'entry-1');
-      expect(e.tags).toEqual([{ key: 'PESTS', label: 'Pests', group: 'negative' }]);
+      expect(e.tags).toEqual([{ key: 'PESTS', group: 'negative' }]);
       expect(e.photos[0].imageUrl).toBe('https://cdn/x.webp');
       expect(e.occurredOn).toBe('2026-07-02');
     });
