@@ -1,5 +1,5 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
@@ -8,7 +8,7 @@ import { PhotoInboxService } from '../storage/photo-inbox.service.js';
 import { PhotoWorkerService } from '../photo-worker/photo-worker.service.js';
 import { startOfTodayUtc, ymdToUtcDate, ymdFromUtcDate } from '../common/time/local-date.js';
 import { PROGRESS_TAGS, parseProgressTags, resolveProgressTags } from './progress-catalog.js';
-import type { CreateProgressDto } from './progress.dto.js';
+import type { CreateProgressDto, UpdateProgressDto } from './progress.dto.js';
 
 // The six species-scheduled care tasks. PROGRESS is intentionally excluded — it is the richer
 // 'progress' item, not an action note. Single source for the history action allowlist.
@@ -103,6 +103,158 @@ export class ProgressService {
     this.worker.enqueueTick();
 
     return this.getEntry(plantId, entryId);
+  }
+
+  async update(plantId: string, entryId: string, dto: UpdateProgressDto, files: Express.Multer.File[]) {
+    // Owner-scope through the plant (404 if not owned) — the exact ownerFilter() pattern create uses.
+    const plant = await this.prisma.plant.findFirst({
+      where: { id: plantId, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${plantId}`);
+
+    // Parse the edit-only inputs up front (bad shape → 400 BEFORE any staging or lock).
+    const removeIds = this.parseRemovePhotoIds(dto.removePhotoIds); // string[] (may be empty)
+    const tagsPresent = dto.tags !== undefined;
+    const tags = tagsPresent ? parseProgressTags(dto.tags) : null; // validates against the ONE catalog
+    const sizeCmPresent = dto.sizeCm !== undefined;
+    const sizeCm = sizeCmPresent ? (dto.sizeCm === '' ? null : Number(dto.sizeCm)) : undefined;
+    const occurredOnPresent = dto.occurredOn !== undefined;
+    const newOccurredOn = occurredOnPresent ? ymdToUtcDate(dto.occurredOn as string) : undefined;
+
+    // Stage new files to the inbox FIRST (atomic temp→rename; capacity guard → 503). All-or-none: if the
+    // transaction later throws (count invariant, a claimed removal), we compensate these staged files.
+    const staged = files.length
+      ? await this.inbox.stage(files.map((f) => ({ buffer: f.buffer, originalName: f.originalname })))
+      : [];
+
+    // Collected inside the transaction for post-commit cleanup (consistent with the rows actually deleted).
+    let removedObjects: { imageObjectKey: string | null; inboxPath: string | null }[] = [];
+    let recompute = false;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Lock the entry row so a second PATCH serialises behind us (count + sortOrder are read-modify-write).
+        const locked = await tx.$queryRaw<{ id: string; occurred_on: Date }[]>(
+          Prisma.sql`SELECT id, occurred_on FROM plant_progress_entries WHERE id = ${entryId} AND plant_id = ${plantId} FOR UPDATE`,
+        );
+        if (locked.length === 0) throw new NotFoundException(`Unknown progress entry: ${entryId}`);
+        const oldOccurredOn = locked[0].occurred_on;
+
+        // Read the entry's photos (already implicitly protected by the entry lock for our own writes).
+        const photos = await tx.plantProgressPhoto.findMany({
+          where: { entryId },
+          select: { id: true, status: true, claimToken: true, imageObjectKey: true, inboxPath: true, sortOrder: true },
+        });
+        const byId = new Map(photos.map((p) => [p.id, p]));
+
+        // Validate + apply removals. A claimed row (PROCESSING/RECOVERING → claim_token set) is un-removable:
+        // hard-deleting it would strand its in-flight R2 object (async spec §4.2). 409, mutate nothing.
+        const toRemove = [];
+        for (const rid of removeIds) {
+          const row = byId.get(rid);
+          if (!row) throw new BadRequestException({ code: 'invalid_photo', message: `Not a photo of this entry: ${rid}` });
+          if (row.claimToken !== null || row.status === 'PROCESSING' || row.status === 'RECOVERING') {
+            throw new ConflictException({ code: 'photo_processing', message: 'That photo is still processing — try again in a moment.' });
+          }
+          toRemove.push(row);
+        }
+
+        // ≤8 total invariant (existing − removed + added), under the lock. Else 400.
+        const remaining = photos.length - toRemove.length;
+        if (remaining + staged.length > 8) {
+          throw new BadRequestException({ code: 'too_many_photos', message: 'A progress entry can hold at most 8 photos.' });
+        }
+
+        // Guarded conditional delete per id: the claim_token IS NULL guard is defence-in-depth (the lock
+        // already prevents a mid-delete claim). Collect the object/inbox keys FIRST for post-commit cleanup.
+        for (const row of toRemove) {
+          const affected = await tx.$executeRaw(
+            Prisma.sql`DELETE FROM plant_progress_photos
+                       WHERE id = ${row.id} AND entry_id = ${entryId}
+                         AND status IN ('READY','FAILED','PENDING') AND claim_token IS NULL`,
+          );
+          if (affected !== 1) {
+            // Raced into a claim despite the lock (should be impossible) — refuse rather than orphan.
+            throw new ConflictException({ code: 'photo_processing', message: 'That photo is still processing — try again in a moment.' });
+          }
+        }
+        removedObjects = toRemove.map((r) => ({ imageObjectKey: r.imageObjectKey, inboxPath: r.inboxPath }));
+
+        // Create the new PENDING photo rows. sortOrder continues from the current max (removals leave gaps;
+        // the sequence stays monotonic for display — no renumbering).
+        const maxSort = photos.reduce((m, p) => Math.max(m, p.sortOrder), -1);
+        for (let i = 0; i < staged.length; i++) {
+          await tx.plantProgressPhoto.create({
+            data: {
+              entryId,
+              status: 'PENDING', // async path ALWAYS sets PENDING explicitly (default is READY)
+              inboxPath: staged[i].inboxPath,
+              originalName: staged[i].originalName,
+              sortOrder: maxSort + 1 + i,
+            },
+          });
+        }
+
+        // Field edits — only the PRESENT ones (clear-vs-absent). health/occurredOn cannot be cleared.
+        const data: Prisma.PlantProgressEntryUpdateInput = {};
+        if (dto.health !== undefined) data.health = dto.health;
+        if (occurredOnPresent) data.occurredOn = newOccurredOn;
+        if (dto.observations !== undefined) data.observations = dto.observations === '' ? null : dto.observations;
+        if (sizeCmPresent) data.sizeCm = sizeCm;
+        if (tagsPresent) data.tags = (tags as string[]).length ? (tags as unknown as Prisma.InputJsonValue) : (Prisma.JsonNull as unknown as Prisma.InputJsonValue);
+        if (Object.keys(data).length) await tx.plantProgressEntry.update({ where: { id: entryId }, data });
+
+        // Move the paired CareEvent when occurredOn changed (the event IS the "logged progress that day"
+        // signal — leaving it on the old date would lie). Conditional by progressEntryId, with the bounded
+        // null-FK date-fallback for a legacy event (async spec §3.3). Native Dates only — MariaDB date rule.
+        if (occurredOnPresent && newOccurredOn && newOccurredOn.getTime() !== oldOccurredOn.getTime()) {
+          const paired = await tx.$executeRaw(
+            Prisma.sql`UPDATE care_events SET occurred_on = ${newOccurredOn} WHERE progress_entry_id = ${entryId}`,
+          );
+          if (paired === 0) {
+            await tx.$executeRaw(
+              Prisma.sql`UPDATE care_events SET occurred_on = ${newOccurredOn}
+                         WHERE plant_id = ${plantId} AND task = 'PROGRESS' AND occurred_on = ${oldOccurredOn}
+                           AND progress_entry_id IS NULL LIMIT 1`,
+            );
+          }
+        }
+
+        // Recompute on any PATCH that changes occurredOn or sizeCm (both feed care surfaces). Skip otherwise.
+        recompute = occurredOnPresent || sizeCmPresent;
+      });
+    } catch (err) {
+      await this.inbox.deleteMany(staged.map((s) => s.inboxPath)); // compensate staged files on any throw
+      throw err;
+    }
+
+    // AFTER commit: best-effort R2 + inbox cleanup for the removed photos (never rolls back the removal).
+    await Promise.all(removedObjects.filter((o) => o.imageObjectKey).map((o) => this.images.delete(o.imageObjectKey!)));
+    await this.inbox.deleteMany(removedObjects.map((o) => o.inboxPath));
+
+    if (recompute) {
+      try {
+        await this.carePlan.recomputePlant(plantId);
+      } catch (err) {
+        this.logger.warn(`PATCH ${entryId}: recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
+      }
+    }
+    if (staged.length) this.worker.enqueueTick(); // process the newly-added photos within a moment
+
+    return this.getEntry(plantId, entryId);
+  }
+
+  // Parse + validate the JSON-encoded removePhotoIds (spec §2.1/§2.5). Absent/'' → []. Bad JSON or a
+  // non-string-array → 400. No second parser — one place, like parseProgressTags.
+  private parseRemovePhotoIds(raw: string | undefined): string[] {
+    if (raw === undefined || raw === '') return [];
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { throw new BadRequestException({ code: 'invalid_remove_photo_ids', message: 'removePhotoIds must be a JSON string array' }); }
+    if (!Array.isArray(parsed) || parsed.some((v) => typeof v !== 'string')) {
+      throw new BadRequestException({ code: 'invalid_remove_photo_ids', message: 'removePhotoIds must be a JSON string array' });
+    }
+    return parsed as string[];
   }
 
   async getEntry(plantId: string, entryId: string) {

@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Param, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { imageUploadMulterOptions } from '../storage/multipart.config.js';
-import { CreateProgressDto } from './progress.dto.js';
+import { CreateProgressDto, UpdateProgressDto } from './progress.dto.js';
 import { ProgressService } from './progress.service.js';
 
 @Controller()
@@ -28,6 +28,17 @@ export class ProgressController {
   @Get('plants/:id/progress/:entryId')
   entry(@Param('id') id: string, @Param('entryId') entryId: string) {
     return this.progress.getEntry(id, entryId);
+  }
+
+  @Patch('plants/:id/progress/:entryId')
+  @UseInterceptors(FilesInterceptor('photos', 8, imageUploadMulterOptions))
+  update(
+    @Param('id') id: string,
+    @Param('entryId') entryId: string,
+    @Body() dto: UpdateProgressDto,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    return this.progress.update(id, entryId, dto, files ?? []);
   }
 
   @Get('plants/:id/history')
