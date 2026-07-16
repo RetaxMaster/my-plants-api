@@ -8,7 +8,7 @@ import { PhotoInboxService } from '../storage/photo-inbox.service.js';
 import { PhotoWorkerService } from '../photo-worker/photo-worker.service.js';
 import { startOfTodayUtc, ymdToUtcDate, ymdFromUtcDate } from '../common/time/local-date.js';
 import { PROGRESS_TAGS, parseProgressTags, resolveProgressTags } from './progress-catalog.js';
-import type { CreateProgressDto, UpdateProgressDto } from './progress.dto.js';
+import { MAX_SIZE_CM, type CreateProgressDto, type UpdateProgressDto } from './progress.dto.js';
 
 // The six species-scheduled care tasks. PROGRESS is intentionally excluded — it is the richer
 // 'progress' item, not an action note. Single source for the history action allowlist.
@@ -254,7 +254,7 @@ export class ProgressService {
   private parseSizeCm(raw: string): number | null {
     if (raw === '') return null; // present-but-empty → clear
     const n = Number(raw);
-    if (!Number.isInteger(n) || n <= 0 || n > 2_147_483_647) {
+    if (!Number.isInteger(n) || n <= 0 || n > MAX_SIZE_CM) {
       throw new BadRequestException({ code: 'invalid_size', message: 'sizeCm must be a positive integer (cm) within range, or empty to clear.' });
     }
     return n;

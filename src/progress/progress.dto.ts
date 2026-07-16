@@ -1,6 +1,10 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsPositive, IsString, Matches, MaxLength } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsPositive, IsString, Matches, Max, MaxLength } from 'class-validator';
 import { ProgressHealth } from '@prisma/client';
+
+// The MariaDB signed INT ceiling — a sizeCm above this overflows the `size_cm` column (→ a raw DB 500),
+// so both create (@Max here) and edit (parseSizeCm range check) reject it up front. Single source.
+export const MAX_SIZE_CM = 2_147_483_647;
 
 export class CreateProgressDto {
   // Required (Planta's mandatory "¿Está sana tu planta?").
@@ -12,8 +16,8 @@ export class CreateProgressDto {
 
   @IsOptional() @IsString() @MaxLength(2000) observations?: string;
 
-  // Coerced from the multipart string; must be a positive integer (cm).
-  @IsOptional() @Type(() => Number) @IsInt() @IsPositive() sizeCm?: number;
+  // Coerced from the multipart string; must be a positive integer (cm) within the DB INT range.
+  @IsOptional() @Type(() => Number) @IsInt() @IsPositive() @Max(MAX_SIZE_CM) sizeCm?: number;
 
   // A SINGLE JSON-encoded field, e.g. tags='["YELLOWING_LEAVES","PESTS"]'. Parsed + validated against
   // the catalog in the service (parseProgressTags) — one authoritative catalog, no second list.
