@@ -29,16 +29,21 @@ describe('Care History (e2e)', () => {
   let userId: string;
   let plantId: string;
 
-  const uploadCalls: { keyPrefix: string }[] = [];
+  // Async photo pipeline: the request STAGES photos (PENDING); the in-process worker later reads the inbox and
+  // calls this fake uploader with an explicit per-claim `key` (no keyPrefix anymore). Capture `key` so tests
+  // can assert which objects the worker actually wrote.
+  const uploadCalls: { key?: string; keyPrefix?: string }[] = [];
   const deleteCalls: string[] = [];
   let uploadSeq = 0;
   const fakeImages = {
-    upload: async ({ keyPrefix }: { buffer: Buffer; keyPrefix: string }) => {
+    upload: async ({ key, keyPrefix }: { buffer: Buffer; key?: string; keyPrefix?: string }) => {
       uploadSeq += 1;
-      uploadCalls.push({ keyPrefix });
-      return { imageUrl: `https://cdn.test/${uploadSeq}.webp`, imageObjectKey: `${keyPrefix}/${uploadSeq}.webp` };
+      uploadCalls.push({ key, keyPrefix });
+      const objectKey = key ?? `${keyPrefix}/${uploadSeq}.webp`;
+      return { imageUrl: `https://cdn.test/${uploadSeq}.webp`, imageObjectKey: objectKey };
     },
     delete: async (key: string | null | undefined) => { if (key) deleteCalls.push(key); },
+    confirmDelete: async (key: string) => { deleteCalls.push(key); },
   };
 
   beforeAll(async () => {
@@ -126,7 +131,7 @@ describe('Care History (e2e)', () => {
       .expect(400);
   });
 
-  it('POST /plants/:id/progress (multipart, faked uploader) creates the entry + photos + DONE PROGRESS event, drops Progress off Today', async () => {
+  it('POST /plants/:id/progress (multipart) stages photos (PENDING) + DONE PROGRESS event, drops Progress off Today; the worker then makes them READY', async () => {
     const res = await auth(request(server()).post(`/plants/${plantId}/progress`))
       .field('health', 'GOOD')
       .field('observations', 'Looking healthy')
@@ -139,10 +144,27 @@ describe('Care History (e2e)', () => {
     expect(res.body.health).toBe('GOOD');
     expect(res.body.sizeCm).toBe(25);
     expect(res.body.photos).toHaveLength(2);
-    expect(res.body.photos[0].imageUrl).toMatch(/^https:\/\/cdn\.test\//);
+    // Async pipeline (spec §5): a just-created photo is PENDING with no imageUrl yet — the worker uploads it
+    // moments later. So the response shows processing, not a ready URL.
+    expect(res.body.photos.every((p: { status: string }) => p.status === 'PENDING' || p.status === 'PROCESSING')).toBe(true);
+    expect(res.body.photos[0].imageUrl).toBeNull();
+    expect(res.body.processingCount).toBe(2);
     expect(res.body.tags.map((t: { key: string }) => t.key).sort()).toEqual(['NEW_LEAF', 'PESTS']);
-    // Both photos uploaded under the plant's progress prefix, none deleted (happy path, no orphans).
-    expect(uploadCalls.filter((u) => u.keyPrefix === `plants/${plantId}/progress`).length).toBe(2);
+
+    // Poll the entry until the in-process worker has processed both photos to READY (fake uploader, real inbox).
+    const entryId = res.body.id as string;
+    let detail: { photos: { status: string; imageUrl: string | null }[]; processingCount: number } | undefined;
+    for (let i = 0; i < 100; i++) {
+      detail = (await auth(request(server()).get(`/plants/${plantId}/progress/${entryId}`)).expect(200)).body;
+      if (detail!.processingCount === 0) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(detail!.processingCount).toBe(0);
+    expect(detail!.photos).toHaveLength(2);
+    expect(detail!.photos.every((p) => p.status === 'READY')).toBe(true);
+    expect(detail!.photos[0].imageUrl).toMatch(/^https:\/\/cdn\.test\//);
+    // The worker wrote exactly two objects under the plant's progress prefix (unique-per-claim keys); none deleted.
+    expect(uploadCalls.filter((u) => u.key?.startsWith(`plants/${plantId}/progress/`)).length).toBe(2);
     expect(deleteCalls).toHaveLength(0);
 
     // A DONE PROGRESS CareEvent was recorded, and Progress re-anchored off Today (next Monday).
@@ -153,14 +175,16 @@ describe('Care History (e2e)', () => {
     expect(mine.some((t: { task: string }) => t.task === 'PROGRESS')).toBe(false);
   });
 
-  it('rejects an unknown tag with 400 and uploads nothing (no orphan objects)', async () => {
-    const before = uploadCalls.length;
+  it('rejects an unknown tag with 400 and persists nothing (validation precedes staging)', async () => {
+    // The async worker processes OTHER entries' staged photos in the background, so an upload-count proxy is
+    // no longer valid. Assert the real invariant: a bad tag creates NO new progress entry for this plant.
+    const before = await prisma.plantProgressEntry.count({ where: { plantId } });
     await auth(request(server()).post(`/plants/${plantId}/progress`))
       .field('health', 'GOOD')
       .field('tags', JSON.stringify(['NOT_A_REAL_TAG']))
       .attach('photos', Buffer.from('fake-c'), 'c.jpg')
       .expect(400);
-    expect(uploadCalls.length).toBe(before); // validation happens before any upload
+    expect(await prisma.plantProgressEntry.count({ where: { plantId } })).toBe(before); // nothing persisted
   });
 
   it('GET /plants/:id/progress/:entryId returns the entry detail (resolved tags + ordered photos)', async () => {
