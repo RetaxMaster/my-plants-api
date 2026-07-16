@@ -4,6 +4,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import { ImageUploadService } from '../storage/image-upload.service.js';
+import { PhotoInboxService } from '../storage/photo-inbox.service.js';
+import { PhotoWorkerService } from '../photo-worker/photo-worker.service.js';
 import { startOfTodayUtc, ymdToUtcDate, ymdFromUtcDate } from '../common/time/local-date.js';
 import { PROGRESS_TAGS, parseProgressTags, resolveProgressTags } from './progress-catalog.js';
 import type { CreateProgressDto } from './progress.dto.js';
@@ -25,6 +27,8 @@ export class ProgressService {
     private readonly owner: OwnerService,
     private readonly images: ImageUploadService,
     private readonly carePlan: CarePlanService,
+    private readonly inbox: PhotoInboxService,
+    private readonly worker: PhotoWorkerService,
   ) {}
 
   catalog() {
@@ -39,28 +43,22 @@ export class ProgressService {
     });
     if (!plant) throw new NotFoundException(`Unknown plant: ${plantId}`);
 
-    // Validate tags against the catalog BEFORE any upload (a bad tag must never leave orphan objects).
+    // Validate tags against the catalog BEFORE any staging (a bad tag must never leave orphan files).
     const tags = parseProgressTags(dto.tags);
 
     // occurredOn: explicit YYYY-MM-DD, else today in the plant's place-city timezone. Native UTC Date
     // (@db.Date), never an ISO string — MariaDB date rule.
     const occurredOn = dto.occurredOn ? ymdToUtcDate(dto.occurredOn) : startOfTodayUtc(plant.place.city.timezone);
 
-    // 2. Upload ALL photos first. On any failure, delete what we already uploaded and abort BEFORE
-    //    any DB write (no orphans, no rows). Upload errors are ImageUploadError → 422/503 via the
-    //    storage exception filter.
-    const uploaded: { imageUrl: string; imageObjectKey: string }[] = [];
-    try {
-      for (const f of files) {
-        uploaded.push(await this.images.upload({ buffer: f.buffer, keyPrefix: `plants/${plantId}/progress` }));
-      }
-    } catch (err) {
-      await this.cleanup(uploaded);
-      throw err;
-    }
+    // 1. Stage every file to the inbox FIRST (atomic temp→rename; capacity guard). All-or-none: a
+    //    photo_storage_busy (503) here rejects the whole request before anything is persisted (spec §3.2/§5.1).
+    //    No R2 upload in the request anymore — the async worker decodes/uploads each photo one at a time.
+    const staged = files.length
+      ? await this.inbox.stage(files.map((f) => ({ buffer: f.buffer, originalName: f.originalname })))
+      : [];
 
-    // 3. One transaction: entry + photo rows + the DONE PROGRESS CareEvent. All-or-nothing. On a
-    //    throw, the rows never existed → delete the uploaded objects (they reference nothing).
+    // 2. ONE transaction: entry + PENDING photo rows + the PROGRESS DONE CareEvent (carrying progressEntryId).
+    //    On a throw, delete the staged files (compensation) and rethrow.
     let entryId: string;
     try {
       entryId = await this.prisma.$transaction(async (tx) => {
@@ -72,30 +70,37 @@ export class ProgressService {
             observations: dto.observations ?? null,
             sizeCm: dto.sizeCm ?? null,
             tags: tags.length ? (tags as unknown as Prisma.InputJsonValue) : undefined,
-            photos: uploaded.length
-              ? { create: uploaded.map((u, i) => ({ imageUrl: u.imageUrl, imageObjectKey: u.imageObjectKey, sortOrder: i })) }
+            photos: staged.length
+              ? { create: staged.map((s, i) => ({
+                  status: 'PENDING' as const, // async path ALWAYS sets PENDING explicitly (default is READY)
+                  inboxPath: s.inboxPath,
+                  originalName: s.originalName,
+                  sortOrder: i,
+                })) }
               : undefined,
           },
           select: { id: true },
         });
-        await tx.careEvent.create({ data: { plantId, task: 'PROGRESS', type: 'DONE', occurredOn } });
+        await tx.careEvent.create({
+          data: { plantId, task: 'PROGRESS', type: 'DONE', occurredOn, progressEntryId: entry.id },
+        });
         return entry.id;
       });
     } catch (err) {
-      await this.cleanup(uploaded);
+      await this.inbox.deleteMany(staged.map((s) => s.inboxPath)); // compensate staged files on any throw
       throw err;
     }
 
-    // 4. AFTER commit: re-anchor Progress to next Monday. recomputePlant uses the root client and reads
-    //    COMMITTED state, so it must run outside the transaction (inside it would not see the event).
-    // 5. Its failure is NEVER a reason to delete photos — the entry is already durable. The daily 05:00
-    //    cron (and on-boot recompute) re-anchor Progress on the next run. (Lazy per-plant read won't:
-    //    it only recomputes when the due cache is empty, and the stale Monday row is still present.)
+    // 3. AFTER commit: re-anchor Progress. recomputePlant reads COMMITTED state, so it runs outside the txn.
+    //    Its failure is NEVER a reason to fail the request — the entry is durable; the daily cron re-anchors.
     try {
       await this.carePlan.recomputePlant(plantId);
     } catch (err) {
       this.logger.warn(`Progress saved (${entryId}) but recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
     }
+
+    // 4. Nudge the worker so the photos process within a moment (not on the next 30 s sweep).
+    this.worker.enqueueTick();
 
     return this.getEntry(plantId, entryId);
   }
@@ -177,10 +182,5 @@ export class ProgressService {
 
     // Strip the private sort keys; cap the merged length.
     return items.slice(0, HISTORY_CAP).map(({ _sortDate, _sortCreated, ...item }) => item);
-  }
-
-  // Best-effort R2 cleanup for a failed create (delete never throws into the caller — spec 1).
-  private async cleanup(uploaded: { imageObjectKey: string }[]): Promise<void> {
-    await Promise.all(uploaded.map((u) => this.images.delete(u.imageObjectKey)));
   }
 }

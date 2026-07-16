@@ -31,7 +31,7 @@ function setup() {
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
   const owner = new OwnerService(cls);
-  const svc = new ProgressService(prisma, owner, {} as any, {} as any);
+  const svc = new ProgressService(prisma, owner, {} as any, {} as any, {} as any, {} as any);
   const run = <T>(a: any, fn: () => Promise<T>) => cls.run(async () => { cls.set('actor', a); return fn(); });
   return { svc, run };
 }
