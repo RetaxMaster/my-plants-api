@@ -155,3 +155,81 @@ describe('PhotoWorkerService — failures', () => {
     expect(h.r2.has(ownKey)).toBe(false);
   });
 });
+
+describe('PhotoWorkerService — recovery & sweeps (spec §4.5 tests a/b/c)', () => {
+  it('(a) two workers, one PENDING photo → exactly one READY row + one referenced object', async () => {
+    const h = makeHarness();
+    const { id } = h.seedPending();
+    const workerB = h.spawnSecondWorker(); // second PhotoWorkerService over the SAME db/inbox/r2
+    await Promise.all([h.worker.drainOnce(), workerB.drainOnce()]);
+    expect(h.db.get(id)!.status).toBe('READY');
+    expect([...h.db.values()].filter((r) => r.status === 'READY')).toHaveLength(1);
+    expect(h.r2.size).toBe(1);
+    expect(h.r2.has(h.db.get(id)!.imageObjectKey!)).toBe(true); // the one object is the one READY references
+  });
+
+  it('(b) stale PROCESSING claim + a written object → RECOVERING (token kept) → confirm-delete stale key → PENDING → one READY + one object', async () => {
+    const h = makeHarness();
+    const oldToken = 'dead-worker-token';
+    const { id, plantId } = h.seedProcessing({ claimToken: oldToken, claimedAtAgeSeconds: 300 }); // > CLAIM_STALE_SECONDS
+    const staleKey = `plants/${plantId}/progress/${id}-${oldToken}.webp`;
+    h.r2.add(staleKey); // the dead worker had already PUT its object
+    await h.worker.drainOnce(); // recovery + reprocess in one drain
+    expect(h.r2.has(staleKey)).toBe(false); // stale key confirm-deleted before release
+    expect(h.db.get(id)!.status).toBe('READY');
+    expect(h.r2.size).toBe(1); // exactly one object — the freshly reprocessed one
+    expect(h.r2.has(h.db.get(id)!.imageObjectKey!)).toBe(true);
+  });
+
+  it('(c) R2 refuses the delete for the WHOLE first sweep → stays RECOVERING; a 2nd sweep with R2 back completes recovery', async () => {
+    const h = makeHarness();
+    const oldToken = 'dead-worker-token';
+    const { id, plantId } = h.seedProcessing({ claimToken: oldToken, claimedAtAgeSeconds: 300 });
+    const staleKey = `plants/${plantId}/progress/${id}-${oldToken}.webp`;
+    h.r2.add(staleKey);
+    // Fail ALL 3 attempts of the first sweep (NEW BLOCKER 1) so the row provably STAYS RECOVERING and only a
+    // SECOND sweep (R2 restored) completes recovery.
+    h.r2.failConfirmDeleteFor(3);
+    // --- Sweep 1: R2 down for all 3 attempts ---
+    await h.worker.recoverOnce();
+    expect(h.db.get(id)!.status).toBe('RECOVERING'); // did NOT advance to PENDING
+    expect(h.db.get(id)!.claimToken).toBe(oldToken); // token retained → key still reconstructible
+    expect(h.r2.has(staleKey)).toBe(true); // object still present — never released over it
+    // --- Sweep 2: R2 restored (the failFor budget is spent) ---
+    await h.worker.recoverOnce();
+    expect(h.r2.has(staleKey)).toBe(false); // stale key now confirm-deleted
+    expect(h.db.get(id)!.status).toBe('PENDING'); // recovery released it to re-process
+    expect(h.db.get(id)!.claimToken).toBeNull();
+    // --- Reprocess ---
+    await h.worker.drainOnce();
+    expect(h.db.get(id)!.status).toBe('READY');
+    expect(h.r2.size).toBe(1); // exactly one object — the freshly reprocessed one
+  });
+
+  it('a live claim younger than CLAIM_STALE_SECONDS is left alone', async () => {
+    const h = makeHarness();
+    const { id } = h.seedProcessing({ claimToken: 'live', claimedAtAgeSeconds: 30 }); // < 120
+    await h.worker.recoverOnce();
+    expect(h.db.get(id)!.status).toBe('PROCESSING'); // untouched
+    expect(h.db.get(id)!.claimToken).toBe('live');
+  });
+
+  it('inbox TTL sweep atomically claims the expiry, deletes bytes of a FAILED photo older than INBOX_RETRY_TTL_DAYS, nulls inboxPath', async () => {
+    const h = makeHarness();
+    const { id, inboxPath } = h.seedFailedTransient({ updatedAtAgeDays: 8, inboxPresent: true }); // > 7-day TTL
+    await h.worker.sweepOnce();
+    expect(h.db.get(id)!.inboxPath).toBeNull();
+    expect(h.inbox.has(inboxPath)).toBe(false);
+  });
+
+  it('TTL sweep does NOT delete bytes a concurrent retry adopted (guarded claim matches 0 rows — BLOCKER 5)', async () => {
+    const h = makeHarness();
+    const { id, inboxPath } = h.seedFailedTransient({ updatedAtAgeDays: 8, inboxPresent: true });
+    // Simulate the retry winning the row first: it flips FAILED→PENDING (as CRUD Task 3's retry does under
+    // FOR UPDATE) before the sweep's guarded UPDATE runs.
+    h.db.mutate(id, { status: 'PENDING', failureKind: null, failureCode: null });
+    await h.worker.sweepOnce();
+    expect(h.inbox.has(inboxPath)).toBe(true); // bytes preserved for the adopted retry
+    expect(h.db.get(id)!.inboxPath).toBe(inboxPath);
+  });
+});

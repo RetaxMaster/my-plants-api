@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit, type OnModuleDestroy } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -40,7 +40,7 @@ interface Claim {
 class InboxLostError extends Error {}
 
 @Injectable()
-export class PhotoWorkerService implements OnModuleInit {
+export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PhotoWorkerService.name);
   private draining = false; // in-process concurrency guard: one drain at a time (spec §4.1/§4.3)
   private stopping = false; // set on shutdown so we stop claiming new work (spec §4.5)
@@ -69,7 +69,8 @@ export class PhotoWorkerService implements OnModuleInit {
     if (this.draining || this.stopping) return;
     this.draining = true;
     try {
-      // Task 9 inserts: await this.recoverStaleClaims(); await this.sweepInboxTtlAndOrphans();
+      await this.recoverStaleClaims();
+      await this.sweepInboxTtlAndOrphans();
       for (;;) {
         if (this.stopping) break;
         const claimed = await this.claimNext();
@@ -230,5 +231,78 @@ export class PhotoWorkerService implements OnModuleInit {
       catch { /* unconfirmed (R2 down/5xx) — retry */ }
     }
     return false;
+  }
+
+  // Graceful shutdown (§4.5 / BLOCKER 6b): stop claiming NEW photos, then AWAIT the in-flight one so it
+  // finishes (or hits its own per-photo deadline) instead of being abandoned mid-upload. Bounded: the active
+  // process() already self-limits to PHOTO_PROCESS_TIMEOUT_MS; the outer race is a hard ceiling so a wedged
+  // promise can never hang pm2's reload forever. Setting stopping=true is NOT enough on its own.
+  async onModuleDestroy(): Promise<void> {
+    this.stopping = true;
+    const active = this.activeProcessing;
+    if (!active) return;
+    await Promise.race([
+      active.catch(() => undefined), // its own failure handling already ran; we only wait for settlement
+      new Promise<void>((resolve) => setTimeout(resolve, PHOTO_PROCESS_TIMEOUT_MS + 5_000)),
+    ]);
+  }
+
+  // Recover STALE claims — never a blanket PROCESSING→PENDING reset (a reload can briefly overlap two API
+  // instances; a blanket reset would double-upload the in-flight photo). Go THROUGH RECOVERING, retaining the
+  // token, so the stale key stays reconstructible until its delete is confirmed (§4.5). Also sweep RECOVERING
+  // rows unconditionally (they are already known-dead).
+  private async recoverStaleClaims(): Promise<void> {
+    const stale = await this.prisma.$queryRaw<{ id: string; claim_token: string; plant_id: string }[]>`
+      SELECT ph.id, ph.claim_token, e.plant_id
+      FROM plant_progress_photos ph JOIN plant_progress_entries e ON e.id = ph.entry_id
+      WHERE ph.claim_token IS NOT NULL AND (
+        (ph.status = 'PROCESSING' AND ph.claimed_at < DATE_SUB(NOW(), INTERVAL ${Prisma.raw(String(CLAIM_STALE_SECONDS))} SECOND))
+        OR ph.status = 'RECOVERING')`;
+    for (const row of stale) {
+      const oldToken = row.claim_token;
+      // 1. Take over into RECOVERING, RETAINING the token. 0 rows = the old worker already finished → leave it.
+      const took = await this.prisma.$executeRaw`
+        UPDATE plant_progress_photos SET status='RECOVERING', claimed_at=NOW()
+        WHERE id=${row.id} AND claim_token=${oldToken}
+          AND (status='PROCESSING' AND claimed_at < DATE_SUB(NOW(), INTERVAL ${Prisma.raw(String(CLAIM_STALE_SECONDS))} SECOND)
+               OR status='RECOVERING')`;
+      if (took !== 1) continue;
+      // 2. Confirm-delete the stale key, THEN release. Only on confirmed success/404 do we reset to PENDING.
+      const key = this.keyFor(row.plant_id, row.id, oldToken);
+      const gone = await this.compensateKey(key);
+      if (!gone) continue; // R2 still down → leave RECOVERING (token intact); a later sweep retries. DURABLE.
+      await this.prisma.$executeRaw`
+        UPDATE plant_progress_photos
+        SET status='PENDING', claim_token=NULL, claimed_at=NULL, next_attempt_at=NULL
+        WHERE id=${row.id} AND status='RECOVERING' AND claim_token=${oldToken}`;
+    }
+  }
+
+  // Inbox TTL sweep (§4.4): a FAILED photo whose bytes were never retried keeps its file forever. Delete the
+  // file for a FAILED row older than INBOX_RETRY_TTL_DAYS and NULL its inboxPath so `retryable` becomes false.
+  // Then the orphan-file sweep (§3.2) removes any .bin/.tmp with no matching row.
+  private async sweepInboxTtlAndOrphans(): Promise<void> {
+    const expired = await this.prisma.$queryRaw<{ id: string; inbox_path: string }[]>`
+      SELECT id, inbox_path FROM plant_progress_photos
+      WHERE status='FAILED' AND inbox_path IS NOT NULL
+        AND updated_at < DATE_SUB(NOW(), INTERVAL ${Prisma.raw(String(INBOX_RETRY_TTL_DAYS))} DAY)`;
+    for (const row of expired) {
+      // ATOMICALLY CLAIM the expiry BEFORE touching the file (BLOCKER 5): null inbox_path with a guarded
+      // UPDATE that still requires status='FAILED', the SAME inbox_path, and still-past-TTL. This serialises
+      // the sweep against the retry endpoint (CRUD Task 3), which locks the row FOR UPDATE, re-checks the
+      // file, and flips FAILED→PENDING. If a retry adopted the bytes first, this UPDATE matches 0 rows and we
+      // do NOT delete the file. ONLY the winner (claimed === 1) deletes — so a PENDING row can never be left
+      // pointing at bytes we just erased.
+      const claimed = await this.prisma.$executeRaw`
+        UPDATE plant_progress_photos SET inbox_path=NULL
+        WHERE id=${row.id} AND status='FAILED' AND inbox_path=${row.inbox_path}
+          AND updated_at < DATE_SUB(NOW(), INTERVAL ${Prisma.raw(String(INBOX_RETRY_TTL_DAYS))} DAY)`;
+      if (claimed === 1) await this.inbox.delete(row.inbox_path);
+    }
+    // Orphan sweep: pass the set of inboxPaths still referenced by a row so live files are never touched.
+    const known = await this.prisma.plantProgressPhoto.findMany({
+      where: { inboxPath: { not: null } }, select: { inboxPath: true },
+    });
+    await this.inbox.sweepOrphans({ knownPaths: new Set(known.map((k) => k.inboxPath!).filter((p): p is string => p !== null)) });
   }
 }
