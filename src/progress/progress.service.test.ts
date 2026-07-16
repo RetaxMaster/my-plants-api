@@ -388,7 +388,7 @@ function setupCrud(opts: {
       return s;
     }),
     deleteMany: vi.fn(async () => {}),
-    exists: vi.fn(async () => true),
+    exists: vi.fn(async (path: string | null | undefined) => !!path),
   } as any;
   const worker = { enqueueTick: vi.fn() } as any;
 
@@ -516,6 +516,83 @@ describe('ProgressService.update (PATCH)', () => {
     const { svc, run } = setupCrud();
     await run(actor('owner-2'), async () => {
       await expect(svc.update('p1', 'entry-1', {} as any, [])).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+});
+
+// A single FAILED photo (transient, inbox present) usable across the retryPhoto tests.
+function failedTransientPhoto(overrides: Partial<CrudPhoto> = {}): CrudPhoto {
+  return {
+    id: 'ph1', entryId: 'entry-1', status: 'FAILED', imageUrl: null, imageObjectKey: null,
+    inboxPath: '/inbox/ph1.bin', originalName: 'a.jpg', claimToken: null,
+    failureKind: 'transient', failureCode: 'upload_failed', sortOrder: 0, attempts: 3, nextAttemptAt: null,
+    ...overrides,
+  };
+}
+
+describe('ProgressService.retryPhoto', () => {
+  it('retryable (transient + inbox present) → PENDING, clears attempts/nextAttemptAt/failureKind/failureCode, nudges', async () => {
+    const { svc, run, photos, worker } = setupCrud({ photos: [failedTransientPhoto()] });
+    await run(actor('owner-1'), async () => {
+      await svc.retryPhoto('p1', 'entry-1', 'ph1');
+    });
+    const p = photos.get('ph1')!;
+    expect(p.status).toBe('PENDING');
+    expect(p.attempts).toBe(0);
+    expect(p.nextAttemptAt).toBeNull();
+    expect(p.failureKind).toBeNull();
+    expect(p.failureCode).toBeNull();
+    expect(p.claimToken).toBeNull();
+    expect(worker.enqueueTick).toHaveBeenCalledTimes(1);
+  });
+
+  it('permanent failure → 409 not_retryable, photo unchanged', async () => {
+    const permanent = failedTransientPhoto({ failureKind: 'permanent', failureCode: 'image_too_large' });
+    const { svc, run, photos, worker } = setupCrud({ photos: [permanent] });
+    await run(actor('owner-1'), async () => {
+      await expect(svc.retryPhoto('p1', 'entry-1', 'ph1')).rejects.toMatchObject({ response: { code: 'not_retryable' } });
+    });
+    expect(photos.get('ph1')).toEqual(permanent);
+    expect(worker.enqueueTick).not.toHaveBeenCalled();
+  });
+
+  it('transient but inbox reclaimed by TTL (exists → false) → 409 not_retryable', async () => {
+    const reclaimed = failedTransientPhoto({ inboxPath: null });
+    const { svc, run, photos, worker } = setupCrud({ photos: [reclaimed] });
+    await run(actor('owner-1'), async () => {
+      await expect(svc.retryPhoto('p1', 'entry-1', 'ph1')).rejects.toMatchObject({ response: { code: 'not_retryable' } });
+    });
+    expect(photos.get('ph1')).toEqual(reclaimed); // status stays FAILED
+    expect(worker.enqueueTick).not.toHaveBeenCalled();
+  });
+
+  it('already-PENDING photo → no-op (returns the entry, no UPDATE, no nudge)', async () => {
+    const pending: CrudPhoto = { id: 'ph1', entryId: 'entry-1', status: 'PENDING', imageUrl: null, imageObjectKey: null, inboxPath: '/inbox/ph1.bin', originalName: 'a.jpg', claimToken: null, failureKind: null, failureCode: null, sortOrder: 0, attempts: 0, nextAttemptAt: null };
+    const { svc, run, photos, worker } = setupCrud({ photos: [pending] });
+    await run(actor('owner-1'), async () => {
+      const out: any = await svc.retryPhoto('p1', 'entry-1', 'ph1');
+      expect(out.id).toBe('entry-1'); // returns the entry
+    });
+    expect(photos.get('ph1')).toEqual(pending); // unchanged
+    expect(worker.enqueueTick).not.toHaveBeenCalled();
+  });
+
+  it('READY / PROCESSING / RECOVERING → 409 not_retryable (only an already-PENDING row is the explicit no-op)', async () => {
+    for (const status of ['READY', 'PROCESSING', 'RECOVERING']) {
+      const row: CrudPhoto = { id: 'ph1', entryId: 'entry-1', status, imageUrl: status === 'READY' ? 'https://cdn/x.webp' : null, imageObjectKey: null, inboxPath: '/inbox/ph1.bin', originalName: 'a.jpg', claimToken: status === 'READY' ? null : 'tok', failureKind: null, failureCode: null, sortOrder: 0, attempts: 0, nextAttemptAt: null };
+      const { svc, run, photos, worker } = setupCrud({ photos: [row] });
+      await run(actor('owner-1'), async () => {
+        await expect(svc.retryPhoto('p1', 'entry-1', 'ph1')).rejects.toMatchObject({ response: { code: 'not_retryable' } });
+      });
+      expect(photos.get('ph1')).toEqual(row);
+      expect(worker.enqueueTick).not.toHaveBeenCalled();
+    }
+  });
+
+  it("can't retry a photo on another owner's entry → 404", async () => {
+    const { svc, run } = setupCrud({ photos: [failedTransientPhoto()] });
+    await run(actor('owner-2'), async () => {
+      await expect(svc.retryPhoto('p1', 'entry-1', 'ph1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

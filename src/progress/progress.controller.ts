@@ -41,6 +41,11 @@ export class ProgressController {
     return this.progress.update(id, entryId, dto, files ?? []);
   }
 
+  @Post('plants/:id/progress/:entryId/photos/:photoId/retry')
+  retryPhoto(@Param('id') id: string, @Param('entryId') entryId: string, @Param('photoId') photoId: string) {
+    return this.progress.retryPhoto(id, entryId, photoId);
+  }
+
   @Get('plants/:id/history')
   history(@Param('id') id: string) {
     return this.progress.history(id);

@@ -257,6 +257,53 @@ export class ProgressService {
     return parsed as string[];
   }
 
+  async retryPhoto(plantId: string, entryId: string, photoId: string) {
+    const plant = await this.prisma.plant.findFirst({
+      where: { id: plantId, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${plantId}`);
+
+    const flipped = await this.prisma.$transaction(async (tx) => {
+      // Lock the photo row (and confirm it belongs to this entry+plant) so the re-check → flip is atomic.
+      const rows = await tx.$queryRaw<{ id: string; status: string; failure_kind: string | null; inbox_path: string | null }[]>(
+        Prisma.sql`SELECT ph.id, ph.status, ph.failure_kind, ph.inbox_path
+                   FROM plant_progress_photos ph
+                   JOIN plant_progress_entries e ON e.id = ph.entry_id
+                   WHERE ph.id = ${photoId} AND ph.entry_id = ${entryId} AND e.plant_id = ${plantId}
+                   FOR UPDATE`,
+      );
+      if (rows.length === 0) throw new NotFoundException(`Unknown photo: ${photoId}`);
+      const p = rows[0];
+
+      if (p.status === 'PENDING') return false; // ONLY an already-PENDING row is the explicit no-op (idempotent)
+      // READY / PROCESSING / RECOVERING are not retryable: a client asking to retry them is a 409, not a
+      // silent success (NIT 1). Only a FAILED photo can be retried.
+      if (p.status !== 'FAILED') {
+        throw new ConflictException({ code: 'not_retryable', message: 'That photo can’t be retried.' });
+      }
+
+      // Only a TRANSIENT failure whose staged bytes are STILL present is retryable (async spec §5.2). The
+      // FOR UPDATE lock above makes this re-check atomic against the worker's inbox TTL sweep (async Task 9,
+      // BLOCKER 5): that sweep only nulls inbox_path via a guarded UPDATE requiring status='FAILED', so while
+      // we hold this row lock and then flip it to PENDING, the sweep cannot erase the bytes we just adopted.
+      if (p.failure_kind !== 'transient' || !(await this.inbox.exists(p.inbox_path))) {
+        throw new ConflictException({ code: 'not_retryable', message: 'That photo can’t be retried — remove it instead.' });
+      }
+
+      await tx.$executeRaw(
+        Prisma.sql`UPDATE plant_progress_photos
+                   SET status='PENDING', attempts=0, next_attempt_at=NULL,
+                       failure_kind=NULL, failure_code=NULL, claim_token=NULL
+                   WHERE id=${photoId} AND status='FAILED'`,
+      );
+      return true; // flipped FAILED→PENDING → nudge AFTER the commit
+    });
+
+    if (flipped) this.worker.enqueueTick();
+    return this.getEntry(plantId, entryId);
+  }
+
   async getEntry(plantId: string, entryId: string) {
     // Owner-scope through the plant, then load the entry constrained to that plant.
     const owned = await this.prisma.plant.findFirst({
