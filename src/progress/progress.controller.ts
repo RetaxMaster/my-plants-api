@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { imageUploadMulterOptions } from '../storage/multipart.config.js';
 import { CreateProgressDto, UpdateProgressDto } from './progress.dto.js';
@@ -44,6 +44,12 @@ export class ProgressController {
   @Post('plants/:id/progress/:entryId/photos/:photoId/retry')
   retryPhoto(@Param('id') id: string, @Param('entryId') entryId: string, @Param('photoId') photoId: string) {
     return this.progress.retryPhoto(id, entryId, photoId);
+  }
+
+  @Delete('plants/:id/progress/:entryId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(@Param('id') id: string, @Param('entryId') entryId: string) {
+    return this.progress.delete(id, entryId);
   }
 
   @Get('plants/:id/history')

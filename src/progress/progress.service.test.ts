@@ -596,3 +596,71 @@ describe('ProgressService.retryPhoto', () => {
     });
   });
 });
+
+describe('ProgressService.delete', () => {
+  it('deletes the paired CareEvent by progressEntryId FIRST, then the entry (photos cascade); recomputes', async () => {
+    const { svc, run, entries, careEvents, photos, recomputed } = setupCrud();
+    await run(actor('owner-1'), async () => {
+      await svc.delete('p1', 'entry-1');
+    });
+    expect(entries.has('entry-1')).toBe(false);
+    expect(careEvents.has('ce1')).toBe(false);
+    expect(photos.has('ph1')).toBe(false); // cascade
+    expect(photos.has('ph2')).toBe(false);
+    expect(recomputed).toEqual(['p1']);
+  });
+
+  it('a sibling same-date entry’s event survives (the pairing is by progressEntryId, not by date)', async () => {
+    const { svc, run, entries, careEvents } = setupCrud();
+    const sameDate = entries.get('entry-1')!.occurredOn;
+    entries.set('entry-2', { id: 'entry-2', plantId: 'p1', occurredOn: sameDate, health: 'GOOD', observations: null, sizeCm: null, tags: [], createdAt: new Date() });
+    careEvents.set('ce2', { id: 'ce2', plantId: 'p1', task: 'PROGRESS', type: 'DONE', occurredOn: sameDate, progressEntryId: 'entry-2' });
+    await run(actor('owner-1'), async () => {
+      await svc.delete('p1', 'entry-1');
+    });
+    expect(careEvents.has('ce1')).toBe(false); // entry-1's paired event deleted
+    expect(careEvents.has('ce2')).toBe(true); // sibling entry-2's PAIRED event survives — the fallback never fires
+  });
+
+  it('legacy null-FK event: the by-progressEntryId delete matches 0 → bounded date-fallback DELETE ... IS NULL LIMIT 1', async () => {
+    const baseOccurredOn = new Date(Date.UTC(2026, 6, 2));
+    const { svc, run, entries, careEvents } = setupCrud({
+      careEvents: [{ id: 'ce-legacy', plantId: 'p1', task: 'PROGRESS', type: 'DONE', occurredOn: baseOccurredOn, progressEntryId: null }],
+    });
+    await run(actor('owner-1'), async () => {
+      await svc.delete('p1', 'entry-1');
+    });
+    expect(entries.has('entry-1')).toBe(false);
+    expect(careEvents.has('ce-legacy')).toBe(false); // fallback matched (native Date, not toISOString) & deleted it
+  });
+
+  it('a delete while any photo is PROCESSING → 409 photo_processing, nothing mutated', async () => {
+    const processing: CrudPhoto = { id: 'ph1', entryId: 'entry-1', status: 'PROCESSING', imageUrl: null, imageObjectKey: null, inboxPath: '/inbox/ph1.bin', originalName: 'a.jpg', claimToken: 'tok', failureKind: null, failureCode: null, sortOrder: 0, attempts: 0, nextAttemptAt: null };
+    const { svc, run, entries, photos, careEvents } = setupCrud({ photos: [processing] });
+    const beforeEntry = { ...entries.get('entry-1')! };
+    const beforeCareEvents = new Map(careEvents);
+    await run(actor('owner-1'), async () => {
+      await expect(svc.delete('p1', 'entry-1')).rejects.toMatchObject({ response: { code: 'photo_processing' } });
+    });
+    expect(entries.get('entry-1')).toEqual(beforeEntry);
+    expect(photos.get('ph1')).toEqual(processing);
+    expect(careEvents).toEqual(beforeCareEvents);
+  });
+
+  it('collects R2 objects + inbox paths inside the txn and cleans them AFTER commit (best-effort)', async () => {
+    const { svc, run, images, inbox } = setupCrud(); // default photos: ph1/ph2, imageObjectKey k1/k2, inboxPath null
+    await run(actor('owner-1'), async () => {
+      await svc.delete('p1', 'entry-1');
+    });
+    expect(images.delete).toHaveBeenCalledWith('k1');
+    expect(images.delete).toHaveBeenCalledWith('k2');
+    expect(inbox.deleteMany).toHaveBeenCalledWith([null, null]);
+  });
+
+  it("can't delete another owner's entry → 404", async () => {
+    const { svc, run } = setupCrud();
+    await run(actor('owner-2'), async () => {
+      await expect(svc.delete('p1', 'entry-1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+});

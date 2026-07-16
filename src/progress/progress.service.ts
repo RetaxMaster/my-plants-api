@@ -304,6 +304,69 @@ export class ProgressService {
     return this.getEntry(plantId, entryId);
   }
 
+  async delete(plantId: string, entryId: string): Promise<void> {
+    const plant = await this.prisma.plant.findFirst({
+      where: { id: plantId, ...this.owner.ownerFilter() },
+      select: { id: true },
+    });
+    if (!plant) throw new NotFoundException(`Unknown plant: ${plantId}`);
+
+    let objects: { imageObjectKey: string | null; inboxPath: string | null }[] = [];
+
+    await this.prisma.$transaction(async (tx) => {
+      // Lock the entry AND all its photo rows. Locking the entry alone is NOT enough: the worker's claim is
+      // an UPDATE on a CHILD photo row, so only FOR UPDATE on the photo rows blocks a concurrent
+      // PENDING→PROCESSING claim (async spec §4.2 / spec §2.3).
+      const lockedEntry = await tx.$queryRaw<{ id: string; occurred_on: Date }[]>(
+        Prisma.sql`SELECT id, occurred_on FROM plant_progress_entries WHERE id = ${entryId} AND plant_id = ${plantId} FOR UPDATE`,
+      );
+      if (lockedEntry.length === 0) throw new NotFoundException(`Unknown progress entry: ${entryId}`);
+      const occurredOn = lockedEntry[0].occurred_on;
+
+      const photos = await tx.$queryRaw<{ id: string; status: string; claim_token: string | null; image_object_key: string | null; inbox_path: string | null }[]>(
+        Prisma.sql`SELECT id, status, claim_token, image_object_key, inbox_path
+                   FROM plant_progress_photos WHERE entry_id = ${entryId} FOR UPDATE`,
+      );
+
+      // Refuse if any photo is actively claimed (PROCESSING/RECOVERING retain claim_token). A worker trying
+      // to claim a PENDING photo of this entry now BLOCKS on the lock until we commit, after which its claim
+      // UPDATE matches 0 rows (the photo is gone) — so the cascade can't delete a row mid-upload.
+      if (photos.some((p) => p.claim_token !== null || p.status === 'PROCESSING' || p.status === 'RECOVERING')) {
+        throw new ConflictException({ code: 'photo_processing', message: 'A photo is still processing — try again in a moment.' });
+      }
+      objects = photos.map((p) => ({ imageObjectKey: p.image_object_key, inboxPath: p.inbox_path }));
+
+      // Delete the paired PROGRESS CareEvent by progressEntryId FIRST (onDelete:SetNull would otherwise null
+      // the FK the delete keys on). If it matched nothing (a legacy null-FK event), the bounded date-fallback:
+      // IS NULL + LIMIT 1 cannot touch a sibling entry's PAIRED event. Native Date — MariaDB date rule.
+      const paired = await tx.$executeRaw(
+        Prisma.sql`DELETE FROM care_events WHERE progress_entry_id = ${entryId}`,
+      );
+      if (paired === 0) {
+        await tx.$executeRaw(
+          Prisma.sql`DELETE FROM care_events
+                     WHERE plant_id = ${plantId} AND task = 'PROGRESS' AND occurred_on = ${occurredOn}
+                       AND progress_entry_id IS NULL LIMIT 1`,
+        );
+      }
+
+      // Delete the entry — photos cascade via the existing onDelete: Cascade.
+      await tx.plantProgressEntry.delete({ where: { id: entryId } });
+    });
+
+    // AFTER commit: best-effort R2 + inbox cleanup (never blocks the delete — the row is the source of truth).
+    await Promise.all(objects.filter((o) => o.imageObjectKey).map((o) => this.images.delete(o.imageObjectKey!)));
+    await this.inbox.deleteMany(objects.map((o) => o.inboxPath));
+
+    // Recompute: the deleted entry may have been the latest → Progress re-anchors; the removed care-event may
+    // re-open the Progress task. Outside-txn + logged-failure pattern.
+    try {
+      await this.carePlan.recomputePlant(plantId);
+    } catch (err) {
+      this.logger.warn(`DELETE ${entryId}: recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
+    }
+  }
+
   async getEntry(plantId: string, entryId: string) {
     // Owner-scope through the plant, then load the entry constrained to that plant.
     const owned = await this.prisma.plant.findFirst({
