@@ -9,3 +9,5 @@ prisma/.env
 storage/knowledge-chat/
 # The engine's durable run index (runId → logPath) — runtime state, never committed.
 storage/knowledge-chat-state/
+# Staged raw upload bytes for the async photo worker (PHOTO_INBOX_DIR default) — runtime, never committed.
+storage/photo-inbox/
