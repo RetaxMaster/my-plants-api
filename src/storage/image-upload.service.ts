@@ -33,7 +33,14 @@ export interface StoredImage {
 // still assigns to this interface structurally, and the test fake satisfies it cleanly without any
 // casting. `send` accepts a command instance (PutObjectCommand/DeleteObjectCommand) and resolves.
 export interface S3Sender {
-  send(command: unknown): Promise<unknown>;
+  send(command: unknown, options?: unknown): Promise<unknown>;
+}
+
+// sharp's .timeout() rejects with a message mentioning "timeout"; an aborted op rejects AbortError. A
+// cancelled/timed-out pipeline is a TRANSIENT environment failure, NOT a corrupt image (BLOCKER 6a).
+function isProcessingTimeout(err: unknown): boolean {
+  const e = err as { name?: string; message?: string };
+  return e?.name === 'AbortError' || /timeout/i.test(e?.message ?? '');
 }
 
 // Test seam: unit tests pass a fake S3 client (capturing PutObject/DeleteObject inputs) plus the
@@ -97,7 +104,7 @@ export class ImageUploadService {
   // `key` = the FULL object key to write verbatim (the async photo worker passes a unique-per-claim key,
   // spec §4.2). `keyPrefix` = the legacy random-UUID path still used by cover/blog/media uploads. Exactly
   // one is provided.
-  async upload(input: { buffer: Buffer; key?: string; keyPrefix?: string }): Promise<StoredImage> {
+  async upload(input: { buffer: Buffer; key?: string; keyPrefix?: string; signal?: AbortSignal }): Promise<StoredImage> {
     this.assertConfigured();
 
     // Header-only read with the pixel limit OFF so an over-limit image reports its dimensions instead of
@@ -105,7 +112,10 @@ export class ImageUploadService {
     let meta: SharpMetadata;
     try {
       meta = await sharp(input.buffer, { limitInputPixels: false }).metadata();
-    } catch {
+    } catch (err) {
+      if (input.signal?.aborted || isProcessingTimeout(err)) {
+        throw new ImageUploadError('image_processing_timeout', 'image processing timed out / was cancelled');
+      }
       throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode');
     }
     if (meta.width && meta.height && meta.width * meta.height > MAX_IMAGE_PIXELS) {
@@ -130,6 +140,7 @@ export class ImageUploadService {
       // resolveWithObject gives us the encoded buffer AND its info (byte size + post-resize
       // dimensions) from the SAME pass — no second decode, no forked resize.
       const { data, info } = await sharp(input.buffer, { limitInputPixels: MAX_IMAGE_PIXELS })
+        .timeout({ seconds: 55 }) // bound a pathological decode (under the worker's 60 s per-photo deadline)
         .rotate() // bake EXIF orientation into pixels; EXIF is then dropped on re-encode
         .resize({ width: MAX_BOX, height: MAX_BOX, fit: 'inside', withoutEnlargement: true })
         .webp({ quality: WEBP_QUALITY })
@@ -138,7 +149,13 @@ export class ImageUploadService {
       outWidth = info.width;
       outHeight = info.height;
       outSize = info.size;
-    } catch {
+    } catch (err) {
+      // A cancelled/aborted or sharp-timed-out pipeline is NOT a corrupt image — it is a transient environment
+      // failure. Surface a distinguishable code so the worker RETRIES rather than marking the photo permanently
+      // image_decode_failed (BLOCKER 6a).
+      if (input.signal?.aborted || isProcessingTimeout(err)) {
+        throw new ImageUploadError('image_processing_timeout', 'image processing timed out / was cancelled');
+      }
       throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode/re-encode');
     }
 
@@ -154,6 +171,9 @@ export class ImageUploadService {
         // Safe long-lived cache: the key never changes for a given object.
         CacheControl: 'public, max-age=31536000, immutable',
       }),
+      // Pass the abort signal so the async photo worker's per-photo deadline REALLY cancels the HTTP upload
+      // (spec §4.3), not just stops awaiting it.
+      input.signal ? { abortSignal: input.signal } : undefined,
     );
 
     const base = this.env.R2_PUBLIC_BASE_URL.replace(/\/$/, '');

@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { PhotoInboxService } from '../storage/photo-inbox.service.js';
 import { ImageUploadService } from '../storage/image-upload.service.js';
+import { ImageUploadError } from '../storage/image-upload.errors.js';
 import { PHOTO_FAILURE_CODES } from '@retaxmaster/my-plants-species-schema/photo-contract-constants';
 
 // Tuned constants (spec §2 ledger / §4). A command never invents one of these — they are the ledger's values.
@@ -115,25 +117,36 @@ export class PhotoWorkerService implements OnModuleInit {
     return `plants/${plantId}/progress/${photoId}-${token}.webp`;
   }
 
+  // Drive the upload with an AbortController + timer (spec §4.3): the claim is never cleared/rescheduled until
+  // the underlying op has actually SETTLED (the timeout cancels the decode/PUT, it does not race ahead of it).
   private async process(claim: Claim): Promise<void> {
-    // inbox_lost handling + timeout + failure classification are added in Task 8. Happy path only here:
     const key = this.keyFor(claim.plantId, claim.id, claim.claimToken);
-    let stored: { imageUrl: string; imageObjectKey: string };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PHOTO_PROCESS_TIMEOUT_MS);
+    let stored: { imageUrl: string; imageObjectKey: string } | null = null;
+    let failure: unknown = null;
     try {
-      const buffer = await this.readInbox(claim.inboxPath); // Task 8 adds the missing/unreadable → inbox_lost path
-      stored = await this.images.upload({ buffer, key });
+      const buffer = await this.readInbox(claim.inboxPath);
+      stored = await this.images.upload({ buffer, key, signal: controller.signal });
     } catch (err) {
-      await this.recordFailure(claim, key, err); // Task 8
+      failure = err; // includes an abort → treated as transient below
+    } finally {
+      clearTimeout(timer);
+    }
+    if (stored) {
+      const affected = await this.commitReady(claim, stored);
+      if (affected === 1) {
+        await this.inbox.delete(claim.inboxPath); // best-effort, after commit
+      } else {
+        // Lost the claim (row re-claimed / taken into RECOVERING) → our own unique-per-claim object is
+        // unreferenced. Genuine best-effort orphan cleanup: NOTHING gates on its success (no token release,
+        // no state change here), so delete() is correct. The token-release-gating compensations —
+        // recordFailure's compensateKey and §4.5 recovery — are the ones that MUST use confirmDelete (BLOCKER 4).
+        await this.images.delete(stored.imageObjectKey);
+      }
       return;
     }
-    // Commit guarded by id + token + status='PROCESSING' (§4.2 step 3). If 0 rows, recovery/re-claim moved
-    // the row → the object we PUT is unreferenced → delete OUR OWN key (never a winner's) as compensation.
-    const affected = await this.commitReady(claim, stored);
-    if (affected === 1) {
-      await this.inbox.delete(claim.inboxPath); // best-effort, after commit
-    } else {
-      await this.images.delete(stored.imageObjectKey); // compensate our own key only
-    }
+    await this.recordFailure(claim, key, failure);
   }
 
   // The guarded READY commit (extracted so both process() and the tests reference it by name).
@@ -145,13 +158,77 @@ export class PhotoWorkerService implements OnModuleInit {
       WHERE id = ${claim.id} AND claim_token = ${claim.claimToken} AND status = 'PROCESSING'`;
   }
 
-  // Read the staged bytes THROUGH the inbox service (never raw fs — keeps it injectable/fakeable). Task 8
-  // maps a missing/unreadable file to the inbox_lost terminal state.
+  // Read the staged bytes THROUGH the inbox service (never raw fs — keeps it injectable/fakeable). A missing
+  // or unreadable file becomes the permanent inbox_lost terminal state (spec §3.2).
   private async readInbox(inboxPath: string | null): Promise<Buffer> {
-    if (!inboxPath) throw new InboxLostError('no inbox path');
-    return this.inbox.read(inboxPath);
+    if (!inboxPath) throw new InboxLostError('no inbox path'); // missing staged bytes → permanent inbox_lost
+    try {
+      return await this.inbox.read(inboxPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EACCES') throw new InboxLostError('staged bytes missing or unreadable');
+      throw err;
+    }
   }
 
-  // Placeholder — fully implemented in Task 8.
-  private async recordFailure(_claim: Claim, _key: string, err: unknown): Promise<void> { throw err; }
+  // permanent = the image/bytes themselves are the problem (retry re-runs the identical failure). Everything
+  // else (R2/network/abort/unexpected throw) is transient. `image_processing_timeout` is deliberately NOT in
+  // PERMANENT_CODES, so a cancelled/timed-out pipeline classifies transient (BLOCKER 6a).
+  private isPermanent(err: unknown): { code: string } | null {
+    if (err instanceof InboxLostError) return { code: INBOX_LOST_CODE }; // §3.2 missing/unreadable bytes
+    if (err instanceof ImageUploadError && PERMANENT_CODES.has(err.code)) return { code: err.code };
+    return null;
+  }
+
+  private async recordFailure(claim: Claim, key: string, err: unknown): Promise<void> {
+    const perm = this.isPermanent(err);
+    if (perm) {
+      // Permanent: give up immediately. Delete the (useless) inbox bytes. Guarded write. For a permanent image
+      // fault we never PUT an object (upload threw before the PUT), so nothing to compensate in R2.
+      const affected = await this.prisma.$executeRaw`
+        UPDATE plant_progress_photos
+        SET status='FAILED', failure_kind='permanent', failure_code=${perm.code},
+            inbox_path=NULL, claim_token=NULL
+        WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
+      if (affected === 1) await this.inbox.delete(claim.inboxPath);
+      return;
+    }
+    // Transient: compensate our OWN key BEFORE releasing the token (a failed PUT may have created the object).
+    const compensated = await this.compensateKey(key); // bounded retries → true on success or confirmed 404
+    if (!compensated) {
+      // Cannot confirm the object is gone → LEAVE the row PROCESSING with its token intact so §4.5 recovery
+      // (which reconstructs the key from the retained token) becomes the durable backstop. Do NOT reschedule.
+      this.logger.warn(`transient compensation unconfirmed for ${claim.id}; leaving PROCESSING for recovery`);
+      return;
+    }
+    const nextAttempts = claim.attempts + 1;
+    if (nextAttempts >= MAX_TRANSIENT_ATTEMPTS) {
+      await this.prisma.$executeRaw`
+        UPDATE plant_progress_photos
+        SET status='FAILED', failure_kind='transient', failure_code=${UPLOAD_FAILED_CODE},
+            attempts=${nextAttempts}, claim_token=NULL
+        WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
+      return; // inbox bytes KEPT for a manual retry (bounded by the TTL sweep, Task 9)
+    }
+    // Not the final attempt: reschedule with real time-based backoff on the DB clock (never toISOString).
+    const backoff = BACKOFF_SECONDS[nextAttempts - 1] ?? BACKOFF_SECONDS[BACKOFF_SECONDS.length - 1];
+    await this.prisma.$executeRaw`
+      UPDATE plant_progress_photos
+      SET status='PENDING', attempts=${nextAttempts}, claim_token=NULL,
+          next_attempt_at = DATE_ADD(NOW(), INTERVAL ${Prisma.raw(String(backoff))} SECOND)
+      WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
+  }
+
+  // Durable delete of our own key with bounded retries; true ONLY on a confirmed R2 delete OR a confirmed 404
+  // (already gone). Uses confirmDelete() — which PROPAGATES an unconfirmed outcome — NOT delete() (which
+  // swallows every error and would always report success even while the object still lives, breaking the
+  // RECOVERING contract, BLOCKER 4). A false return means "not confirmed gone" → the caller leaves the row
+  // claimed for §4.5 recovery rather than releasing it.
+  private async compensateKey(key: string): Promise<boolean> {
+    for (let i = 0; i < 3; i++) {
+      try { await this.images.confirmDelete(key); return true; } // resolves only on confirmed delete / 404
+      catch { /* unconfirmed (R2 down/5xx) — retry */ }
+    }
+    return false;
+  }
 }

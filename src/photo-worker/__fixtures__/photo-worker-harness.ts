@@ -102,8 +102,9 @@ export function makeHarness() {
       if (uploadHang) {
         // Resolve/reject only when the AbortSignal fires (models a hung PUT the per-photo timeout cancels).
         await new Promise<void>((_resolve, reject) => {
-          if (input.signal?.aborted) return reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-          input.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+          const abort = () => { settledBeforeRecord = true; reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); };
+          if (input.signal?.aborted) return abort();
+          input.signal?.addEventListener('abort', abort);
         });
       }
       if (uploadError) { settledBeforeRecord = true; throw uploadError; }
