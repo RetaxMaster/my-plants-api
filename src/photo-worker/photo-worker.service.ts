@@ -98,7 +98,7 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
     for (const c of candidates) {
       const affected = await this.prisma.$executeRaw`
         UPDATE plant_progress_photos
-        SET status = 'PROCESSING', claim_token = ${token}, claimed_at = NOW()
+        SET status = 'PROCESSING', claim_token = ${token}, claimed_at = NOW(), updated_at = NOW(3)
         WHERE id = ${c.id} AND status = 'PENDING'
           AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())`;
       if (affected === 1) {
@@ -155,7 +155,7 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.$executeRaw`
       UPDATE plant_progress_photos
       SET status = 'READY', image_url = ${stored.imageUrl}, image_object_key = ${stored.imageObjectKey},
-          inbox_path = NULL, claim_token = NULL
+          inbox_path = NULL, claim_token = NULL, updated_at = NOW(3)
       WHERE id = ${claim.id} AND claim_token = ${claim.claimToken} AND status = 'PROCESSING'`;
   }
 
@@ -189,7 +189,7 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
       const affected = await this.prisma.$executeRaw`
         UPDATE plant_progress_photos
         SET status='FAILED', failure_kind='permanent', failure_code=${perm.code},
-            inbox_path=NULL, claim_token=NULL
+            inbox_path=NULL, claim_token=NULL, updated_at=NOW(3)
         WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
       if (affected === 1) await this.inbox.delete(claim.inboxPath);
       return;
@@ -207,15 +207,15 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.$executeRaw`
         UPDATE plant_progress_photos
         SET status='FAILED', failure_kind='transient', failure_code=${UPLOAD_FAILED_CODE},
-            attempts=${nextAttempts}, claim_token=NULL
+            attempts=${nextAttempts}, claim_token=NULL, updated_at=NOW(3)
         WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
-      return; // inbox bytes KEPT for a manual retry (bounded by the TTL sweep, Task 9)
+      return; // inbox bytes KEPT for a manual retry; the TTL (Task 9) now measures from THIS updated_at (last failure)
     }
     // Not the final attempt: reschedule with real time-based backoff on the DB clock (never toISOString).
     const backoff = BACKOFF_SECONDS[nextAttempts - 1] ?? BACKOFF_SECONDS[BACKOFF_SECONDS.length - 1];
     await this.prisma.$executeRaw`
       UPDATE plant_progress_photos
-      SET status='PENDING', attempts=${nextAttempts}, claim_token=NULL,
+      SET status='PENDING', attempts=${nextAttempts}, claim_token=NULL, updated_at=NOW(3),
           next_attempt_at = DATE_ADD(NOW(), INTERVAL ${Prisma.raw(String(backoff))} SECOND)
       WHERE id=${claim.id} AND claim_token=${claim.claimToken} AND status='PROCESSING'`;
   }
@@ -262,7 +262,7 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
       const oldToken = row.claim_token;
       // 1. Take over into RECOVERING, RETAINING the token. 0 rows = the old worker already finished → leave it.
       const took = await this.prisma.$executeRaw`
-        UPDATE plant_progress_photos SET status='RECOVERING', claimed_at=NOW()
+        UPDATE plant_progress_photos SET status='RECOVERING', claimed_at=NOW(), updated_at=NOW(3)
         WHERE id=${row.id} AND claim_token=${oldToken}
           AND (status='PROCESSING' AND claimed_at < DATE_SUB(NOW(), INTERVAL ${Prisma.raw(String(CLAIM_STALE_SECONDS))} SECOND)
                OR status='RECOVERING')`;
@@ -273,7 +273,7 @@ export class PhotoWorkerService implements OnModuleInit, OnModuleDestroy {
       if (!gone) continue; // R2 still down → leave RECOVERING (token intact); a later sweep retries. DURABLE.
       await this.prisma.$executeRaw`
         UPDATE plant_progress_photos
-        SET status='PENDING', claim_token=NULL, claimed_at=NULL, next_attempt_at=NULL
+        SET status='PENDING', claim_token=NULL, claimed_at=NULL, next_attempt_at=NULL, updated_at=NOW(3)
         WHERE id=${row.id} AND status='RECOVERING' AND claim_token=${oldToken}`;
     }
   }

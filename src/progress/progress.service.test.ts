@@ -448,6 +448,18 @@ describe('ProgressService.update (PATCH)', () => {
     expect(b.recomputed).toEqual([]);
   });
 
+  it('rejects a non-positive or INT-overflowing sizeCm with 400 (parity with create); present-empty clears', async () => {
+    const z = setupCrud();
+    await z.run(actor('owner-1'), async () => {
+      await expect(z.svc.update('p1', 'entry-1', { sizeCm: '0' } as any, [])).rejects.toMatchObject({ response: { code: 'invalid_size' } });
+      await expect(z.svc.update('p1', 'entry-1', { sizeCm: '9999999999' } as any, [])).rejects.toMatchObject({ response: { code: 'invalid_size' } });
+    });
+    // present-empty '' clears to null
+    const c = setupCrud();
+    await c.run(actor('owner-1'), async () => { await c.svc.update('p1', 'entry-1', { sizeCm: '' } as any, []); });
+    expect(c.entries.get('entry-1')?.sizeCm).toBeNull();
+  });
+
   it('adds new photos: stages them, creates PENDING rows with sortOrder = max(existing)+1+i, nudges', async () => {
     const { svc, run, photos, inbox, worker } = setupCrud();
     await run(actor('owner-1'), async () => {

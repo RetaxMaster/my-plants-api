@@ -42,6 +42,7 @@ export class ProgressController {
   }
 
   @Post('plants/:id/progress/:entryId/photos/:photoId/retry')
+  @HttpCode(HttpStatus.OK) // returns the refreshed entry, not a created resource — 200, not Nest's default 201
   retryPhoto(@Param('id') id: string, @Param('entryId') entryId: string, @Param('photoId') photoId: string) {
     return this.progress.retryPhoto(id, entryId, photoId);
   }

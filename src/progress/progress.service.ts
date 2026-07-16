@@ -118,7 +118,7 @@ export class ProgressService {
     const tagsPresent = dto.tags !== undefined;
     const tags = tagsPresent ? parseProgressTags(dto.tags) : null; // validates against the ONE catalog
     const sizeCmPresent = dto.sizeCm !== undefined;
-    const sizeCm = sizeCmPresent ? (dto.sizeCm === '' ? null : Number(dto.sizeCm)) : undefined;
+    const sizeCm = sizeCmPresent ? this.parseSizeCm(dto.sizeCm as string) : undefined;
     const occurredOnPresent = dto.occurredOn !== undefined;
     const newOccurredOn = occurredOnPresent ? ymdToUtcDate(dto.occurredOn as string) : undefined;
 
@@ -247,6 +247,19 @@ export class ProgressService {
 
   // Parse + validate the JSON-encoded removePhotoIds (spec §2.1/§2.5). Absent/'' → []. Bad JSON or a
   // non-string-array → 400. No second parser — one place, like parseProgressTags.
+  // Parse the edit sizeCm (spec §2.5 / CreateProgressDto parity): present-empty '' clears (null); otherwise it
+  // must be a POSITIVE integer within the DB INT range — matching create's @IsInt @IsPositive. The DTO regex
+  // only guarantees digits, so '0' and an INT-overflowing value still reach here; both are a 400, never a 0
+  // that would poison the height-based physical calcs or a MySQL out-of-range write (→ 500).
+  private parseSizeCm(raw: string): number | null {
+    if (raw === '') return null; // present-but-empty → clear
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0 || n > 2_147_483_647) {
+      throw new BadRequestException({ code: 'invalid_size', message: 'sizeCm must be a positive integer (cm) within range, or empty to clear.' });
+    }
+    return n;
+  }
+
   private parseRemovePhotoIds(raw: string | undefined): string[] {
     if (raw === undefined || raw === '') return [];
     let parsed: unknown;
@@ -294,7 +307,7 @@ export class ProgressService {
       await tx.$executeRaw(
         Prisma.sql`UPDATE plant_progress_photos
                    SET status='PENDING', attempts=0, next_attempt_at=NULL,
-                       failure_kind=NULL, failure_code=NULL, claim_token=NULL
+                       failure_kind=NULL, failure_code=NULL, claim_token=NULL, updated_at=NOW(3)
                    WHERE id=${photoId} AND status='FAILED'`,
       );
       return true; // flipped FAILED→PENDING → nudge AFTER the commit
