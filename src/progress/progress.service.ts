@@ -120,6 +120,20 @@ export class ProgressService {
     if (!entry) throw new NotFoundException(`Unknown progress entry: ${entryId}`);
 
     const tagKeys = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
+    // Per-photo state (spec §5.2). imageUrl is exposed ONLY when READY (never the empty string; null otherwise).
+    // retryable = a transient FAILED photo whose staged bytes still exist (the TTL sweep nulls inboxPath, at
+    // which point retry is no longer possible). RECOVERING is rendered identically to PROCESSING by the web.
+    const photos = entry.photos.map((p) => ({
+      id: p.id,
+      status: p.status,
+      imageUrl: p.status === 'READY' ? p.imageUrl : null,
+      sortOrder: p.sortOrder,
+      originalName: p.originalName,
+      failureKind: p.status === 'FAILED' ? p.failureKind : null,
+      failureCode: p.status === 'FAILED' ? p.failureCode : null,
+      retryable: p.status === 'FAILED' && p.failureKind === 'transient' && p.inboxPath != null,
+    }));
+    const NON_TERMINAL = new Set(['PENDING', 'PROCESSING', 'RECOVERING']);
     return {
       id: entry.id,
       plantId: entry.plantId,
@@ -128,7 +142,9 @@ export class ProgressService {
       observations: entry.observations,
       sizeCm: entry.sizeCm,
       tags: resolveProgressTags(tagKeys),
-      photos: entry.photos.map((p) => ({ id: p.id, imageUrl: p.imageUrl, sortOrder: p.sortOrder })),
+      photos,
+      processingCount: photos.filter((p) => NON_TERMINAL.has(p.status)).length,
+      failedCount: photos.filter((p) => p.status === 'FAILED').length,
     };
   }
 
@@ -147,7 +163,8 @@ export class ProgressService {
         where: { plantId },
         orderBy: [{ occurredOn: 'desc' }, { createdAt: 'desc' }],
         take: HISTORY_CAP,
-        include: { _count: { select: { photos: true } } },
+        // photoCount counts READY photos only (spec §5.2). Load statuses to count precisely.
+        include: { photos: { select: { status: true } } },
       }),
       this.prisma.careEvent.findMany({
         where: { plantId, type: 'DONE', task: { in: [...CARE_ACTION_TASKS] } },
@@ -162,7 +179,8 @@ export class ProgressService {
         entryId: e.id,
         occurredOn: ymdFromUtcDate(e.occurredOn),
         health: e.health,
-        photoCount: e._count.photos,
+        photoCount: e.photos.filter((p) => p.status === 'READY').length,
+        processingCount: e.photos.filter((p) => p.status !== 'READY' && p.status !== 'FAILED').length,
         tagCount: Array.isArray(e.tags) ? e.tags.length : 0,
         _sortDate: e.occurredOn.getTime(),
         _sortCreated: e.createdAt.getTime(),

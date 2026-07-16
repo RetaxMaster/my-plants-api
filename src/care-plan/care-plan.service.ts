@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, type OnModuleInit } from '@nestjs/common';
 import { parseSpeciesRecord, type SpeciesRecord } from '@retaxmaster/my-plants-species-schema';
 import type { Task } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -23,8 +23,35 @@ import { EARLY_WATER_REASONS, WATER_POSTPONE_REASONS } from '@retaxmaster/my-pla
 const SCHEDULED_TASKS: Task[] = ['WATER', 'FERTILIZE', 'REPOT', 'ROTATE', 'CLEAN_LEAVES'];
 
 @Injectable()
-export class CarePlanService {
+export class CarePlanService implements OnModuleInit {
   constructor(private readonly prisma: PrismaService, private readonly weather: WeatherService) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.reconcileProgressEventPairing();
+  }
+
+  // Idempotent boot reconciliation (spec §3.3). No-op when there are no null-FK PROGRESS events (so it is
+  // safe every boot). Pairs each null-FK PROGRESS event to its (plantId, occurredOn) entry respecting the
+  // @unique, and prunes any genuinely unpairable one — the SINGLE runtime mechanism (not a script or the cron).
+  async reconcileProgressEventPairing(): Promise<void> {
+    const orphans = await this.prisma.careEvent.findMany({
+      where: { task: 'PROGRESS', progressEntryId: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (orphans.length === 0) return; // idempotent fast path
+    for (const ev of orphans) {
+      const entry = await this.prisma.plantProgressEntry.findFirst({
+        where: { plantId: ev.plantId, occurredOn: ev.occurredOn, careEvent: null }, // an unpaired entry
+        orderBy: { createdAt: 'asc' },
+      });
+      if (entry) {
+        await this.prisma.careEvent.update({ where: { id: ev.id }, data: { progressEntryId: entry.id } });
+      } else {
+        // Unpairable stray keeps re-anchoring a gone entry's progress → delete it (spec §3.3 invariant).
+        await this.prisma.careEvent.delete({ where: { id: ev.id } });
+      }
+    }
+  }
 
   async recomputePlant(plantId: string): Promise<void> {
     const plant = await this.prisma.plant.findUniqueOrThrow({

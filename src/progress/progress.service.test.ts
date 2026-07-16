@@ -9,7 +9,7 @@ import { ImageUploadError } from '../storage/image-upload.errors.js';
 const actor = (ownerId: string, role: 'USER' | 'ADMIN' = 'USER') => ({ userId: 'u', username: 'n', ownerId, role, jti: 'j', exp: 9e9 });
 const file = (name: string) => ({ buffer: Buffer.from(name), originalname: name }) as Express.Multer.File;
 
-function setup(opts: { txnThrows?: boolean; capacityThrows?: boolean } = {}) {
+function setup(opts: { txnThrows?: boolean; capacityThrows?: boolean; entryPhotos?: any[] } = {}) {
   const created: any[] = [];
   const events: any[] = [];
   const recomputed: string[] = [];
@@ -39,7 +39,7 @@ function setup(opts: { txnThrows?: boolean; capacityThrows?: boolean } = {}) {
     },
     plantProgressEntry: {
       findFirst: async ({ where }: any) =>
-        where.id === 'entry-1' ? { id: 'entry-1', plantId: 'p1', occurredOn: new Date(Date.UTC(2026, 6, 2)), health: 'GOOD', observations: 'ok', sizeCm: 12, tags: ['PESTS'], photos: [{ id: 'ph1', status: 'READY', imageUrl: 'https://cdn/x.webp', imageObjectKey: 'k', inboxPath: null, originalName: null, failureKind: null, failureCode: null, sortOrder: 0 }] } : null,
+        where.id === 'entry-1' ? { id: 'entry-1', plantId: 'p1', occurredOn: new Date(Date.UTC(2026, 6, 2)), health: 'GOOD', observations: 'ok', sizeCm: 12, tags: ['PESTS'], photos: opts.entryPhotos ?? [{ id: 'ph1', status: 'READY', imageUrl: 'https://cdn/x.webp', imageObjectKey: 'k', inboxPath: null, originalName: null, failureKind: null, failureCode: null, sortOrder: 0 }] } : null,
     },
     $transaction: async (fn: any) => fn(tx),
   } as any;
@@ -145,6 +145,40 @@ describe('ProgressService.getEntry', () => {
       expect(e.tags).toEqual([{ key: 'PESTS', label: 'Pests', group: 'negative' }]);
       expect(e.photos[0].imageUrl).toBe('https://cdn/x.webp');
       expect(e.occurredOn).toBe('2026-07-02');
+    });
+  });
+});
+
+describe('ProgressService.getEntry — per-photo read shape (spec §5.2)', () => {
+  const mixed = [
+    { id: 'r', status: 'READY', imageUrl: 'https://cdn/r.webp', imageObjectKey: 'k', inboxPath: null, originalName: 'r.jpg', failureKind: null, failureCode: null, sortOrder: 0 },
+    { id: 'p', status: 'PROCESSING', imageUrl: null, imageObjectKey: null, inboxPath: '/inbox/p.bin', originalName: 'p.jpg', failureKind: null, failureCode: null, sortOrder: 1 },
+    { id: 'ft', status: 'FAILED', imageUrl: null, imageObjectKey: null, inboxPath: '/inbox/ft.bin', originalName: 'ft.jpg', failureKind: 'transient', failureCode: 'upload_failed', sortOrder: 2 },
+    { id: 'fp', status: 'FAILED', imageUrl: null, imageObjectKey: null, inboxPath: null, originalName: 'fp.jpg', failureKind: 'permanent', failureCode: 'image_too_large', sortOrder: 3 },
+  ];
+
+  it('projects imageUrl null for non-READY, failureCode, retryable, and rollups', async () => {
+    const { svc, run } = setup({ entryPhotos: mixed });
+    await run(actor('owner-1'), async () => {
+      const e: any = await svc.getEntry('p1', 'entry-1');
+      const byId = Object.fromEntries(e.photos.map((p: any) => [p.id, p]));
+      expect(byId.r.imageUrl).toBe('https://cdn/r.webp');
+      expect(byId.p.imageUrl).toBeNull();   // non-READY → null, never the empty string
+      expect(byId.ft.imageUrl).toBeNull();
+      expect(byId.ft.retryable).toBe(true);  // transient + inbox present
+      expect(byId.fp.retryable).toBe(false); // permanent
+      expect(byId.ft.failureCode).toBe('upload_failed');
+      expect(e.processingCount).toBe(1);     // PROCESSING/PENDING/RECOVERING
+      expect(e.failedCount).toBe(2);
+    });
+  });
+
+  it('retryable is FALSE for a transient FAILED photo whose inboxPath was reclaimed (bytes gone)', async () => {
+    const reclaimed = [{ id: 'x', status: 'FAILED', imageUrl: null, imageObjectKey: null, inboxPath: null, originalName: 'x.jpg', failureKind: 'transient', failureCode: 'upload_failed', sortOrder: 0 }];
+    const { svc, run } = setup({ entryPhotos: reclaimed });
+    await run(actor('owner-1'), async () => {
+      const e: any = await svc.getEntry('p1', 'entry-1');
+      expect(e.photos[0].retryable).toBe(false); // transient but inboxPath null → not retryable
     });
   });
 });

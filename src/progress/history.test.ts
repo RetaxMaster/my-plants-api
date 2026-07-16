@@ -9,8 +9,10 @@ const actor = (ownerId: string) => ({ userId: 'u', username: 'n', ownerId, role:
 
 function setup() {
   const entries = [
-    { id: 'e1', plantId: 'p1', occurredOn: d('2026-07-01'), health: 'GOOD', tags: ['PESTS'], createdAt: d('2026-07-01'), _count: { photos: 2 } },
-    { id: 'e2', plantId: 'p1', occurredOn: d('2026-06-15'), health: 'EXCELLENT', tags: null, createdAt: d('2026-06-15'), _count: { photos: 0 } },
+    // photoCount now counts READY photos only (spec §5.2): e1 has 2 READY + 1 PROCESSING → photoCount 2,
+    // processingCount 1. e2 has no photos.
+    { id: 'e1', plantId: 'p1', occurredOn: d('2026-07-01'), health: 'GOOD', tags: ['PESTS'], createdAt: d('2026-07-01'), photos: [{ status: 'READY' }, { status: 'READY' }, { status: 'PROCESSING' }] },
+    { id: 'e2', plantId: 'p1', occurredOn: d('2026-06-15'), health: 'EXCELLENT', tags: null, createdAt: d('2026-06-15'), photos: [] },
   ];
   // Only DONE actions in the six-task allowlist should surface. The service query is expected to
   // already filter (type DONE + task in allowlist); the fake honors that filter so the test asserts it.
