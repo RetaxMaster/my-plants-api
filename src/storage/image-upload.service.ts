@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { MAX_IMAGE_PIXELS } from '@retaxmaster/my-plants-species-schema/image-limits';
 import type { Env } from '../config/env.js';
 import { ImageUploadError } from './image-upload.errors.js';
 
@@ -8,7 +9,8 @@ import { ImageUploadError } from './image-upload.errors.js';
 // are trivial to tune. Deviations from the rizzytos reference: 1600 box (was 1280×720), q82 (was 80).
 const MAX_BOX = 1600; // max width AND height; images scale to fit INSIDE 1600×1600.
 const WEBP_QUALITY = 82;
-const MAX_INPUT_PIXELS = 24_000_000; // 24 MP decompression-bomb guard.
+// The decompression-bomb ceiling now lives ONCE in the shared package (MAX_IMAGE_PIXELS = 64 MP), imported
+// so the API's real guard and the web's courtesy check can never disagree (spec §2.1).
 const ALLOWED_FORMATS = ['jpeg', 'png', 'webp'] as const;
 
 // `sharp` uses `export = sharp` with `Metadata` living in the `sharp` namespace. Under the API's
@@ -91,15 +93,23 @@ export class ImageUploadService {
   }
 
   // Validate-by-decode → compress → PutObject → return url + key.
-  async upload(input: { buffer: Buffer; keyPrefix: string }): Promise<StoredImage> {
+  //
+  // `key` = the FULL object key to write verbatim (the async photo worker passes a unique-per-claim key,
+  // spec §4.2). `keyPrefix` = the legacy random-UUID path still used by cover/blog/media uploads. Exactly
+  // one is provided.
+  async upload(input: { buffer: Buffer; key?: string; keyPrefix?: string }): Promise<StoredImage> {
     this.assertConfigured();
 
-    // Never trust the client-declared MIME: decode and inspect the REAL metadata.
+    // Header-only read with the pixel limit OFF so an over-limit image reports its dimensions instead of
+    // throwing here. The explicit compare below is the guard — stable, never dependent on a libvips string.
     let meta: SharpMetadata;
     try {
-      meta = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
+      meta = await sharp(input.buffer, { limitInputPixels: false }).metadata();
     } catch {
       throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode');
+    }
+    if (meta.width && meta.height && meta.width * meta.height > MAX_IMAGE_PIXELS) {
+      throw new ImageUploadError('image_too_large', `image exceeds ${MAX_IMAGE_PIXELS} pixels`);
     }
     if (!meta.format || !ALLOWED_FORMATS.includes(meta.format as (typeof ALLOWED_FORMATS)[number])) {
       throw new ImageUploadError('image_unsupported_format', `unsupported image format: ${meta.format ?? 'unknown'}`);
@@ -119,7 +129,7 @@ export class ImageUploadService {
     try {
       // resolveWithObject gives us the encoded buffer AND its info (byte size + post-resize
       // dimensions) from the SAME pass — no second decode, no forked resize.
-      const { data, info } = await sharp(input.buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+      const { data, info } = await sharp(input.buffer, { limitInputPixels: MAX_IMAGE_PIXELS })
         .rotate() // bake EXIF orientation into pixels; EXIF is then dropped on re-encode
         .resize({ width: MAX_BOX, height: MAX_BOX, fit: 'inside', withoutEnlargement: true })
         .webp({ quality: WEBP_QUALITY })
@@ -132,8 +142,9 @@ export class ImageUploadService {
       throw new ImageUploadError('image_decode_failed', 'invalid image: could not decode/re-encode');
     }
 
-    // Immutable random-UUID key (NOT content-addressed). Always `.webp`.
-    const key = `${input.keyPrefix.replace(/\/$/, '')}/${randomUUID()}.webp`;
+    // The explicit `key` verbatim when given (the async worker's unique-per-claim key, spec §4.2), else the
+    // legacy random-UUID under `keyPrefix` (cover/blog/media). Always `.webp`.
+    const key = input.key ?? `${(input.keyPrefix ?? '').replace(/\/$/, '')}/${randomUUID()}.webp`;
     await this.client().send(
       new this.PutObjectCommand({
         Bucket: this.env.R2_BUCKET,
@@ -163,6 +174,25 @@ export class ImageUploadService {
       await this.client().send(new this.DeleteObjectCommand({ Bucket: this.env.R2_BUCKET, Key: objectKey }));
     } catch {
       // swallow: best-effort cleanup
+    }
+  }
+
+  // Durable delete used by the async photo worker + §4.5 recovery: unlike delete() (best-effort, swallows
+  // all errors), confirmDelete() PROPAGATES failure. It resolves ONLY on a confirmed R2 delete or a
+  // confirmed 404/absent object (NoSuchKey / httpStatusCode 404 / NotFound — already gone counts as gone).
+  // Any other error (network, 5xx, SDK throw) REJECTS, so a caller can never mistake "R2 unreachable" for
+  // "deleted" (BLOCKER 4). The worker keeps a row PROCESSING / RECOVERING when this rejects, so the key
+  // stays reconstructible until its object is truly gone (spec §4.4 / §4.5).
+  async confirmDelete(objectKey: string): Promise<void> {
+    this.assertConfigured();
+    try {
+      await this.client().send(new this.DeleteObjectCommand({ Bucket: this.env.R2_BUCKET, Key: objectKey }));
+    } catch (err) {
+      const status = err as { $metadata?: { httpStatusCode?: number }; name?: string };
+      if (status.$metadata?.httpStatusCode === 404 || status.name === 'NoSuchKey' || status.name === 'NotFound') {
+        return; // confirmed absent — the object is gone, which is exactly the success we want
+      }
+      throw err; // unconfirmed — let the caller keep the row claimed for a later retry
     }
   }
 }

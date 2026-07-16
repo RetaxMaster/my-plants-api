@@ -5,6 +5,10 @@ export type ImageErrorCode =
   | 'image_decode_failed'
   | 'image_unsupported_format'
   | 'image_animated'
+  | 'image_too_large' // NEW (spec §2.2): decodes fine but exceeds MAX_IMAGE_PIXELS → 422
+  | 'photo_storage_busy' // NEW (spec §3.2): inbox capacity floor hit / ENOSPC — try again later → 503
+  | 'image_processing_timeout' // NEW (spec §4.3 / BLOCKER 6a): decode/PUT cancelled or timed out — a
+  //   TRANSIENT signal (NOT in the worker's PERMANENT_CODES) → 503; never persisted as a failureCode
   | 'r2_not_configured';
 
 // Thrown by ImageUploadService. Carries a stable `code` that the filter maps to a fixed HTTP status,
@@ -22,6 +26,9 @@ export const STATUS_BY_CODE: Record<ImageErrorCode, HttpStatus> = {
   image_decode_failed: HttpStatus.UNPROCESSABLE_ENTITY, // 422 — well-formed HTTP, unacceptable image
   image_unsupported_format: HttpStatus.UNPROCESSABLE_ENTITY, // 422
   image_animated: HttpStatus.UNPROCESSABLE_ENTITY, // 422
+  image_too_large: HttpStatus.UNPROCESSABLE_ENTITY, // 422 — decodes but exceeds the pixel ceiling
+  photo_storage_busy: HttpStatus.SERVICE_UNAVAILABLE, // 503 — inbox capacity floor / ENOSPC, retry later
+  image_processing_timeout: HttpStatus.SERVICE_UNAVAILABLE, // 503 — cancelled/timed-out pipeline (transient)
   r2_not_configured: HttpStatus.SERVICE_UNAVAILABLE, // 503 — feature not configured on this host
 };
 

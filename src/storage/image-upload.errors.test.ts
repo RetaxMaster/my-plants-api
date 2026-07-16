@@ -31,4 +31,9 @@ describe('ImageUploadExceptionFilter', () => {
     expect(STATUS_BY_CODE.image_animated).toBe(422);
     expect(STATUS_BY_CODE.r2_not_configured).toBe(503);
   });
+
+  it('maps image_too_large → 422 and photo_storage_busy → 503 (Task 5)', () => {
+    expect(STATUS_BY_CODE.image_too_large).toBe(HttpStatus.UNPROCESSABLE_ENTITY);
+    expect(STATUS_BY_CODE.photo_storage_busy).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+  });
 });

@@ -1,9 +1,33 @@
 import { describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
+import { deflateSync } from 'node:zlib';
 import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { ImageUploadService } from './image-upload.service.js';
 import { ImageUploadError } from './image-upload.errors.js';
 import type { Env } from '../config/env.js';
+
+// Build a real but TINY PNG that DECLARES width×height in its IHDR (no pixel data). sharp.metadata()
+// reads the header and reports those dimensions without decoding — so the dimension guard can be tested
+// at 72 MP without ever allocating a 72 MP buffer. (A crafted header cannot be re-encoded, so it only
+// exercises the metadata dimension check, which fires BEFORE the decode pipeline.)
+function crc32(buf: Buffer): number {
+  let c = ~0;
+  for (let i = 0; i < buf.length; i++) { c ^= buf[i]; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1)); }
+  return (~c) >>> 0;
+}
+function pngChunk(type: string, data: Buffer): Buffer {
+  const t = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data])));
+  return Buffer.concat([len, t, data, crc]);
+}
+function pngHeaderOf(width: number, height: number): Buffer {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit, RGB
+  return Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(Buffer.alloc(0))), pngChunk('IEND', Buffer.alloc(0))]);
+}
 
 // A fully-configured R2 env (fake values). Trailing slash on the public base URL is intentional —
 // it exercises the trailing-slash trim in the returned URL.
@@ -94,6 +118,71 @@ describe('ImageUploadService.upload', () => {
       .rejects.toBeInstanceOf(ImageUploadError);
     await expect(svc.upload({ buffer: Buffer.from('anything'), keyPrefix: 'x' }))
       .rejects.toMatchObject({ code: 'r2_not_configured' });
+  });
+});
+
+describe('ImageUploadService.upload — raised pixel guard + explicit key (Task 5)', () => {
+  it('raises image_too_large by DIMENSION COMPARE, not by matching a libvips string', async () => {
+    // metadata() reports 9000×8000 = 72 MP from the crafted header (read with limitInputPixels:false so it
+    // never throws first); the explicit width*height > MAX_IMAGE_PIXELS (64 MP) compare is what rejects.
+    const { s3 } = fakeS3();
+    const svc = new ImageUploadService(CONFIGURED, { s3, PutObjectCommand, DeleteObjectCommand });
+    await expect(svc.upload({ buffer: pngHeaderOf(9000, 8000), key: 'plants/p1/progress/ph1-tok1.webp' }))
+      .rejects.toMatchObject({ code: 'image_too_large' });
+    expect(s3.send).not.toHaveBeenCalled(); // rejected before any PutObject
+  });
+
+  it('accepts an image just UNDER the ceiling (a real small image passes the dimension guard)', async () => {
+    // The guard is a pure dimension compare, so a real small image (64 px ≪ 64 MP) proves the accept side
+    // without allocating a 56 MP buffer; the real pipeline then encodes it and PutObject is captured.
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 5, g: 5, b: 5 } } }).png().toBuffer();
+    const { s3 } = fakeS3();
+    const svc = new ImageUploadService(CONFIGURED, { s3, PutObjectCommand, DeleteObjectCommand });
+    await expect(svc.upload({ buffer: png, key: 'plants/p1/progress/ph1-tok1.webp' })).resolves.toBeDefined();
+  });
+
+  it('writes to the EXPLICIT unique-per-claim key it is given (no random UUID)', async () => {
+    const png = await sharp({ create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } } }).png().toBuffer();
+    const { calls, s3 } = fakeS3();
+    const svc = new ImageUploadService(CONFIGURED, { s3, PutObjectCommand, DeleteObjectCommand });
+    const stored = await svc.upload({ buffer: png, key: 'plants/p1/progress/ph1-tok1.webp' });
+    expect(stored.imageObjectKey).toBe('plants/p1/progress/ph1-tok1.webp');
+    expect(calls[0].input.Key).toBe('plants/p1/progress/ph1-tok1.webp');
+  });
+
+  it('still raises image_decode_failed for a genuinely corrupt image (explicit key)', async () => {
+    const { s3 } = fakeS3();
+    const svc = new ImageUploadService(CONFIGURED, { s3, PutObjectCommand, DeleteObjectCommand });
+    await expect(svc.upload({ buffer: Buffer.from('corrupt'), key: 'plants/p1/progress/ph1-tok1.webp' }))
+      .rejects.toMatchObject({ code: 'image_decode_failed' });
+  });
+});
+
+describe('ImageUploadService.confirmDelete — propagates failure (BLOCKER 4)', () => {
+  // A fake whose send() applies a per-test outcome (resolve / reject with an armed error).
+  function s3WithSend(send: (cmd: unknown) => Promise<unknown>) {
+    return { send: vi.fn(send) };
+  }
+
+  it('resolves on a confirmed R2 delete success', async () => {
+    const svc = new ImageUploadService(CONFIGURED, { s3: s3WithSend(async () => ({})), DeleteObjectCommand });
+    await expect(svc.confirmDelete('plants/p1/progress/ph1-tok1.webp')).resolves.toBeUndefined();
+  });
+
+  it('resolves when R2 confirms the object is ALREADY ABSENT (404/NoSuchKey)', async () => {
+    const svc = new ImageUploadService(CONFIGURED, {
+      s3: s3WithSend(async () => { throw Object.assign(new Error('gone'), { name: 'NoSuchKey', $metadata: { httpStatusCode: 404 } }); }),
+      DeleteObjectCommand,
+    });
+    await expect(svc.confirmDelete('plants/p1/progress/ph1-tok1.webp')).resolves.toBeUndefined();
+  });
+
+  it('REJECTS on an unconfirmed delete (network/5xx) — never a false success', async () => {
+    const svc = new ImageUploadService(CONFIGURED, {
+      s3: s3WithSend(async () => { throw Object.assign(new Error('unreachable'), { $metadata: { httpStatusCode: 503 } }); }),
+      DeleteObjectCommand,
+    });
+    await expect(svc.confirmDelete('plants/p1/progress/ph1-tok1.webp')).rejects.toBeDefined();
   });
 });
 
