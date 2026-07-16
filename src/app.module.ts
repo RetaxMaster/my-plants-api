@@ -18,6 +18,7 @@ import { MovingModule } from './moving/moving.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { StartupModule } from './startup/startup.module.js';
 import { ImageUploadModule } from './storage/image-upload.module.js';
+import { PhotoWorkerModule } from './photo-worker/photo-worker.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { KnowledgeChatModule } from './knowledge-chat/knowledge-chat.module.js';
 import { BlogModule } from './blog/blog.module.js';
@@ -46,6 +47,7 @@ import { MediaModule } from './media/media.module.js';
     NotificationsModule,
     StartupModule,
     ImageUploadModule,
+    PhotoWorkerModule,
     AuthModule,
     KnowledgeChatModule,
     BlogModule,

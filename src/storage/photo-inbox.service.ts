@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, rename, unlink, readdir, stat, statfs } from 'node:fs/promises';
+import { open, mkdir, rename, unlink, readdir, readFile, stat, statfs } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { Injectable, Logger } from '@nestjs/common';
 import type { Env } from '../config/env.js';
@@ -91,6 +91,13 @@ export class PhotoInboxService {
   async exists(path: string | null | undefined): Promise<boolean> {
     if (!path) return false;
     try { await stat(path); return true; } catch { return false; }
+  }
+
+  // Read the staged bytes for the worker (spec §4.2). Inbox I/O is the service's concern, not the worker's,
+  // so the worker never reaches into `fs` directly — this keeps the read injectable/fakeable. A missing or
+  // unreadable file rejects with the raw fs error (ENOENT/EACCES), which the worker maps to `inbox_lost`.
+  async read(path: string): Promise<Buffer> {
+    return readFile(path);
   }
 
   // Orphan sweep (spec §3.2): delete any .bin/.tmp with no matching photo row, older than a short grace so it
