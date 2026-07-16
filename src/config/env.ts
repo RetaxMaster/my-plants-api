@@ -36,6 +36,16 @@ export const envSchema = dbSchema.extend({
   R2_BUCKET: z.string().default(''),
   R2_PUBLIC_BASE_URL: z.string().default(''),
 
+  // Where raw uploaded bytes wait between the request and the async photo worker (spec §3.2). Staged ON DISK
+  // (not in memory — memory does not survive pm2 reload). MUST end up ABSOLUTE (mirrors KNOWLEDGE_CHAT_LOG_DIR)
+  // and MUST live OUTSIDE the build/deploy tree in production so a deploy never wipes in-flight bytes. Created
+  // on boot if missing.
+  PHOTO_INBOX_DIR: z.string().min(1).default('storage/photo-inbox').transform((v) => resolve(v)),
+  // Free-space floor (MB) for the filesystem holding PHOTO_INBOX_DIR (spec §3.2 capacity guard). Staging is
+  // rejected with 503 photo_storage_busy when it would drop free space below this — the direct protection
+  // against ENOSPC during a sustained R2 outage. Tuned constant.
+  INBOX_MIN_FREE_MB: z.coerce.number().int().positive().default(1024),
+
   // Knowledge-engine admin chat (spec §8): the embedded realtime engine + isolated claude cwd.
   KNOWLEDGE_CHAT_ENGINE_PORT: z.coerce.number().int().positive().default(8010),
   KNOWLEDGE_CHAT_ENGINE_SECRET: z.string().min(16), // required — gates the engine's /execute
