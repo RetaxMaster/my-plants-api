@@ -4,13 +4,15 @@ import { ValidationPipe, type INestApplication } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdtempSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import request from 'supertest';
+import { tmpdir } from 'node:os';
 import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 import { WeatherService } from '../src/weather/weather.service.js';
-import { KnowledgeChatEngineService } from '../src/knowledge-chat/engine/knowledge-chat-engine.service.js';
-import { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
+import { KNOWLEDGE_ENGINE, KNOWLEDGE_ORCHESTRATOR } from '../src/knowledge-chat/engine/engine-params.js';
+import type { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
 
 // End-to-end for the admin knowledge-chat HTTP surface over the REAL stack (global JwtAuthGuard →
 // controller-scoped RolesGuard → service → Prisma → DB), against a running MariaDB.
@@ -25,7 +27,11 @@ describe('Knowledge Chat (e2e)', () => {
   let prisma: PrismaService;
   let orchestrator: KnowledgeChatOrchestrator;
   const executeCalls: { runId: string; logPath: string; prompt?: string; command?: { name: string; args: string } }[] = [];
+  // The registry now roots each run's log under the engine's own `logDir`; the fake exposes a temp one so the
+  // service's logPath (join(logDir, runId.ndjson)) lands somewhere writable and GET /runs/:id/log can serve it.
+  const fakeLogDir = mkdtempSync(join(tmpdir(), 'kc-e2e-'));
   const fakeEngine = {
+    logDir: fakeLogDir,
     // The double honors the ONE side effect the real engine has at this seam: it CREATES the run's log
     // itself (O_CREAT|O_EXCL) and writes the header before streaming — the host never pre-creates it. Without
     // that, `GET /runs/:id/log` has no file to serve and the endpoint looks broken when it is not.
@@ -34,6 +40,7 @@ describe('Knowledge Chat (e2e)', () => {
       await mkdir(dirname(req.logPath), { recursive: true });
       await writeFile(req.logPath, `{"type":"log.header","schemaVersion":"1.0.0","runId":"${req.runId}"}\n`, { flag: 'wx' });
     },
+    providerStatus: async () => [],
     onModuleInit: async () => {},
     onModuleDestroy: async () => {},
     get isRunning() { return false; },
@@ -52,14 +59,14 @@ describe('Knowledge Chat (e2e)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(WeatherService).useValue({ forLocation: async () => null, forCity: async () => null })
-      .overrideProvider(KnowledgeChatEngineService).useValue(fakeEngine)
+      .overrideProvider(KNOWLEDGE_ENGINE).useValue(fakeEngine)
       .compile();
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true })); // mirror main.ts
     await app.init();
 
     prisma = app.get(PrismaService);
-    orchestrator = app.get(KnowledgeChatOrchestrator);
+    orchestrator = app.get<KnowledgeChatOrchestrator>(KNOWLEDGE_ORCHESTRATOR);
 
     const adminOwner = await prisma.owner.create({ data: { name: adminName } });
     adminOwnerId = adminOwner.id;
