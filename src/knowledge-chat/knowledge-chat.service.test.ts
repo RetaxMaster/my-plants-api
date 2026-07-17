@@ -58,7 +58,10 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
         Object.assign(s, data);
         return { count: 1 };
       },
-      findMany: async ({ include }: any = {}) => [...sessions.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).map((s) => withRuns(s, include)),
+      findMany: async ({ where, include }: any = {}) => [...sessions.values()]
+        .filter((s: any) => (where == null) || Object.entries(where).every(([k, v]) => s[k] === v))
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .map((s) => withRuns(s, include)),
       delete: async ({ where }: any) => { const s = sessions.get(where.id); sessions.delete(where.id); for (const [k, r] of runs) if (r.sessionId === where.id) runs.delete(k); return s; },
     },
     knowledgeChatRun: {
@@ -379,5 +382,99 @@ describe('KnowledgeChatService.resume — commands (prompt XOR command)', () => 
     await expect(run(() => svc.resume('s1', { command: { name: 'compact', args: '' } }, undefined, KS)))
       .rejects.toThrow(UnprocessableEntityException);
     expect(engine.execute).not.toHaveBeenCalled();
+  });
+});
+
+
+// Plant Doctor scope (Spec 3 §3.2/§3.3): ONE shared service serves both surfaces via a SessionScope. A
+// doctor caller passes (kind=DOCTOR, plantId, ownerId); a KE caller passes (kind=KNOWLEDGE). The tuple is
+// the access boundary — a session from another plant/owner is indistinguishable from "not found".
+const DS = { kind: 'DOCTOR', plantId: 'A', ownerId: 'O' } as const;
+
+describe('KnowledgeChatService — DOCTOR scope', () => {
+  it('listSessions returns ONLY that scope — KE never sees DOCTOR and vice-versa', async () => {
+    const { svc, run } = setup({
+      sessions: [
+        session({ id: 'ske', kind: 'KNOWLEDGE' } as any),
+        session({ id: 'sdoc', kind: 'DOCTOR', plantId: 'A', ownerId: 'O' } as any),
+      ],
+    });
+    expect((await run(() => svc.listSessions(KS))).map((s: any) => s.id)).toEqual(['ske']);
+    const docList = await run(() => svc.listSessions(DS));
+    expect(docList.map((s: any) => s.id)).toEqual(['sdoc']);
+    expect(docList[0]).toEqual(expect.objectContaining({ kind: 'DOCTOR', plantId: 'A' }));
+  });
+
+  it('getSession 404s a DOCTOR session id from another plant or another owner', async () => {
+    const { svc, run } = setup({ sessions: [session({ id: 'sdoc', kind: 'DOCTOR', plantId: 'A', ownerId: 'O' } as any)] });
+    await expect(run(() => svc.getSession('sdoc', { kind: 'DOCTOR', plantId: 'B', ownerId: 'O' }))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(run(() => svc.getSession('sdoc', { kind: 'DOCTOR', plantId: 'A', ownerId: 'OTHER' }))).rejects.toBeInstanceOf(NotFoundException);
+    // A KNOWLEDGE scope must not reach a DOCTOR row either.
+    await expect(run(() => svc.getSession('sdoc', KS))).rejects.toBeInstanceOf(NotFoundException);
+    // The matching tuple resolves it.
+    expect((await run(() => svc.getSession('sdoc', DS))).id).toBe('sdoc');
+  });
+
+  it('createSession stamps kind/plantId/ownerId and prepares the doctor workspace before /execute', async () => {
+    const { svc, run, sessions, doctorRunContext, engine } = setup();
+    const out = await run(() => svc.createSession('why yellow?', 'claude', DS));
+    const row = sessions.get(out.sessionId) as any;
+    expect([row.kind, row.plantId, row.ownerId]).toEqual(['DOCTOR', 'A', 'O']);
+    // prepareRun ran BEFORE execute, and the workspace path was injected as the per-run env.
+    expect(doctorRunContext.prepareRun).toHaveBeenCalledWith(expect.objectContaining({ sessionId: out.sessionId, plantId: 'A', ownerId: 'O' }));
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ env: { PLANT_DOCTOR_SESSION_WORKSPACE: '/ws' } }));
+  });
+
+  it('a KNOWLEDGE launch never prepares a doctor workspace', async () => {
+    const { svc, run, doctorRunContext, engine } = setup();
+    await run(() => svc.createSession('research', 'claude', KS));
+    expect(doctorRunContext.prepareRun).not.toHaveBeenCalled();
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ env: undefined }));
+  });
+
+  it('deleteSession sweeps the DOCTOR workspace before removing the row', async () => {
+    const { svc, run, sessions, doctorRunContext } = setup({
+      sessions: [session({ id: 'sdoc', kind: 'DOCTOR', plantId: 'A', ownerId: 'O' } as any)],
+      runs: [doneRun({ sessionId: 'sdoc' })],
+    });
+    await run(() => svc.deleteSession('sdoc', DS));
+    expect(doctorRunContext.sweep).toHaveBeenCalledWith('sdoc');
+    expect(sessions.has('sdoc')).toBe(false);
+  });
+});
+
+// Codex fallback gate (Spec 3 §3.2), for BOTH pipelines, on the run-path-resolved (sealed-aware) provider.
+describe('KnowledgeChatService — Codex verification gate', () => {
+  it('rejects a codex CREATE when the pipeline is unverified, and accepts once verified (dynamic, same instance)', async () => {
+    const { svc, run, codexVerification } = setup();
+    codexVerification.isVerified.mockResolvedValue(false);
+    await expect(run(() => svc.createSession('x', 'codex', KS))).rejects.toBeInstanceOf(UnprocessableEntityException);
+    // Flip the record between calls WITHOUT a new service — the next read sees it.
+    codexVerification.isVerified.mockResolvedValue(true);
+    const out = await run(() => svc.createSession('x', 'codex', KS));
+    expect(out.sessionId).toBeTruthy();
+  });
+
+  it('a claude create is unaffected by the codex gate', async () => {
+    const { svc, run, codexVerification } = setup();
+    codexVerification.isVerified.mockResolvedValue(false);
+    const out = await run(() => svc.createSession('x', 'claude', KS));
+    expect(out.sessionId).toBeTruthy();
+  });
+
+  it('rejects a resume of a SEALED codex session whether provider is omitted OR a misleading claude', async () => {
+    const seed = () => ({ sessions: [session({ provider: 'codex', providerSessionId: 'thread-1' })], runs: [doneRun({ provider: 'codex' })] });
+    for (const requestProvider of [undefined, 'claude'] as const) {
+      const { svc, run, codexVerification } = setup(seed());
+      codexVerification.isVerified.mockResolvedValue(false);
+      await expect(run(() => svc.resume('s1', { prompt: 'go' }, requestProvider, KS))).rejects.toBeInstanceOf(UnprocessableEntityException);
+    }
+  });
+
+  it('the SAME gate holds for a DOCTOR-scope codex create (both pipelines)', async () => {
+    const { svc, run, codexVerification } = setup();
+    codexVerification.isVerified.mockResolvedValue(false);
+    await expect(run(() => svc.createSession('why?', 'codex', DS))).rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(codexVerification.isVerified).toHaveBeenCalledWith('DOCTOR');
   });
 });

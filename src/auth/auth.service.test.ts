@@ -18,7 +18,7 @@ function makePrismaFake() {
 }
 
 const jwt = new JwtService({ secret: 'x'.repeat(32), signOptions: { expiresIn: '30d' } });
-const ENV_90 = { SESSION_ABSOLUTE_MAX_DAYS: 90 } as any;
+const ENV_90 = { SESSION_ABSOLUTE_MAX_DAYS: 90, PLANT_DOCTOR_TOKEN_TTL_MS: 1_800_000 } as any;
 
 describe('AuthService', () => {
   let svc: AuthService;
@@ -124,5 +124,15 @@ describe('AuthService', () => {
         jti: 'j-old', sst: nowSec - 100 * 86400, exp: nowSec + 86400,
       }),
     ).rejects.toThrow();
+  });
+
+  // Plant Doctor scoped token (Spec 3 §3.3): a FULL, self-consistent payload that flows through the SAME
+  // verify path, narrowed by scope:'doctor' + plantId, role ALWAYS USER, and short-lived (one run window).
+  it('mintDoctorToken issues a verifiable token with the full sealed doctor claims and a short TTL', async () => {
+    const token = await svc.mintDoctorToken({ userId: 'u1', username: 'carlos', ownerId: 'o1', plantId: 'p1' });
+    const payload = await svc.verify(token); // flows through the same jti/cap checks
+    expect(payload).toMatchObject({ sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', scope: 'doctor', plantId: 'p1' });
+    expect(payload.jti).toBeTruthy();
+    expect(payload.exp - payload.iat).toBeLessThanOrEqual(1_800); // ~30 min, not the 30-day default
   });
 });
