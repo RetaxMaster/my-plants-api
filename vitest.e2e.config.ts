@@ -22,11 +22,18 @@ export default defineConfig({
       KNOWLEDGE_CHAT_ENGINE_ENABLED: 'false',
       KNOWLEDGE_CHAT_ENGINE_SECRET: 'x'.repeat(16),
       KNOWLEDGE_ENGINE_CWD: '/tmp/knowledge-engine-e2e',
+      // Runtime state/log/workspace dirs default to repo-relative `storage/…`; in e2e the tests write real
+      // records/logs/workspaces (some carrying live scoped tokens), so pin them OUTSIDE the repo tree — the
+      // suite must never pollute (or commit) the working copy.
+      KNOWLEDGE_CHAT_STATE_DIR: '/tmp/pd-e2e/knowledge-chat-state',
       // The Plant Doctor engine has the same required-no-default keys; supply dummies and keep it inert
       // (no port binding, no CLI spawn) so EVERY e2e file boots — not just the doctor spec.
       PLANT_DOCTOR_ENGINE_ENABLED: 'false',
       PLANT_DOCTOR_CHAT_ENGINE_SECRET: 'x'.repeat(16),
       PLANT_DOCTOR_ENGINE_CWD: '/tmp/plant-doctor-e2e',
+      PLANT_DOCTOR_STATE_DIR: '/tmp/pd-e2e/plant-doctor-state',
+      PLANT_DOCTOR_LOG_DIR: '/tmp/pd-e2e/plant-doctor-logs',
+      PLANT_DOCTOR_WORKSPACE_ROOT: '/tmp/pd-e2e/plant-doctor-workspaces',
     },
   },
 });

@@ -257,6 +257,19 @@ describe('Plant Doctor (e2e)', () => {
     await as1(request(server()).get(`/plants/${plantA}/diagnose/sessions/${sidA}`)).expect(200);
   });
 
+  it('the run-log route is owner-scoped, and resume/socket-ticket also 404 cross-owner (completing the matrix)', async () => {
+    // The doctor detail's per-turn `logUrl` resolves for the pinned plant's owner...
+    await as1(request(server()).get(`/plants/${plantA}/diagnose/runs/${runA}/log`)).expect(200);
+    // ...but never for another plant of the same owner, nor for another owner (a KE admin route can't read
+    // it either — that scope leak is covered in the unit suite).
+    await as1(request(server()).get(`/plants/${plantA2}/diagnose/runs/${runA}/log`)).expect(404);
+    await as2(request(server()).get(`/plants/${plantA}/diagnose/runs/${runA}/log`)).expect(404);
+    // Cross-owner resume + socket-ticket on plant A are unreachable (unowned plant 404) — the two routes the
+    // earlier cross-owner test didn't exercise.
+    await as2(request(server()).post(`/plants/${plantA}/diagnose/sessions/${sidA}/runs`)).send({ prompt: 'x' }).expect(404);
+    await as2(request(server()).post(`/plants/${plantA}/diagnose/runs/${runA}/socket-ticket`)).expect(404);
+  });
+
   describe('admin acting-as an owner', () => {
     const asAdminActing = (r: request.Test) =>
       r.set('Authorization', `Bearer ${adminToken}`).set('X-Act-As-Owner', owner1Id);

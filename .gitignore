@@ -9,5 +9,10 @@ prisma/.env
 storage/knowledge-chat/
 # The engine's durable run index (runId → logPath) — runtime state, never committed.
 storage/knowledge-chat-state/
+# Plant Doctor engine runtime artifacts: NDJSON logs, the codex-roles-verified state record, and the
+# per-session workspaces that hold LIVE scoped JWTs (doctor-context.json) — NEVER committed.
+storage/plant-doctor/
+storage/plant-doctor-state/
+storage/plant-doctor-workspaces/
 # Staged raw upload bytes for the async photo worker (PHOTO_INBOX_DIR default) — runtime, never committed.
 storage/photo-inbox/
