@@ -9,6 +9,11 @@ export interface Actor {
   // The impersonation target, set by the guard ONLY when role === 'ADMIN' and a valid
   // X-Act-As-Owner header is present. OwnerService trusts this: a USER actor never carries it.
   actingAsOwnerId?: string;
+  // Plant Doctor scoped token (Spec 3 §3.3): present ONLY on a `scope:'doctor'` token, which the global
+  // DoctorScopeGuard default-denies everywhere but a five-endpoint allowlist pinned to `plantId`. An
+  // ordinary owner/admin token carries neither, so it takes the normal path untouched.
+  scope?: 'doctor';
+  plantId?: string;
   jti: string;
   // Session-start anchor (epoch seconds) carried forward across refreshes to enforce the absolute
   // cap. Resolved from the token's `sst`, or `iat` for legacy tokens minted before the feature.

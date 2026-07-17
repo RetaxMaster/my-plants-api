@@ -1,13 +1,19 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { join } from 'node:path';
 import type { Orchestrator, ActiveRun, OwnRunLocator, RunLogResolver } from '@retaxmaster/agents-realtime-server';
 import type { AgentProvider } from '@retaxmaster/agents-realtime-protocol';
 import { PrismaService } from '../../prisma/prisma.service.js';
-import { ENV } from '../../config/config.module.js';
-import type { Env } from '../../config/env.js';
+import type { EngineParams } from './engine-params.js';
 import { KnowledgeChatTicketService } from './knowledge-chat-ticket.service.js';
 
 const ACTIVE = ['QUEUED', 'RUNNING'] as const;
+
+// The env-var NAMES an operator checks when a spawn fails, per engine. Naming the DOCTOR's own keys (not the
+// KE's) in a doctor spawn-failure diagnostic is the whole reason the orchestrator is now params-driven.
+const ENGINE_ENV_NAMES = {
+  KNOWLEDGE: { cwd: 'KNOWLEDGE_ENGINE_CWD', log: 'KNOWLEDGE_CHAT_LOG_DIR', state: 'KNOWLEDGE_CHAT_STATE_DIR' },
+  DOCTOR: { cwd: 'PLANT_DOCTOR_ENGINE_CWD', log: 'PLANT_DOCTOR_LOG_DIR', state: 'PLANT_DOCTOR_STATE_DIR' },
+} as const;
 
 // The seams the embedded engine uses to reach the host — implemented in-process against Prisma
 // (retaxmaster's Node↔Laravel HTTP callback layer disappears). No network, no retry: direct DB writes.
@@ -20,10 +26,13 @@ const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
   private readonly logger = new Logger(KnowledgeChatOrchestrator.name);
 
+  // Param-driven so ONE orchestrator class serves BOTH engines: `params.kind` isolates this engine's runs
+  // (a DOCTOR run is invisible to the KNOWLEDGE orchestrator and vice-versa) and `params.logDir`/`stateDir`
+  // point at THIS engine's directories (reuse-not-fork, Spec 3 §2).
   constructor(
+    private readonly params: EngineParams,
     private readonly prisma: PrismaService,
     private readonly tickets: KnowledgeChatTicketService,
-    @Inject(ENV) private readonly env: Env,
   ) {}
 
   validateTicket(ticket: string): Promise<{ runId: string } | null> {
@@ -87,6 +96,7 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
     // the engine captured a stderr tail we persist it; when it is ABSENT the agent process died before
     // it said anything, so we synthesize a diagnostic naming the likely causes and the knobs to check —
     // the run's `error` alone must be enough to debug a spawn failure.
+    const names = ENGINE_ENV_NAMES[this.params.kind];
     const error =
       status !== 'FAILED'
         ? null
@@ -94,8 +104,8 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
           ? info.stderrTail.slice(0, 1000)
           : `The agent exited ${info.exitCode} with no stderr captured — likely a spawn failure. Check that ` +
             `the agent binary is installed and on PATH (CLAUDE_BIN / CODEX_BIN) and authenticated, that ` +
-            `KNOWLEDGE_ENGINE_CWD exists, and that KNOWLEDGE_CHAT_LOG_DIR (the engine's logRoot) and ` +
-            `KNOWLEDGE_CHAT_STATE_DIR are absolute, writable directories.`;
+            `${names.cwd} exists, and that ${names.log} (the engine's logRoot) and ` +
+            `${names.state} are absolute, writable directories.`;
     const { count } = await this.prisma.knowledgeChatRun.updateMany({
       where: { id: runId, status: { in: [...ACTIVE] } },
       data: {
@@ -228,7 +238,15 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
   // pid so it is naturally excluded. startedAtMs re-arms the ORIGINAL deadline (never Date.now()).
   async activeRuns(): Promise<ActiveRun[]> {
     const runs = await this.prisma.knowledgeChatRun.findMany({
-      where: { status: 'RUNNING', pid: { not: null }, procStartTime: { not: null }, startedAt: { not: null } },
+      where: {
+        status: 'RUNNING',
+        pid: { not: null },
+        procStartTime: { not: null },
+        startedAt: { not: null },
+        // Only THIS engine's runs: a DOCTOR run must never be re-adopted by the KNOWLEDGE engine (which
+        // would resolve its log under the wrong dir and stream it on the wrong socket) — Spec 3 §2 isolation.
+        session: { is: { kind: this.params.kind } },
+      },
       include: { session: true },
     });
 
@@ -251,7 +269,7 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
 
     return runs.map((r) => ({
       runId: r.id,
-      logPath: join(this.env.KNOWLEDGE_CHAT_LOG_DIR, `${r.id}.ndjson`),
+      logPath: join(this.params.logDir, `${r.id}.ndjson`),
       pid: r.pid!,
       procStartTime: r.procStartTime!,
       startedAtMs: r.startedAt!.getTime(),

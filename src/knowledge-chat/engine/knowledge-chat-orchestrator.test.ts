@@ -7,7 +7,9 @@ interface Session { id: string; provider?: string; providerSessionId: string | n
 
 function makePrismaFake(runs: Run[], sessions: Session[]) {
   const runMap = new Map(runs.map((r) => [r.id, r]));
-  const sessMap = new Map(sessions.map((s) => [s.id, s]));
+  // Mirror the DB default: a session with no explicit `kind` reads back as KNOWLEDGE (migration 0021).
+  // Default in-place so tests that hold a reference and assert on later mutations still see them.
+  const sessMap = new Map(sessions.map((s) => { (s as any).kind ??= 'KNOWLEDGE'; return [s.id, s]; }));
   const matches = (r: Run, where: any) =>
     (where.id === undefined || r.id === where.id) &&
     (where.status?.in === undefined || where.status.in.includes(r.status)) &&
@@ -31,7 +33,10 @@ function makePrismaFake(runs: Run[], sessions: Session[]) {
         return rows[0] ?? null;
       },
       findMany: async ({ where, include }: any) => {
-        const out = [...runMap.values()].filter((r) => matches(r, where));
+        const wantKind = where?.session?.is?.kind; // activeRuns() filters by the engine's own kind
+        const out = [...runMap.values()].filter(
+          (r) => matches(r, where) && (wantKind === undefined || (sessMap.get(r.sessionId) as any)?.kind === wantKind),
+        );
         return include?.session ? out.map((r) => ({ ...r, session: sessMap.get(r.sessionId) })) : out;
       },
     },
@@ -59,12 +64,14 @@ function makePrismaFake(runs: Run[], sessions: Session[]) {
   };
 }
 
-const env = { KNOWLEDGE_CHAT_LOG_DIR: '/logs' } as any;
+// The engine params a KNOWLEDGE orchestrator is constructed with: logDir '/logs' anchors the logPath
+// assertions, kind KNOWLEDGE anchors the re-adoption isolation.
+const kparams = { kind: 'KNOWLEDGE', enabled: true, cwd: '/isolated/ke', port: 8010, secret: 's', logDir: '/logs', stateDir: '/state' } as any;
 const tickets = { consume: async (raw: string) => (raw === 'good' ? { runId: 'r1' } : null) } as any;
 
 describe('KnowledgeChatOrchestrator.validateTicket', () => {
   it('delegates to the ticket store', async () => {
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake([], []) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake([], []) as any, tickets);
     expect(await orch.validateTicket('good')).toEqual({ runId: 'r1' });
     expect(await orch.validateTicket('bad')).toBeNull();
   });
@@ -76,7 +83,7 @@ describe('KnowledgeChatOrchestrator.runStarted', () => {
     // The run holds the seal claim, exactly as insertActiveRun grants it in production.
     const session: Session = { id: 's1', providerSessionId: null, pendingRunId: 'r1' };
     const prisma = makePrismaFake([run], [session]);
-    const orch = new KnowledgeChatOrchestrator(prisma as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, prisma as any, tickets);
 
     // First call (spawn): sessionId null → stamps startedAt, providerSessionId still null.
     await orch.runStarted('r1', { pid: 1234, procStartTime: '999', sessionId: null });
@@ -99,7 +106,7 @@ describe('KnowledgeChatOrchestrator.runStarted', () => {
   it('never resurrects a terminal run', async () => {
     const run: Run = { id: 'r1', sessionId: 's1', provider: 'claude', status: 'CANCELLED', activeKey: null, pid: null, procStartTime: null, startedAt: null, finishedAt: new Date(), exitCode: null, error: null };
     const prisma = makePrismaFake([run], [{ id: 's1', providerSessionId: null }]);
-    const orch = new KnowledgeChatOrchestrator(prisma as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, prisma as any, tickets);
     await orch.runStarted('r1', { pid: 1, procStartTime: '1', sessionId: null });
     expect(run.status).toBe('CANCELLED'); // untouched
   });
@@ -110,7 +117,7 @@ describe('KnowledgeChatOrchestrator.runFinished', () => {
 
   it('stopped → CANCELLED and releases the active slot (activeKey null)', async () => {
     const run = mk(); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 130, stopped: true, stderrTail: null });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 130, stopped: true, stderrTail: null });
     expect(run.status).toBe('CANCELLED');
     expect(run.pid).toBeNull();
     expect(run.activeKey).toBeNull();
@@ -119,20 +126,20 @@ describe('KnowledgeChatOrchestrator.runFinished', () => {
 
   it('exit 0 → SUCCEEDED', async () => {
     const run = mk(); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 0, stopped: false, stderrTail: null });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 0, stopped: false, stderrTail: null });
     expect(run.status).toBe('SUCCEEDED');
   });
 
   it('non-zero exit → FAILED with the stderr tail (capped)', async () => {
     const run = mk(); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'boom' });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'boom' });
     expect(run.status).toBe('FAILED');
     expect(run.error).toBe('boom');
   });
 
   it('FAILED with NO stderr → synthesizes an actionable diagnostic (not a bare error)', async () => {
     const run = mk(); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: null });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: null });
     expect(run.status).toBe('FAILED');
     // The diagnostic must name the likely cause + the knobs to check. Provider-neutral since 1.0.0:
     // either agent can be the one that failed to spawn, so BOTH bins are named.
@@ -144,13 +151,13 @@ describe('KnowledgeChatOrchestrator.runFinished', () => {
 
   it('FAILED with blank/whitespace stderr also gets the diagnostic (not an empty error)', async () => {
     const run = mk(); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 2, stopped: false, stderrTail: '   ' });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 2, stopped: false, stderrTail: '   ' });
     expect(run.error).toMatch(/KNOWLEDGE_CHAT_LOG_DIR/);
   });
 
   it('is a single-winner: a second finalize of an already-terminal run is a no-op', async () => {
     const run = mk('SUCCEEDED'); const prisma = makePrismaFake([run], []);
-    await new KnowledgeChatOrchestrator(prisma as any, tickets, env).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'late' });
+    await new KnowledgeChatOrchestrator(kparams, prisma as any, tickets).runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'late' });
     expect(run.status).toBe('SUCCEEDED'); // not overwritten
     expect(run.error).toBeNull();
   });
@@ -164,11 +171,34 @@ describe('KnowledgeChatOrchestrator.activeRuns', () => {
       { id: 'r3', sessionId: 's3', provider: 'claude', status: 'SUCCEEDED', activeKey: null, pid: 7, procStartTime: '1', startedAt: new Date(), finishedAt: new Date(), exitCode: 0, error: null },
     ];
     const sessions: Session[] = [{ id: 's1', providerSessionId: 'uuid-1' }, { id: 's2', providerSessionId: null }, { id: 's3', providerSessionId: 'uuid-3' }];
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake(runs, sessions) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake(runs, sessions) as any, tickets);
     const active = await orch.activeRuns();
     expect(active).toEqual([
       { runId: 'r1', logPath: '/logs/r1.ndjson', pid: 100, procStartTime: '555', startedAtMs: 1_000_000, sessionId: 'uuid-1' },
     ]);
+  });
+
+  // Spec 3 §2 isolation: each engine re-adopts ONLY its own kind. A DOCTOR run must be invisible to the
+  // KNOWLEDGE orchestrator (else it would resolve the log under the KE dir and stream it on the KE socket).
+  it('re-adopts only its OWN engine kind (a DOCTOR run is invisible to the KNOWLEDGE orchestrator)', async () => {
+    const runs: Run[] = [
+      { id: 'rk', sessionId: 'sk', provider: 'claude', status: 'RUNNING', activeKey: 'ACTIVE', pid: 1, procStartTime: '1', startedAt: new Date(1000), finishedAt: null, exitCode: null, error: null },
+      { id: 'rd', sessionId: 'sd', provider: 'claude', status: 'RUNNING', activeKey: 'ACTIVE', pid: 2, procStartTime: '2', startedAt: new Date(2000), finishedAt: null, exitCode: null, error: null },
+    ];
+    const sessions: any[] = [
+      { id: 'sk', providerSessionId: 'uuid-k', kind: 'KNOWLEDGE' },
+      { id: 'sd', providerSessionId: 'uuid-d', kind: 'DOCTOR' },
+    ];
+    const ke = new KnowledgeChatOrchestrator(kparams, makePrismaFake(runs, sessions) as any, tickets);
+    const adopted = await ke.activeRuns();
+    expect(adopted.map((r) => r.runId)).toEqual(['rk']); // never the doctor run
+    expect(adopted[0].logPath).toBe('/logs/rk.ndjson');
+
+    const doctorParams = { ...kparams, kind: 'DOCTOR', logDir: '/doc-logs' };
+    const doc = new KnowledgeChatOrchestrator(doctorParams, makePrismaFake(runs, sessions) as any, tickets);
+    const adoptedDoc = await doc.activeRuns();
+    expect(adoptedDoc.map((r) => r.runId)).toEqual(['rd']);
+    expect(adoptedDoc[0].logPath).toBe('/doc-logs/rd.ndjson');
   });
 });
 
@@ -182,7 +212,7 @@ describe('KnowledgeChatOrchestrator.runsForSession (own-run locator)', () => {
   const term = (id: string, ms: number, over: Partial<Run> = {}): Run => ({ id, sessionId: 's1', provider: 'claude', providerSessionId: 'uuid-1', sessionTracked: true, status: 'SUCCEEDED', activeKey: null, pid: null, procStartTime: null, startedAt: new Date(ms), finishedAt: new Date(), exitCode: 0, error: null, ...over });
 
   const orchWith = (runs: Run[], sessions: any[], resolvable: (id: string) => boolean) => {
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake(runs, sessions) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake(runs, sessions) as any, tickets);
     orch.setRunLogResolver({ resolveLogPath: (runId: string) => (resolvable(runId) ? `/logs/${runId}.ndjson` : null) });
     return orch;
   };
@@ -233,7 +263,7 @@ describe('KnowledgeChatOrchestrator.runStarted — sealing the conversation to i
   it('seals provider AND providerSessionId together, from the run that actually produced them', async () => {
     const run: Run = { id: 'r1', sessionId: 's1', provider: 'codex', status: 'RUNNING', activeKey: 'ACTIVE', pid: 1, procStartTime: '1', startedAt: new Date(), finishedAt: null, exitCode: null, error: null };
     const session: Session = { id: 's1', provider: 'claude', providerSessionId: null, pendingRunId: 'r1' };
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake([run], [session]) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake([run], [session]) as any, tickets);
     await orch.runStarted('r1', { pid: 1, procStartTime: '1', sessionId: 'thread-9' });
     expect(session.providerSessionId).toBe('thread-9');
     expect(session.provider).toBe('codex'); // the pair can never cross
@@ -246,7 +276,7 @@ describe('KnowledgeChatOrchestrator.runStarted — sealing the conversation to i
     const old: Run = { id: 'r1', sessionId: 's1', provider: 'claude', status: 'FAILED', activeKey: null, pid: null, procStartTime: null, startedAt: new Date(), finishedAt: new Date(), exitCode: 1, error: 'x' };
     const retry: Run = { id: 'r2', sessionId: 's1', provider: 'codex', status: 'RUNNING', activeKey: 'ACTIVE', pid: 2, procStartTime: '2', startedAt: new Date(), finishedAt: null, exitCode: null, error: null };
     const session: Session = { id: 's1', provider: 'codex', providerSessionId: null, pendingRunId: 'r2' }; // the retry holds the claim
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake([old, retry], [session]) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake([old, retry], [session]) as any, tickets);
 
     await orch.runStarted('r1', { pid: 1, procStartTime: '1', sessionId: 'claude-uuid' }); // late, abandoned
     expect(session.providerSessionId).toBeNull();  // it may NOT pin the conversation to the agent the user left
@@ -267,7 +297,7 @@ describe('KnowledgeChatOrchestrator.activeRuns — repairing the seal claim acro
   it('restores pendingRunId for a live run whose conversation lost (or never had) the claim', async () => {
     const run: Run = { id: 'r1', sessionId: 's1', provider: 'claude', status: 'RUNNING', activeKey: 'ACTIVE', pid: 100, procStartTime: '555', startedAt: new Date(1_000_000), finishedAt: null, exitCode: null, error: null };
     const session: Session = { id: 's1', providerSessionId: null, pendingRunId: null }; // spans the deploy
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake([run], [session]) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake([run], [session]) as any, tickets);
 
     const active = await orch.activeRuns();
     expect(active).toHaveLength(1);
@@ -291,7 +321,7 @@ describe('KnowledgeChatOrchestrator.activeRuns — repairing the seal claim acro
 describe('KnowledgeChatOrchestrator.runsForSession — orphaned runs from a retried opening turn', () => {
   const sess = (over: any = {}) => ({ id: 's1', provider: 'claude', providerSessionId: 'uuid-1', ...over });
   const orchWith = (runs: Run[], sessions: any[], resolvable: (id: string) => boolean) => {
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake(runs, sessions) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake(runs, sessions) as any, tickets);
     orch.setRunLogResolver({ resolveLogPath: (runId: string) => (resolvable(runId) ? `/logs/${runId}.ndjson` : null) });
     return orch;
   };
@@ -364,7 +394,7 @@ describe('KnowledgeChatOrchestrator.runsForSession — orphaned runs from a retr
 describe('KnowledgeChatOrchestrator.runsForSession — an UNTRACKED run is unknown, not an orphan', () => {
   const sess = (over: any = {}) => ({ id: 's1', provider: 'claude', providerSessionId: 'uuid-1', ...over });
   const orchWith = (runs: Run[], sessions: any[]) => {
-    const orch = new KnowledgeChatOrchestrator(makePrismaFake(runs, sessions) as any, tickets, env);
+    const orch = new KnowledgeChatOrchestrator(kparams, makePrismaFake(runs, sessions) as any, tickets);
     orch.setRunLogResolver({ resolveLogPath: (runId: string) => `/logs/${runId}.ndjson` }); // all resolvable
     return orch;
   };

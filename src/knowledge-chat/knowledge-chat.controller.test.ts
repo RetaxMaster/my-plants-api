@@ -20,8 +20,11 @@ function setup() {
     ]),
     commandCatalog: vi.fn(async () => ({ provider: 'claude', commands: [] as { name: string; support: string }[] })),
   };
-  return { svc, engine, ctrl: new KnowledgeChatController(svc as any, engine as any) };
+  const codexVerification = { isVerified: vi.fn(async () => true) };
+  return { svc, engine, codexVerification, ctrl: new KnowledgeChatController(svc as any, engine as any, codexVerification as any) };
 }
+
+const KS = { kind: 'KNOWLEDGE' };
 
 describe('KnowledgeChatController', () => {
   it('is gated to ADMIN via @Roles metadata', () => {
@@ -32,7 +35,7 @@ describe('KnowledgeChatController', () => {
   it('delegates create → createSession(prompt, provider)', async () => {
     const { svc, ctrl } = setup();
     expect(await ctrl.create({ prompt: 'hi', provider: 'codex' } as any)).toEqual({ sessionId: 's1', runId: 'r1', ticket: 'tk' });
-    expect(svc.createSession).toHaveBeenCalledWith('hi', 'codex');
+    expect(svc.createSession).toHaveBeenCalledWith('hi', 'codex', KS);
   });
 
   it('proxies provider-status, and only forces a re-probe when asked', async () => {
@@ -61,14 +64,14 @@ describe('KnowledgeChatController', () => {
   it('delegates resume → resume(id, { prompt }, provider?)', async () => {
     const { svc, ctrl } = setup();
     expect(await ctrl.resume('s1', { prompt: 'more' } as any)).toEqual({ runId: 'r2', ticket: 'tk2' });
-    expect(svc.resume).toHaveBeenCalledWith('s1', { prompt: 'more' }, undefined);
+    expect(svc.resume).toHaveBeenCalledWith('s1', { prompt: 'more' }, undefined, KS);
   });
 
   it('delegates resume → resume(id, { command }, provider?) for a command turn', async () => {
     const { svc, ctrl } = setup();
     const dto = { command: { name: 'compact', args: '' } } as any;
     expect(await ctrl.resume('s1', dto)).toEqual({ runId: 'r2', ticket: 'tk2' });
-    expect(svc.resume).toHaveBeenCalledWith('s1', { command: { name: 'compact', args: '' } }, undefined);
+    expect(svc.resume).toHaveBeenCalledWith('s1', { command: { name: 'compact', args: '' } }, undefined, KS);
   });
 
   it('400s when a run body carries BOTH prompt and command', () => {
@@ -90,9 +93,9 @@ describe('KnowledgeChatController', () => {
     await ctrl.log('r1');
     await ctrl.socketTicket('r1');
     expect(svc.listSessions).toHaveBeenCalled();
-    expect(svc.getSession).toHaveBeenCalledWith('s1');
-    expect(svc.deleteSession).toHaveBeenCalledWith('s1');
+    expect(svc.getSession).toHaveBeenCalledWith('s1', KS);
+    expect(svc.deleteSession).toHaveBeenCalledWith('s1', KS);
     expect(svc.getRunLog).toHaveBeenCalledWith('r1');
-    expect(svc.mintSocketTicket).toHaveBeenCalledWith('r1');
+    expect(svc.mintSocketTicket).toHaveBeenCalledWith('r1', KS);
   });
 });

@@ -8,46 +8,33 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { ENV } from '../config/config.module.js';
 import type { Env } from '../config/env.js';
-import { KnowledgeChatEngineService } from './engine/knowledge-chat-engine.service.js';
+import { ChatEngineRegistry } from './engine/chat-engine-registry.js';
 import { KnowledgeChatTicketService } from './engine/knowledge-chat-ticket.service.js';
+import { CodexRoleVerificationService } from './codex-role-verification.service.js';
+import { DoctorRunContextService } from '../plant-doctor/doctor-run-context.service.js';
+import { resolveEffectiveProvider } from './effective-provider.js';
+import { WORKSPACE_ENV } from './doctor-workspace-env.js';
+import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
 
 // The engine's typed "there is nothing left to read" errors. Classified against the package's own error
 // classes rather than by matching message text, so a reworded message cannot silently turn a real outage
 // into a fake "empty transcript".
-// ONLY this one: the agent no longer holds the session on disk (it purged it, or the conversation predates
-// this engine). That is a real, expected, unrecoverable loss of the VIEW — not of the conversation.
-//
-// Deliberately NOT degraded, because each would be a defect wearing a lost-transcript costume:
-//   - InvalidSessionIdError — our DB holds an id the agent's adapter refuses outright: data corruption.
-//   - OwnRunLogUnavailableError — since runsForSession() became all-or-nothing we never claim a run the
-//     engine cannot resolve, so this can now only mean the index changed under us. A real bug.
-// Both stay loud (500). Dressing an outage up as "your old chat is empty" is how a defect hides in plain
-// sight — the exact failure this classification exists to prevent.
 function isHistoryGone(err: unknown): boolean {
   return err instanceof SessionNotFoundError;
 }
 
 // Our history envelope: the package's canonical SessionHistory, plus the one fact only WE can report —
-// that the agent itself no longer holds this session, so the conversation is not merely unreadable, it is
-// un-continuable.
-//
-// KNOWN LIMIT, stated rather than hidden: this flag is SOUND but not EXHAUSTIVE. It can only be raised when
-// the restore actually consulted the agent's own transcript and was told the session is gone. A conversation
-// rebuilt from OUR canonical logs never asks the agent anything, so an agent that has since purged its
-// session looks identical to one that has not. We accept that: making it exhaustive would mean probing the
-// agent on every chat open — for Codex, spawning an app-server process each time — on the hot path, to
-// pre-empt a failure that already surfaces loudly and harmlessly (the resume run fails and the UI shows the
-// agent's error; nothing is corrupted and no history is lost). So: when the flag is true, we KNOW; when it
-// is absent, we simply do not claim to know.
+// that the agent itself no longer holds this session, so the conversation is un-continuable.
 export type KnowledgeChatHistory = SessionHistory & { agentSessionMissing?: boolean };
 
 // What a turn actually carries. The XOR is the contract, and it is the same one the wire and the DB enforce.
 export type TurnInput = { prompt: string; command?: never } | { command: AgentCommand; prompt?: never };
 
+type SessionKind = 'KNOWLEDGE' | 'DOCTOR';
+
 const ACTIVE = ['QUEUED', 'RUNNING'] as const;
-// The value in `activeKey` while a run is non-terminal. Cleared to null on every terminal transition
-// (here on launch failure; in the orchestrator on runFinished). The @@unique([sessionId, activeKey])
-// constraint then permits at most ONE active run per session (null is exempt in MySQL/MariaDB).
+// The value in `activeKey` while a run is non-terminal. Cleared to null on every terminal transition. The
+// @@unique([sessionId, activeKey]) constraint then permits at most ONE active run per session.
 const ACTIVE_KEY = 'ACTIVE';
 type KnowledgeChatRunRow = { id: string; status: string; startedAt: Date | null; createdAt: Date };
 
@@ -57,26 +44,34 @@ export class KnowledgeChatService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly engine: KnowledgeChatEngineService,
+    private readonly engines: ChatEngineRegistry,
     private readonly tickets: KnowledgeChatTicketService,
     private readonly owner: OwnerService,
+    private readonly doctorRunContext: DoctorRunContextService,
+    private readonly codexVerification: CodexRoleVerificationService,
     @Inject(ENV) private readonly env: Env,
   ) {}
 
-  private logPath(runId: string): string {
-    return join(this.env.KNOWLEDGE_CHAT_LOG_DIR, `${runId}.ndjson`);
+  // A run's log lives under ITS engine's log dir (KNOWLEDGE vs DOCTOR), resolved via the registry — never a
+  // single hard-coded dir, or a doctor run's log would be written under the KE's logRoot and rejected.
+  private logPath(kind: SessionKind, runId: string): string {
+    return join(this.engines.logDirFor(kind), `${runId}.ndjson`);
   }
 
-  // A run is "stale" once it is past the engine's own reap window (timeout + buffer) with no terminal
-  // callback — i.e. its process is (almost certainly) gone. Time-based, anchored on startedAt (or
-  // createdAt for a never-started QUEUED orphan). Mirrors retaxmaster's isStale.
+  // Refuse a codex run whose engine has not verified its Codex role loading (Spec 3 §3.2, fail-closed). The
+  // gate is on the run-path-resolved (sealed-aware) provider, so a resume of a sealed codex session is
+  // refused whether the DTO omits `provider` or sends a misleading `provider:'claude'`.
+  private async assertCodexAllowed(kind: SessionKind, provider: AgentProvider): Promise<void> {
+    if (provider !== 'codex') return;
+    if (await this.codexVerification.isVerified(kind)) return;
+    throw new UnprocessableEntityException('Codex is unavailable for this pipeline (roles not verified).');
+  }
+
   private isStale(run: KnowledgeChatRunRow): boolean {
     const anchor = (run.startedAt ?? run.createdAt).getTime();
     return Date.now() - anchor > this.env.KNOWLEDGE_CHAT_RUN_TIMEOUT_MS + this.env.KNOWLEDGE_CHAT_RUN_BUFFER_MS;
   }
 
-  // Free the unique slot for any STALE active run (dead process, no terminal callback) so it doesn't
-  // block the session forever. A genuinely live run is left alone — the atomic insert below will 409.
   private async reconcileStaleActive(sessionId: string): Promise<void> {
     const active = (await this.prisma.knowledgeChatRun.findMany({
       where: { sessionId, activeKey: ACTIVE_KEY },
@@ -92,11 +87,8 @@ export class KnowledgeChatService {
   }
 
   // Atomically claim the single active slot: reconcile a stale run, then INSERT a new run holding
-  // activeKey='ACTIVE'. Concurrency is decided by the DB unique constraint — a racing second insert
-  // hits P2002 and becomes a 409. A read-then-check could not prevent the double-insert.
-  // `onlyWhileUnsealed` (the RETRY of an opening turn): re-point the conversation at `provider`, but only
-  // while it still has no agent session — and do it in the SAME transaction that creates the run and hands
-  // it the seal claim. Returns null if the conversation got sealed in the meantime (caller resumes instead).
+  // activeKey='ACTIVE'. Concurrency is decided by the DB unique constraint — a racing second insert hits
+  // P2002 and becomes a 409. See the long-form comments preserved in git history for the seal-claim TOCTOU.
   private async insertActiveRun(
     sessionId: string,
     provider: AgentProvider,
@@ -105,17 +97,6 @@ export class KnowledgeChatService {
   ): Promise<string | null> {
     await this.reconcileStaleActive(sessionId);
     try {
-      // ONE transaction. Re-pointing the agent, creating the run, and handing that run the SEAL CLAIM
-      // (`pendingRunId`) are all halves of a single fact — "this run is now the conversation's attempt" —
-      // and they must be decided against the same row state, or the race simply moves into the gap between
-      // them (which is exactly where it was: the abandoned run's late `session.started` still matched the
-      // OLD claim after we had already re-pointed the provider, sealing the conversation to the agent the
-      // user had just walked away from, while its replacement was launching).
-      //
-      // The conditional UPDATE below takes the session row's write lock. A concurrent seal targets that same
-      // row, so it must WAIT for this transaction and then re-evaluate its WHERE clause against the
-      // committed state — by which time `pendingRunId` names the new run and the stale seal cannot match.
-      // The two now contend for one row, and exactly one wins.
       return await this.prisma.$transaction(async (tx) => {
         if (opts?.onlyWhileUnsealed) {
           const { count } = await tx.knowledgeChatSession.updateMany({
@@ -125,13 +106,9 @@ export class KnowledgeChatService {
           if (count === 0) return null; // sealed in the gap → this is no longer a retry
         }
         const run = await tx.knowledgeChatRun.create({
-          // The agent is recorded ON the run: it is the only thing that knows which agent produced the
-          // session id it later reports, and the orchestrator seals `provider` + `providerSessionId` from
-          // that same row, atomically, so the pair can never describe two different agents.
           data: {
             sessionId,
             provider,
-            // Exactly one side is populated; the other is explicitly null. Never a "/name" in `prompt`.
             prompt: input.command ? null : input.prompt,
             commandName: input.command?.name ?? null,
             commandArgs: input.command?.args ?? null,
@@ -153,8 +130,9 @@ export class KnowledgeChatService {
     }
   }
 
-  async listSessions() {
+  async listSessions(scope: SessionScope) {
     const sessions = await this.prisma.knowledgeChatSession.findMany({
+      where: whereForScope(scope),
       orderBy: { createdAt: 'desc' },
       include: { runs: { orderBy: { createdAt: 'desc' } } },
     });
@@ -163,6 +141,9 @@ export class KnowledgeChatService {
       provider: s.provider,
       providerSessionId: s.providerSessionId,
       title: s.title,
+      // Truthful read-model fields the web's optional kind/plantId lean on (KE → KNOWLEDGE/null).
+      kind: s.kind,
+      plantId: s.plantId,
       status: s.runs[0]?.status ?? null,
       turns: s.runs.length,
       createdAt: s.createdAt,
@@ -170,127 +151,133 @@ export class KnowledgeChatService {
     }));
   }
 
-  async getSession(id: string) {
+  async getSession(id: string, scope: SessionScope) {
     const session = await this.prisma.knowledgeChatSession.findUnique({
       where: { id },
       include: { runs: { orderBy: { createdAt: 'asc' } } },
     });
-    if (!session) throw new NotFoundException(`Unknown session: ${id}`);
+    // A session from another plant/owner/kind is indistinguishable from "not found" (Spec 3 §3.2).
+    if (!session || !sessionMatchesScope(session, scope)) throw new NotFoundException(`Unknown session: ${id}`);
+    const logBase = session.kind === 'DOCTOR' ? `/plants/${session.plantId}/diagnose` : '/knowledge-chat';
     return {
       id: session.id,
       title: session.title,
-      // The agent this conversation is locked to — the UI seeds its picker with it (and locks it once
-      // providerSessionId exists, i.e. a real agent session was established).
       provider: session.provider,
       providerSessionId: session.providerSessionId,
+      kind: session.kind,
+      plantId: session.plantId,
       turns: session.runs.map((r) => ({
         runId: r.id,
         prompt: r.prompt,
         command: r.commandName ? { name: r.commandName, args: r.commandArgs ?? '' } : null,
         status: r.status,
         isActive: (ACTIVE as readonly string[]).includes(r.status),
-        logUrl: `/knowledge-chat/runs/${r.id}/log`,
+        logUrl: `${logBase}/runs/${r.id}/log`,
       })),
     };
   }
 
-  // The AGENT is chosen here, once, and every later turn of this conversation reuses it: a Claude
-  // session and a Codex thread cannot read each other's history, so a conversation is bound to the agent
-  // that actually holds its memory.
-  async createSession(prompt: string, provider: AgentProvider): Promise<{ sessionId: string; runId: string; ticket: string }> {
+  // The AGENT is chosen here, once, and every later turn reuses it. The scope stamps kind/plantId/ownerId so
+  // the same method serves both the KE controller ({kind:'KNOWLEDGE'}) and the doctor controller
+  // ({kind:'DOCTOR', plantId, ownerId}).
+  async createSession(
+    prompt: string,
+    provider: AgentProvider,
+    scope: SessionScope,
+  ): Promise<{ sessionId: string; runId: string; ticket: string }> {
+    // Codex gate BEFORE we create anything (isCreate → the create provider is the effective one).
+    await this.assertCodexAllowed(scope.kind, resolveEffectiveProvider({ isCreate: true, sealed: false, requestProvider: provider }));
     const actor = this.owner.currentActor();
     const title = prompt.slice(0, 160);
-    // Fresh session → no prior active run, so the atomic insert never conflicts here.
     const session = await this.prisma.knowledgeChatSession.create({
-      data: { title, provider, createdByUserId: actor?.userId ?? null },
+      data: {
+        title,
+        provider,
+        createdByUserId: actor?.userId ?? null,
+        kind: scope.kind,
+        plantId: scope.kind === 'DOCTOR' ? scope.plantId : null,
+        ownerId: scope.kind === 'DOCTOR' ? scope.ownerId : null,
+      },
     });
     const runId = (await this.insertActiveRun(session.id, provider, { prompt }))!;
-    const ticket = await this.launch(runId, provider, { prompt }, null);
+    const ticket = await this.launch(runId, provider, { prompt }, null, scope.kind, session);
     return { sessionId: session.id, runId, ticket };
   }
 
-  // Continue a conversation — or RETRY its opening turn if that turn never got an agent off the ground.
-  //
-  // The provider is committed on PROOF OF A REAL SESSION (an agent session id), not on the mere intent to
-  // run one. That distinction is the whole ballgame: a first run that never spawned (the agent was signed
-  // out, the binary was missing, the engine refused it at the availability gate) leaves a conversation
-  // with NO agent memory behind it. Treating such a conversation as "locked to that agent, permanently
-  // un-resumable" traps the user on a broken agent with no way out but deleting the conversation — so
-  // while `providerSessionId` is null the opening turn is simply retried, and the caller may name a
-  // DIFFERENT agent, because there is no memory for a second agent to contradict.
-  //
-  // Once an agent session exists, the agent is FINAL: the caller does not get to pick. Resuming a Claude
-  // session on Codex would hand an agent a memory it cannot read.
   async resume(
     sessionId: string,
     input: TurnInput,
-    provider?: AgentProvider,
+    provider: AgentProvider | undefined,
+    scope: SessionScope,
   ): Promise<{ runId: string; ticket: string }> {
     const session = await this.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
-    if (!session) throw new NotFoundException(`Unknown session: ${sessionId}`);
+    if (!session || !sessionMatchesScope(session, scope)) throw new NotFoundException(`Unknown session: ${sessionId}`);
 
     if (!session.providerSessionId) {
-      // A command needs a live agent session to act ON: there is nothing to compact, and no session whose
-      // model to switch. The un-sealed branch below RETRIES the opening turn — and an opening turn is a
-      // prompt, by construction. Refuse here rather than launch a run that can only fail obscurely.
       if (input.command) {
         throw new UnprocessableEntityException(
           'A command needs an established agent session — send a message first.',
         );
       }
-      // The opening turn never established an agent session → retry it, on whichever agent is asked for
-      // (defaulting to the one originally chosen). Not a resume: there is nothing to resume FROM, so the
-      // run starts a FRESH agent session (resumeSessionId = null). The whole claim — re-point the agent,
-      // create the run, take the seal — is decided atomically against one row, so an abandoned run's late
-      // report cannot slip in between and pin the conversation to the agent being replaced.
       const retryProvider = provider ?? (session.provider as AgentProvider);
+      // Codex gate on the effective provider (unsealed retry → request ?? session provider).
+      await this.assertCodexAllowed(scope.kind, resolveEffectiveProvider({
+        isCreate: false, sealed: false, sessionProvider: session.provider as AgentProvider, requestProvider: provider,
+      }));
       const runId = await this.insertActiveRun(sessionId, retryProvider, input, { onlyWhileUnsealed: true });
       if (runId) {
-        const ticket = await this.launch(runId, retryProvider, input, null);
+        const ticket = await this.launch(runId, retryProvider, input, null, scope.kind, session);
         return { runId, ticket };
       }
-      // Lost the race: an agent session appeared while we were claiming. The conversation now HAS a memory,
-      // so it is no longer a retry — continue it, on ITS agent.
+      // Lost the race: a session appeared while we were claiming. Continue it on ITS agent.
       const settled = await this.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
       if (!settled?.providerSessionId) throw new NotFoundException(`Unknown session: ${sessionId}`);
       session.provider = settled.provider;
       session.providerSessionId = settled.providerSessionId;
     }
 
-    // Atomic single-active-run claim (reconcile stale → insert; P2002 → 409). Unguarded, so it always
-    // returns a run id.
+    // Sealed: the agent is FINAL; the request `provider` is ignored. Gate on the sealed provider.
     const sessionProvider = session.provider as AgentProvider;
+    await this.assertCodexAllowed(scope.kind, resolveEffectiveProvider({
+      isCreate: false, sealed: true, sessionProvider, requestProvider: provider,
+    }));
     const runId = (await this.insertActiveRun(sessionId, sessionProvider, input))!;
-    const ticket = await this.launch(runId, sessionProvider, input, session.providerSessionId!);
+    const ticket = await this.launch(runId, sessionProvider, input, session.providerSessionId!, scope.kind, session);
     return { runId, ticket };
   }
 
-  // Name the log file, mint a ticket, trigger /execute. On engine failure mark the run FAILED
-  // immediately AND clear activeKey (never leave it stuck QUEUED / holding the slot).
+  // Name the log file, mint a ticket, trigger /execute — routed to the engine for this session's kind. On
+  // engine failure mark the run FAILED immediately AND clear activeKey. For a DOCTOR run, the per-session
+  // workspace + doctor-context.json + scoped token are prepared BEFORE execute() and the workspace path is
+  // injected as PLANT_DOCTOR_SESSION_WORKSPACE via the per-run env (Task-2 seam).
   private async launch(
     runId: string,
     provider: AgentProvider,
     input: TurnInput,
     resumeSessionId: string | null,
+    kind: SessionKind,
+    session: { id: string; plantId?: string | null; ownerId?: string | null },
   ): Promise<string> {
-    const logPath = this.logPath(runId);
-    // The ENTIRE launch is guarded: any failure — log-dir mkdir, ticket mint, or the /execute call —
-    // must mark the run FAILED and clear activeKey, so a launch error never leaves the run stuck QUEUED
-    // holding the session's single-active slot (which would 409 resume/delete until the stale window
-    // elapses). Own the log-dir precondition (idempotent) rather than depend on the engine's
-    // onModuleInit having run first.
-    //
-    // We do NOT create the log file. Since agents-realtime 1.0.0 the ENGINE creates it exclusively
-    // (O_CREAT|O_EXCL) and writes its header + the user prompt into it; a path that already exists is
-    // rejected pre-acceptance, so the old `writeFile(logPath, '')` here would 422 every single run. That
-    // exclusivity is also the guard that stops two runs from ever sharing one log — do not reinstate it.
+    const logPath = this.logPath(kind, runId);
     try {
-      await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
+      await mkdir(this.engines.logDirFor(kind), { recursive: true });
+      let perRunEnv: Record<string, string> | undefined;
+      if (kind === 'DOCTOR') {
+        const actor = this.owner.currentActor();
+        const { workspaceDir } = await this.doctorRunContext.prepareRun({
+          sessionId: session.id,
+          plantId: session.plantId!,
+          ownerId: session.ownerId!,
+          userId: actor?.userId ?? '',
+          username: actor?.username ?? '',
+        });
+        perRunEnv = { [WORKSPACE_ENV]: workspaceDir };
+      }
       const ticket = await this.tickets.mint(runId);
-      await this.engine.execute(
+      await this.engines.engineFor(kind).execute(
         input.command
-          ? { runId, provider, command: input.command, logPath, resumeSessionId }
-          : { runId, provider, prompt: input.prompt, logPath, resumeSessionId },
+          ? { runId, provider, command: input.command, logPath, resumeSessionId, env: perRunEnv }
+          : { runId, provider, prompt: input.prompt, logPath, resumeSessionId, env: perRunEnv },
       );
       return ticket;
     } catch (err) {
@@ -302,70 +289,87 @@ export class KnowledgeChatService {
     }
   }
 
-  async deleteSession(id: string): Promise<{ ok: true }> {
+  // Delete a session. For a DOCTOR session, sweep the FS (workspace + logs) FIRST and only delete the row if
+  // the sweep succeeds — never leave a workspace (which holds a scoped token) whose locating row is gone
+  // (Spec 3 §3.1, same ordering the plant-delete purge uses).
+  async deleteSession(id: string, scope: SessionScope): Promise<{ ok: true }> {
     const session = await this.prisma.knowledgeChatSession.findUnique({
       where: { id },
       include: { runs: true },
     });
-    if (!session) throw new NotFoundException(`Unknown session: ${id}`);
+    if (!session || !sessionMatchesScope(session, scope)) throw new NotFoundException(`Unknown session: ${id}`);
     const active = session.runs.find(
       (r) => (ACTIVE as readonly string[]).includes(r.status) && !this.isStale(r),
     );
     if (active) throw new ConflictException('Cannot delete a session with an active run');
-    // Best-effort log purge (files are runtime artifacts). Cascade deletes runs + tickets.
-    await Promise.all(session.runs.map((r) => rm(this.logPath(r.id), { force: true })));
+    const kind = session.kind as SessionKind;
+    // Sweep FS first (best-effort logs are runtime artifacts, but for DOCTOR the workspace holds a token, so
+    // if the sweep THROWS we abort before deleting the row — retryable, never a silent orphan).
+    if (kind === 'DOCTOR') {
+      await this.doctorRunContext.sweep(id);
+    }
+    await Promise.all(session.runs.map((r) => rm(this.logPath(kind, r.id), { force: true })));
     await this.prisma.knowledgeChatSession.delete({ where: { id } });
     return { ok: true };
   }
 
-  // The conversation's transcript, as canonical AgentEvents the chat UI can seed straight into its
-  // transcript. Sourced from the engine (which rebuilds it from the runs WE executed), never parsed here.
-  // A conversation whose first run never established an agent session has no history to load — and never
-  // will — so it answers 422 rather than pretending an empty transcript is a successful read.
-  async getSessionHistory(id: string): Promise<KnowledgeChatHistory> {
+  async getSessionHistory(id: string, scope: SessionScope): Promise<KnowledgeChatHistory> {
     const session = await this.prisma.knowledgeChatSession.findUnique({ where: { id } });
-    if (!session) throw new NotFoundException(`Unknown session: ${id}`);
+    if (!session || !sessionMatchesScope(session, scope)) throw new NotFoundException(`Unknown session: ${id}`);
     if (!session.providerSessionId) {
       throw new UnprocessableEntityException('Session has no agent session yet (its first run never started one)');
     }
     const provider = session.provider as AgentProvider;
     try {
-      return await this.engine.loadHistory(provider, session.providerSessionId);
+      return await this.engines.engineFor(session.kind as SessionKind).loadHistory(provider, session.providerSessionId);
     } catch (err) {
-      // Degrade ONLY the errors that genuinely mean "this transcript no longer exists to be read":
-      // the agent purged its own on-disk session, or this conversation predates the engine's durable run
-      // index (a pre-1.0.0 run). For those, an empty transcript is the honest answer — the conversation
-      // still exists, is still bound to its agent, and is still resumable; only our VIEW of the past is
-      // gone. The agent itself has not forgotten.
-      //
-      // Everything else — a misconfigured engine, an unreadable directory, a bug in our own locator — is a
-      // REAL failure and must stay loud (a 500). Swallowing those would dress an operational outage up as
-      // "the user's old chat is empty", which is precisely how a defect hides in plain sight.
       if (!isHistoryGone(err)) throw err;
       this.logger.warn(
-        `Knowledge-chat session ${id}: transcript no longer available (${(err as Error).message}) — serving an empty history.`,
+        `Chat session ${id}: transcript no longer available (${(err as Error).message}) — serving an empty history.`,
       );
-      // `agentSessionMissing` is not decoration: SessionNotFoundError means the AGENT no longer holds this
-      // session, so continuing the conversation cannot work either — a resume would hand the agent a session
-      // id it will reject. Telling the UI lets it say so plainly instead of inviting the user to send a
-      // message that is guaranteed to fail with a cryptic agent error.
       return { provider, providerSessionId: session.providerSessionId, turns: [], agentSessionMissing: true };
     }
   }
 
   async getRunLog(runId: string): Promise<string> {
-    const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId } });
+    const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId }, include: { session: true } });
     if (!run) throw new NotFoundException(`Unknown run: ${runId}`);
     try {
-      return await readFile(this.logPath(runId), 'utf8');
+      return await readFile(this.logPath(run.session.kind as SessionKind, runId), 'utf8');
     } catch {
       throw new NotFoundException('Transcript log not found');
     }
   }
 
-  async mintSocketTicket(runId: string): Promise<{ ticket: string }> {
-    const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId } });
-    if (!run) throw new NotFoundException(`Unknown run: ${runId}`);
+  async mintSocketTicket(runId: string, scope: SessionScope): Promise<{ ticket: string }> {
+    const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId }, include: { session: true } });
+    // A runId whose session belongs to another plant/owner/kind 404s (Spec 3 §3.2).
+    if (!run || !sessionMatchesScope(run.session, scope)) throw new NotFoundException(`Unknown run: ${runId}`);
     return { ticket: await this.tickets.mint(runId) };
+  }
+
+  // Cancel a live run, then reconcile its row. agents-realtime v2.4 exposes NO host-facing cancel API —
+  // cancellation is engine-internal (the runner is a DETACHED process-group leader the engine SIGTERMs by
+  // pid, then escalates). So the honest, minimal stop is a best-effort cooperative SIGTERM to that leader
+  // (Phase A of the engine's own reap), guarded so a dead/absent pid is a no-op. We then reconcile the row
+  // to CANCELLED and free the active slot — idempotent with the engine's own runFinished callback
+  // (single-winner via the active-status guard). Used by the plant-delete purge (Spec 3 §3.1) so a row is
+  // never yanked out from under a live run. NOTE: a first-class host cancel API is a future package change.
+  async cancelRun(runId: string): Promise<void> {
+    const run = (await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId } })) as
+      | (KnowledgeChatRunRow & { pid: number | null })
+      | null;
+    if (!run) return;
+    if ((ACTIVE as readonly string[]).includes(run.status) && typeof run.pid === 'number') {
+      try {
+        process.kill(run.pid, 'SIGTERM'); // cooperative stop of the run's leader; best-effort
+      } catch {
+        // Already gone (ESRCH) or not permitted — the reconcile below still frees the slot.
+      }
+    }
+    await this.prisma.knowledgeChatRun.updateMany({
+      where: { id: runId, status: { in: [...ACTIVE] } },
+      data: { status: 'CANCELLED', finishedAt: new Date(), pid: null, activeKey: null },
+    });
   }
 }

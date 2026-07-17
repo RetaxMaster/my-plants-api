@@ -11,6 +11,7 @@ import { loadEnv } from '../src/config/env.js';
 import { KnowledgeChatTicketService } from '../src/knowledge-chat/engine/knowledge-chat-ticket.service.js';
 import { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
 import { buildEngineConfig } from '../src/knowledge-chat/engine/knowledge-chat-engine.config.js';
+import { knowledgeEngineParams } from '../src/knowledge-chat/engine/engine-params.js';
 import { rescueLegacyLogs } from '../src/knowledge-chat/legacy-log-rescue.core.js';
 
 // CLAIM the engine's port and HOLD it for the entire rescue — this is a LOCK, not a check.
@@ -64,9 +65,10 @@ async function main() {
     // bound port, no runner, no agent. createServer is entitled to call the orchestrator (its own
     // constructor + config building do), so it is NOT stubbed — a fake would let a real wiring bug in
     // buildEngineConfig sail through undetected.
+    const kparams = knowledgeEngineParams(env);
     const tickets = new KnowledgeChatTicketService(prisma as never, env);
-    const orchestrator = new KnowledgeChatOrchestrator(prisma as never, tickets, env);
-    const server = createServer(buildEngineConfig(env, orchestrator, orchestrator));
+    const orchestrator = new KnowledgeChatOrchestrator(kparams, prisma as never, tickets);
+    const server = createServer(buildEngineConfig(kparams, env, orchestrator, orchestrator));
 
     const report = await rescueLegacyLogs(prisma, env.KNOWLEDGE_CHAT_LOG_DIR, server);
 

@@ -15,6 +15,10 @@ export interface JwtPayload {
   // Session-start anchor (epoch seconds), set at first login and preserved across refreshes.
   // Absent on legacy tokens minted before this feature — verify() falls back to iat for those.
   sst?: number;
+  // Plant Doctor scoped token (Spec 3 §3.3): `scope:'doctor'` + `plantId` NARROW an otherwise-normal
+  // owner token to a five-endpoint allowlist pinned to that one plant. Absent on every ordinary token.
+  scope?: 'doctor';
+  plantId?: string;
   iat: number;
   exp: number;
 }
@@ -78,6 +82,34 @@ export class AuthService {
     });
     await this.logout(actor.jti, actor.exp); // revoke the superseded token
     return { token };
+  }
+
+  // A per-run token scoped to ONE plant (Spec 3 §3.3). It carries a FULL, self-consistent payload so the
+  // normal pipeline (verify → jti revocation → JwtAuthGuard → Actor) builds a valid actor; `scope:'doctor'`
+  // + `plantId` NARROW it (the DoctorScopeGuard default-denies it everywhere but a five-endpoint allowlist
+  // pinned to that plant). role is ALWAYS USER — a doctor token is never an admin token. TTL is short
+  // (PLANT_DOCTOR_TOKEN_TTL_MS), covering one run. `sst` is set so verify()'s absolute-cap math has an
+  // anchor (a fresh token is well within the cap).
+  async mintDoctorToken(input: {
+    userId: string;
+    username: string;
+    ownerId: string;
+    plantId: string;
+  }): Promise<string> {
+    const ttlSeconds = Math.floor(this.env.PLANT_DOCTOR_TOKEN_TTL_MS / 1000);
+    return this.jwt.signAsync(
+      {
+        sub: input.userId,
+        username: input.username,
+        ownerId: input.ownerId,
+        role: 'USER' as const,
+        jti: randomUUID(),
+        sst: Math.floor(Date.now() / 1000),
+        scope: 'doctor' as const,
+        plantId: input.plantId,
+      },
+      { expiresIn: ttlSeconds }, // per-call override of the module's 30d default
+    );
   }
 
   async verify(token: string): Promise<JwtPayload> {

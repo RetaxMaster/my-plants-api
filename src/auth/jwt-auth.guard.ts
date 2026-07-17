@@ -36,6 +36,9 @@ export class JwtAuthGuard implements CanActivate {
       jti: payload.jti,
       sst: payload.sst ?? payload.iat,
       exp: payload.exp,
+      // Carry the doctor scope through so the global DoctorScopeGuard can narrow it (Spec 3 §3.3).
+      scope: payload.scope,
+      plantId: payload.plantId,
     };
     // Acting As: honor X-Act-As-Owner ONLY for an ADMIN (a USER's header is ignored — no escalation).
     // Validate existence here so a bogus target fails with a controlled 403 instead of a later FK/500.

@@ -4,6 +4,7 @@ import { createServer, type AgentsRealtimeServer } from '@retaxmaster/agents-rea
 import type { AgentCommand, AgentProvider, AgentProviderStatus, CommandCatalog, SessionHistory } from '@retaxmaster/agents-realtime-protocol';
 import { ENV } from '../../config/config.module.js';
 import type { Env } from '../../config/env.js';
+import type { EngineParams } from './engine-params.js';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
 import { buildEngineConfig } from './knowledge-chat-engine.config.js';
 
@@ -21,19 +22,40 @@ export type ExecuteRequest = {
   provider: AgentProvider;
   logPath: string;
   resumeSessionId: string | null;
+  // Per-run env merged into the spawned runner's environment (the engine's supervisor already does
+  // `{ ...process.env, ...req.env }`). The Plant Doctor uses it to inject PLANT_DOCTOR_SESSION_WORKSPACE
+  // so a DOCTOR run's tools resolve THIS session's workspace — per-run, never a racy global. (See the
+  // Task-2 seam note: the vendored /execute handler must thread the body `env` to the supervisor; that
+  // minimal package thread is the one integration-gated dependency. The host side is wired here now.)
+  env?: Record<string, string>;
 } & ({ prompt: string; command?: never } | { command: AgentCommand; prompt?: never });
+
+// The engine surface the shared service + the two controllers depend on. Both engine instances (KNOWLEDGE
+// and DOCTOR) implement it, so the registry can hand back either behind one type (reuse-not-fork, Spec 3 §2).
+export interface ChatEngine {
+  readonly isRunning: boolean;
+  readonly logDir: string;
+  providerStatus(opts?: { force?: boolean }): Promise<AgentProviderStatus[]>;
+  commandCatalog(provider: AgentProvider, opts?: { force?: boolean }): Promise<CommandCatalog>;
+  loadHistory(provider: AgentProvider, providerSessionId: string): Promise<SessionHistory>;
+  execute(req: ExecuteRequest): Promise<void>;
+}
 
 // Owns the embedded realtime engine lifecycle. On boot it builds config, ensures the log + state dirs
 // exist, and listen()s (binding 127.0.0.1). listen() also re-adopts still-running runners via the
 // orchestrator's activeRuns() + the engine's durable run index. execute() is the localhost control-plane
 // call the chat routes use to trigger a run (defense-in-depth even in-process: the package's own
 // secret-gated /execute).
+// Param-driven so ONE class runs BOTH engines: the constructor bakes an `EngineParams` (KNOWLEDGE or
+// DOCTOR) — its cwd/port/secret/log+state dirs — and the module provides two instances under the
+// KNOWLEDGE_ENGINE / DOCTOR_ENGINE tokens (reuse-not-fork, Spec 3 §2).
 @Injectable()
-export class KnowledgeChatEngineService implements OnModuleInit, OnModuleDestroy {
+export class KnowledgeChatEngineService implements ChatEngine, OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(KnowledgeChatEngineService.name);
   private server: AgentsRealtimeServer | null = null;
 
   constructor(
+    private readonly params: EngineParams,
     @Inject(ENV) private readonly env: Env,
     private readonly orchestrator: KnowledgeChatOrchestrator,
   ) {}
@@ -42,29 +64,35 @@ export class KnowledgeChatEngineService implements OnModuleInit, OnModuleDestroy
     return this.server !== null;
   }
 
+  // The dir this engine's run logs live in — the registry hands it to the service so a run's logPath is
+  // built under the RIGHT engine's dir (its `logRoot` allow-list), never the other engine's.
+  get logDir(): string {
+    return this.params.logDir;
+  }
+
   private get baseUrl(): string {
-    const port = this.server?.port ?? this.env.KNOWLEDGE_CHAT_ENGINE_PORT;
+    const port = this.server?.port ?? this.params.port;
     return `http://127.0.0.1:${port}`;
   }
 
   async onModuleInit(): Promise<void> {
-    if (!this.env.KNOWLEDGE_CHAT_ENGINE_ENABLED) {
-      this.logger.warn('Knowledge-chat engine disabled (KNOWLEDGE_CHAT_ENGINE_ENABLED=false) — not listening.');
+    if (!this.params.enabled) {
+      this.logger.warn(`Chat engine [${this.params.kind}] disabled — not listening.`);
       return;
     }
-    // Both dirs are engine preconditions: KNOWLEDGE_CHAT_LOG_DIR is the `logRoot` allow-list a run log
-    // must live under, KNOWLEDGE_CHAT_STATE_DIR holds the durable run index. createServer creates them
-    // itself, but we own them here too so a fresh checkout boots with no manual setup.
-    await mkdir(this.env.KNOWLEDGE_CHAT_LOG_DIR, { recursive: true });
-    await mkdir(this.env.KNOWLEDGE_CHAT_STATE_DIR, { recursive: true });
+    // Both dirs are engine preconditions: logDir is the `logRoot` allow-list a run log must live under,
+    // stateDir holds the durable run index. createServer creates them itself, but we own them here too so
+    // a fresh checkout boots with no manual setup.
+    await mkdir(this.params.logDir, { recursive: true });
+    await mkdir(this.params.stateDir, { recursive: true });
     // The orchestrator is BOTH the host-backend seam and the own-run locator (it is the only thing that
     // knows which runs belong to which conversation).
-    this.server = createServer(buildEngineConfig(this.env, this.orchestrator, this.orchestrator));
+    this.server = createServer(buildEngineConfig(this.params, this.env, this.orchestrator, this.orchestrator));
     // Close the construction cycle: the orchestrator can only claim a run as "ours" if the engine can
     // resolve its log — which it can only answer once it exists. See runsForSession.
     this.orchestrator.setRunLogResolver(this.server.runLogResolver);
     await this.server.listen();
-    this.logger.log(`Knowledge-chat engine listening on ${this.baseUrl} (re-adopted active runs).`);
+    this.logger.log(`Chat engine [${this.params.kind}] listening on ${this.baseUrl} (re-adopted active runs).`);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -114,7 +142,7 @@ export class KnowledgeChatEngineService implements OnModuleInit, OnModuleDestroy
   async loadHistory(provider: AgentProvider, providerSessionId: string): Promise<SessionHistory> {
     if (!this.server) throw new Error('Knowledge-chat engine is not running');
     return this.server.sessions.loadSessionHistory(provider, providerSessionId, {
-      cwd: this.env.KNOWLEDGE_ENGINE_CWD,
+      cwd: this.params.cwd,
     });
   }
 
@@ -127,7 +155,7 @@ export class KnowledgeChatEngineService implements OnModuleInit, OnModuleDestroy
     const res = await fetch(`${this.baseUrl}/execute`, {
       method: 'POST',
       // Renamed in 1.0.0 (was X-Claude-RT-Secret). A stale header name means 401 on every call.
-      headers: { 'content-type': 'application/json', 'X-Agents-RT-Secret': this.env.KNOWLEDGE_CHAT_ENGINE_SECRET },
+      headers: { 'content-type': 'application/json', 'X-Agents-RT-Secret': this.params.secret },
       body: JSON.stringify(req),
     });
     if (!res.ok) {

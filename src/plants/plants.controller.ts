@@ -16,6 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { plantProfileUpdateSchema, type PlantProfileUpdate } from '@retaxmaster/my-plants-species-schema';
 import { imageUploadMulterOptions } from '../storage/multipart.config.js';
 import { ZodValidationPipe } from '../common/zod-validation.pipe.js';
+import { DoctorAllowed } from '../auth/doctor-scope.decorator.js';
 import { CreatePlantDto } from './create-plant.dto.js';
 import { UpdatePlantDto } from './update-plant.dto.js';
 import { PlantsService } from './plants.service.js';
@@ -26,7 +27,8 @@ export class PlantsController {
 
   @Get() list() { return this.plants.list(); }
   @Post() create(@Body() dto: CreatePlantDto) { return this.plants.create(dto); }
-  @Get(':id/care') getCare(@Param('id') id: string) { return this.plants.getCare(id); }
+  // Doctor reads the computed care plan (Spec 3 §3.3 allowlist), pinned to :id === token.plantId.
+  @Get(':id/care') @DoctorAllowed() getCare(@Param('id') id: string) { return this.plants.getCare(id); }
 
   // Cover photo: multipart single file, field name `photo`, shared upload config.
   @Put(':id/cover-photo')
@@ -51,7 +53,9 @@ export class PlantsController {
     return this.plants.getPhotos(id);
   }
 
+  // Doctor completes/corrects the physical profile (Spec 3 §3.3 allowlist), pinned to :id === token.plantId.
   @Patch(':id/profile')
+  @DoctorAllowed()
   updateProfile(
     @Param('id') id: string,
     @Body(new ZodValidationPipe(plantProfileUpdateSchema)) body: PlantProfileUpdate,

@@ -21,6 +21,7 @@ import { ImageUploadModule } from './storage/image-upload.module.js';
 import { PhotoWorkerModule } from './photo-worker/photo-worker.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { KnowledgeChatModule } from './knowledge-chat/knowledge-chat.module.js';
+import { PlantDoctorModule } from './plant-doctor/plant-doctor.module.js';
 import { BlogModule } from './blog/blog.module.js';
 import { MediaModule } from './media/media.module.js';
 
@@ -50,6 +51,7 @@ import { MediaModule } from './media/media.module.js';
     PhotoWorkerModule,
     AuthModule,
     KnowledgeChatModule,
+    PlantDoctorModule,
     BlogModule,
     MediaModule,
   ],
