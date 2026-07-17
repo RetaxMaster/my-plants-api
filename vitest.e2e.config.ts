@@ -22,6 +22,11 @@ export default defineConfig({
       KNOWLEDGE_CHAT_ENGINE_ENABLED: 'false',
       KNOWLEDGE_CHAT_ENGINE_SECRET: 'x'.repeat(16),
       KNOWLEDGE_ENGINE_CWD: '/tmp/knowledge-engine-e2e',
+      // The Plant Doctor engine has the same required-no-default keys; supply dummies and keep it inert
+      // (no port binding, no CLI spawn) so EVERY e2e file boots — not just the doctor spec.
+      PLANT_DOCTOR_ENGINE_ENABLED: 'false',
+      PLANT_DOCTOR_CHAT_ENGINE_SECRET: 'x'.repeat(16),
+      PLANT_DOCTOR_ENGINE_CWD: '/tmp/plant-doctor-e2e',
     },
   },
 });

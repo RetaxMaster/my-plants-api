@@ -91,6 +91,29 @@ export const envSchema = dbSchema.extend({
   KNOWLEDGE_CHAT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(1_800_000),
   KNOWLEDGE_CHAT_RUN_BUFFER_MS: z.coerce.number().int().positive().default(120_000),
   KNOWLEDGE_CHAT_TICKET_TTL_MS: z.coerce.number().int().positive().default(60_000),
+
+  // ── Plant Doctor engine (a second agents-realtime instance in the doctor's checkout, spec §2/§6) ──
+  // The doctor is a SECOND createServer() instance whose provider registry bakes PLANT_DOCTOR_ENGINE_CWD;
+  // a DOCTOR session's runs execute here, isolated from the knowledge engine. It reuses CLAUDE_BIN /
+  // CODEX_BIN / KNOWLEDGE_CHAT_CODEX_SANDBOX / the run+ticket timeouts / JWT_SECRET / WEB_ORIGIN.
+  //
+  // REQUIRED, expected already-absolute (same rationale as KNOWLEDGE_ENGINE_CWD): the spawned shell's
+  // stdout/stderr redirection resolves against the spawned cwd, so a relative value silently breaks the
+  // redirection before the agent runs.
+  PLANT_DOCTOR_ENGINE_CWD: z.string().min(1),
+  PLANT_DOCTOR_CHAT_ENGINE_PORT: z.coerce.number().int().positive().default(8400),
+  PLANT_DOCTOR_CHAT_ENGINE_SECRET: z.string().min(16), // required — gates the doctor engine's /execute
+  // Lets the full-app boot skip binding/listening (hermetic e2e / CI). Default on.
+  PLANT_DOCTOR_ENGINE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  // The doctor engine's run-log `logRoot` allow-list. MUST end up ABSOLUTE (see KNOWLEDGE_CHAT_LOG_DIR).
+  PLANT_DOCTOR_LOG_DIR: z.string().min(1).default('storage/plant-doctor').transform((v) => resolve(v)),
+  // The doctor engine's DURABLE run index + the codexRolesVerified record. Persistent, ABSOLUTE.
+  PLANT_DOCTOR_STATE_DIR: z.string().min(1).default('storage/plant-doctor-state').transform((v) => resolve(v)),
+  // Per-session isolated workspaces (each holds a doctor-context.json + scoped token). Persistent and,
+  // in prod, OUTSIDE the deploy/build tree so a deploy never wipes an in-flight diagnosis. ABSOLUTE.
+  PLANT_DOCTOR_WORKSPACE_ROOT: z.string().min(1).default('storage/plant-doctor-workspaces').transform((v) => resolve(v)),
+  // TTL of the per-run scoped `doctor` JWT (§3.3). 30 min = one run window (matches the run timeout).
+  PLANT_DOCTOR_TOKEN_TTL_MS: z.coerce.number().int().positive().default(1_800_000),
 });
 
 export type DbEnv = z.infer<typeof dbSchema>;

@@ -4,7 +4,12 @@ import { loadEnv, loadDbEnv } from './env.js';
 
 const DB = { DB_HOST: 'h', DB_PORT: '3306', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'n' };
 // The engine vars that have no default and must be present for loadEnv() to succeed.
-const ENGINE = { KNOWLEDGE_CHAT_ENGINE_SECRET: 'x'.repeat(16), KNOWLEDGE_ENGINE_CWD: '/tmp/knowledge-engine' };
+const ENGINE = {
+  KNOWLEDGE_CHAT_ENGINE_SECRET: 'x'.repeat(16),
+  KNOWLEDGE_ENGINE_CWD: '/tmp/knowledge-engine',
+  PLANT_DOCTOR_ENGINE_CWD: '/tmp/plant-doctor',
+  PLANT_DOCTOR_CHAT_ENGINE_SECRET: 'x'.repeat(16),
+};
 const FULL = { ...DB, JWT_SECRET: 'x'.repeat(32), ...ENGINE };
 
 describe('loadDbEnv', () => {
@@ -62,6 +67,32 @@ describe('loadEnv', () => {
     expect(
       loadEnv({ ...FULL, SESSION_ABSOLUTE_MAX_DAYS: '180' } as NodeJS.ProcessEnv).SESSION_ABSOLUTE_MAX_DAYS,
     ).toBe(180);
+  });
+});
+
+describe('loadEnv — PLANT_DOCTOR_* engine (spec §6)', () => {
+  it('requires PLANT_DOCTOR_ENGINE_CWD and PLANT_DOCTOR_CHAT_ENGINE_SECRET (no defaults)', () => {
+    const { PLANT_DOCTOR_ENGINE_CWD: _c, ...noCwd } = FULL;
+    const { PLANT_DOCTOR_CHAT_ENGINE_SECRET: _s, ...noSecret } = FULL;
+    expect(() => loadEnv(noCwd as NodeJS.ProcessEnv)).toThrow();
+    expect(() => loadEnv(noSecret as NodeJS.ProcessEnv)).toThrow();
+  });
+
+  it('applies the doctor-engine defaults and resolves its dirs to absolute paths', () => {
+    const env = loadEnv({ ...FULL } as NodeJS.ProcessEnv);
+    expect(env.PLANT_DOCTOR_ENGINE_CWD).toBe('/tmp/plant-doctor');
+    expect(env.PLANT_DOCTOR_CHAT_ENGINE_PORT).toBe(8400); // dev default — MUST equal the web plantDoctorSocketUrl default
+    expect(env.PLANT_DOCTOR_ENGINE_ENABLED).toBe(true);
+    expect(env.PLANT_DOCTOR_TOKEN_TTL_MS).toBe(1_800_000); // 30 min — one run window
+    expect(isAbsolute(env.PLANT_DOCTOR_LOG_DIR)).toBe(true);
+    expect(env.PLANT_DOCTOR_LOG_DIR).toBe(resolve('storage/plant-doctor'));
+    expect(isAbsolute(env.PLANT_DOCTOR_STATE_DIR)).toBe(true);
+    expect(isAbsolute(env.PLANT_DOCTOR_WORKSPACE_ROOT)).toBe(true);
+  });
+
+  it('parses PLANT_DOCTOR_ENGINE_ENABLED=false as a boolean false', () => {
+    const env = loadEnv({ ...FULL, PLANT_DOCTOR_ENGINE_ENABLED: 'false' } as NodeJS.ProcessEnv);
+    expect(env.PLANT_DOCTOR_ENGINE_ENABLED).toBe(false);
   });
 });
 
