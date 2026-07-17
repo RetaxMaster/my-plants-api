@@ -77,7 +77,7 @@ describe('CodexRoleVerificationService', () => {
 });
 
 describe('maskCodex', () => {
-  const statuses = [
+  const statuses: { provider: string; available: boolean; error?: string | null }[] = [
     { provider: 'codex', available: true },
     { provider: 'claude', available: true },
   ];
