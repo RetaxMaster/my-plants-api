@@ -192,6 +192,7 @@ model Plant {
   progressEntries PlantProgressEntry[]
   frequencies     PlantTaskFrequency[]
   profile         PlantProfile?
+  doctorSessions  KnowledgeChatSession[]
 
   @@index([ownerId])
   @@index([placeId])
@@ -368,6 +369,13 @@ enum KnowledgeChatRunStatus {
   CANCELLED
 }
 
+// What a chat session IS: the admin Knowledge Engine chat, or a per-plant Plant Doctor diagnosis. One
+// shared session/run machinery serves both, routed by this discriminator (Plant Doctor Spec 3 §3.1).
+enum ChatSessionKind {
+  KNOWLEDGE
+  DOCTOR
+}
+
 model KnowledgeChatSession {
   id String @id @default(cuid())
   // WHICH AGENT owns this conversation ('claude' | 'codex' — the agents-realtime `AgentProvider` wire
@@ -389,10 +397,20 @@ model KnowledgeChatSession {
   pendingRunId      String?            @map("pending_run_id")
   title             String // first ~160 chars of the first prompt
   createdByUserId   String?            @map("created_by_user_id") // provenance only, NOT an access boundary
+  // KNOWLEDGE (the admin KE chat) | DOCTOR (a per-plant diagnosis). Defaults KNOWLEDGE so pre-migration
+  // inserts (which set none of these) stay valid during `prisma migrate deploy` (Plant Doctor Spec 3 §3.1).
+  kind              ChatSessionKind    @default(KNOWLEDGE)
+  plantId           String?            @map("plant_id") // non-null ⇔ kind = DOCTOR; the pinned plant
+  ownerId           String?            @map("owner_id") // the owning owner — the DOCTOR access boundary
+  // Deleting a plant cascade-removes its DOCTOR session ROWS; the live run + FS logs/workspaces are handled
+  // by the orchestrated cleanup (Spec 3 §3.1) — the cascade is the row half only.
+  plant             Plant?             @relation(fields: [plantId], references: [id], onDelete: Cascade)
   createdAt         DateTime           @default(now()) @map("created_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   runs              KnowledgeChatRun[]
 
+  @@index([kind, plantId])
+  @@index([ownerId])
   @@map("knowledge_chat_sessions")
 }
 
