@@ -1,6 +1,7 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { OwnerService } from '../owner/owner.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
 import { DOCTOR_ALLOWED_KEY } from './doctor-scope.decorator.js';
 
 // Global guard, registered AFTER JwtAuthGuard so the Actor is already in CLS. It acts ONLY on a
@@ -14,9 +15,10 @@ export class DoctorScopeGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly owner: OwnerService,
+    private readonly prisma: PrismaService,
   ) {}
 
-  canActivate(ctx: ExecutionContext): boolean {
+  async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const actor = this.owner.currentActor();
     if (actor?.scope !== 'doctor') return true; // not a doctor token → normal pipeline
 
@@ -30,11 +32,15 @@ export class DoctorScopeGuard implements CanActivate {
     if (req.params?.id !== actor.plantId) {
       throw new ForbiddenException('doctor-scoped token: plant mismatch');
     }
-    // Belt-and-braces: a doctor token is never an admin token, so it carries no acting-as; this makes the
-    // "own owner only" intent explicit rather than implicit.
-    if (actor.ownerId !== (actor.actingAsOwnerId ?? actor.ownerId)) {
-      throw new ForbiddenException('doctor-scoped token: owner mismatch');
-    }
+    // The pinned plant must actually belong to the token's owner — the REAL default-deny boundary, enforced
+    // in the guard itself rather than left to the downstream handlers (Spec 3 §3.3: "requires :id ===
+    // token.plantId AND that ownerId matches"). A signed doctor token always satisfies this, so it never
+    // rejects a legitimate token; it fails closed if the pin/owner ever diverge (e.g. a re-parented plant).
+    const plant = await this.prisma.plant.findFirst({
+      where: { id: actor.plantId, ownerId: actor.ownerId },
+      select: { id: true },
+    });
+    if (!plant) throw new ForbiddenException('doctor-scoped token: owner mismatch');
     return true;
   }
 }

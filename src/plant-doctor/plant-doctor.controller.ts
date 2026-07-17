@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import type { AgentProvider } from '@retaxmaster/agents-realtime-protocol';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
@@ -74,6 +74,14 @@ export class PlantDoctorController {
   async socketTicket(@Param('id') id: string, @Param('runId') runId: string) {
     // 404s if the run's session ≠ this (kind=DOCTOR, plantId=id, effective owner) — Spec 3 §3.2.
     return this.chat.mintSocketTicket(runId, await this.scopeFor(id));
+  }
+
+  // The doctor session detail emits a per-turn `logUrl` under this surface; serve it owner-scoped so a run's
+  // transcript is reachable only through the pinned plant's owner (404s cross-plant/owner) — Spec 3 §3.2.
+  @Get('runs/:runId/log')
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  async log(@Param('id') id: string, @Param('runId') runId: string) {
+    return this.chat.getRunLog(runId, await this.scopeFor(id));
   }
 
   @Get('provider-status')

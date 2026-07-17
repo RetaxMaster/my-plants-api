@@ -95,7 +95,7 @@ describe('KnowledgeChatController', () => {
     expect(svc.listSessions).toHaveBeenCalled();
     expect(svc.getSession).toHaveBeenCalledWith('s1', KS);
     expect(svc.deleteSession).toHaveBeenCalledWith('s1', KS);
-    expect(svc.getRunLog).toHaveBeenCalledWith('r1');
+    expect(svc.getRunLog).toHaveBeenCalledWith('r1', KS);
     expect(svc.mintSocketTicket).toHaveBeenCalledWith('r1', KS);
   });
 });

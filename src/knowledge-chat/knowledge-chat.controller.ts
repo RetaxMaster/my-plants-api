@@ -79,7 +79,7 @@ export class KnowledgeChatController {
   @Get('runs/:runId/log')
   @Header('Content-Type', 'text/plain; charset=utf-8')
   log(@Param('runId') runId: string) {
-    return this.chat.getRunLog(runId);
+    return this.chat.getRunLog(runId, KNOWLEDGE_SCOPE);
   }
 
   @Post('runs/:runId/socket-ticket')

@@ -13,6 +13,7 @@ import { PrismaService } from '../src/prisma/prisma.service.js';
 import { WeatherService } from '../src/weather/weather.service.js';
 import { ImageUploadService } from '../src/storage/image-upload.service.js';
 import { AuthService } from '../src/auth/auth.service.js';
+import { CodexRoleVerificationService } from '../src/knowledge-chat/codex-role-verification.service.js';
 import { KNOWLEDGE_ENGINE, DOCTOR_ENGINE, DOCTOR_ORCHESTRATOR } from '../src/knowledge-chat/engine/engine-params.js';
 import type { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
 
@@ -52,10 +53,14 @@ describe('Plant Doctor (e2e)', () => {
   const password = 'e2e-secret';
   const n1 = `e2e-pd-o1-${randomUUID()}`;
   const n2 = `e2e-pd-o2-${randomUUID()}`;
+  const nAdmin = `e2e-pd-admin-${randomUUID()}`;
   let owner1Id: string; let user1Id: string; let user1Username: string;
   let owner2Id: string; let user2Id: string;
+  let adminOwnerId: string; let adminUserId: string; let adminToken: string;
   let token1: string; let token2: string;
   let plantA: string; let plantA2: string; let plantB: string;
+  let progressEntryA: string;
+  let verification: CodexRoleVerificationService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -80,6 +85,13 @@ describe('Plant Doctor (e2e)', () => {
     ({ ownerId: owner1Id, userId: user1Id, token: token1 } = await mkOwner(n1));
     user1Username = n1;
     ({ ownerId: owner2Id, userId: user2Id, token: token2 } = await mkOwner(n2));
+    ({ ownerId: adminOwnerId, userId: adminUserId, token: adminToken } = await mkOwner(nAdmin, 'ADMIN'));
+
+    // The Codex fallback gate is default-DENY; pin BOTH engine records to false up front so this suite is
+    // deterministic regardless of any record a prior/crashed run left on disk (agent-parity Spec 2 §5).
+    verification = app.get(CodexRoleVerificationService);
+    await verification.write('DOCTOR', false);
+    await verification.write('KNOWLEDGE', false);
 
     const slug = (await request(server).get('/species').expect(200)).body[0].slug as string;
     const mkPlant = async (token: string, label: string) => {
@@ -92,22 +104,35 @@ describe('Plant Doctor (e2e)', () => {
     plantA = await mkPlant(token1, 'A');
     plantA2 = await mkPlant(token1, 'A2');
     plantB = await mkPlant(token2, 'B');
+
+    // A progress entry on plant A the doctor's `plant-edit` PATCH can target (native Date binding — MariaDB
+    // date rule, never an ISO string on a date column).
+    progressEntryA = (await prisma.plantProgressEntry.create({
+      data: { plantId: plantA, occurredOn: new Date(Date.UTC(2024, 0, 15)), health: 'GOOD', observations: 'seed' },
+    })).id;
   });
 
   afterAll(async () => {
+    if (verification) {
+      // Restore default-deny so no leftover record on disk leaks Codex into a later e2e FILE (shared state dir).
+      await verification.write('DOCTOR', false);
+      await verification.write('KNOWLEDGE', false);
+    }
     if (prisma) {
-      await prisma.knowledgeChatSession.deleteMany({ where: { ownerId: { in: [owner1Id, owner2Id] } } });
-      for (const oid of [owner1Id, owner2Id]) {
+      const owners = [owner1Id, owner2Id, adminOwnerId];
+      await prisma.knowledgeChatSession.deleteMany({ where: { ownerId: { in: owners } } });
+      for (const oid of owners) {
         await prisma.knowledgeChatSession.deleteMany({ where: { plant: { ownerId: oid } } });
         await prisma.plantTaskFrequency.deleteMany({ where: { plant: { ownerId: oid } } });
         await prisma.dueCache.deleteMany({ where: { plant: { ownerId: oid } } });
+        await prisma.plantProgressEntry.deleteMany({ where: { plant: { ownerId: oid } } });
         await prisma.plantProfile.deleteMany({ where: { plant: { ownerId: oid } } });
         await prisma.plant.deleteMany({ where: { ownerId: oid } });
         await prisma.place.deleteMany({ where: { ownerId: oid } });
         await prisma.city.deleteMany({ where: { ownerId: oid } });
       }
-      await prisma.user.deleteMany({ where: { id: { in: [user1Id, user2Id] } } });
-      await prisma.owner.deleteMany({ where: { id: { in: [owner1Id, owner2Id] } } });
+      await prisma.user.deleteMany({ where: { id: { in: [user1Id, user2Id, adminUserId] } } });
+      await prisma.owner.deleteMany({ where: { id: { in: owners } } });
     }
     if (app) await app.close();
   });
@@ -194,15 +219,20 @@ describe('Plant Doctor (e2e)', () => {
       expect(docTokenA).toBeTruthy();
     });
 
-    it('ACCEPTS allowlisted plant-A endpoints (care + frequency)', async () => {
+    it('ACCEPTS every allowlisted plant-A endpoint (care + profile + progress + frequency PUT/DELETE)', async () => {
       await asDoc(request(server()).get(`/plants/${plantA}/care`)).expect(200);
+      await asDoc(request(server()).patch(`/plants/${plantA}/profile`)).send({ potType: 'plastic', hasDrainage: true }).expect(200);
+      await asDoc(request(server()).patch(`/plants/${plantA}/progress/${progressEntryA}`)).field('observations', 'doctor note').expect(200);
       await asDoc(request(server()).put(`/plants/${plantA}/frequency`)).send({ task: 'WATER', intervalDays: 7 }).expect(200);
       await asDoc(request(server()).delete(`/plants/${plantA}/frequency/WATER`)).expect(200);
     });
 
-    it('REJECTS (403) the same allowlisted endpoints for a DIFFERENT plant (the pin)', async () => {
+    it('REJECTS (403) EVERY allowlisted endpoint for a DIFFERENT plant (the pin, not just care/frequency)', async () => {
       await asDoc(request(server()).get(`/plants/${plantB}/care`)).expect(403);
+      await asDoc(request(server()).patch(`/plants/${plantB}/profile`)).send({ potType: 'plastic' }).expect(403);
+      await asDoc(request(server()).patch(`/plants/${plantB}/progress/${progressEntryA}`)).field('observations', 'x').expect(403);
       await asDoc(request(server()).put(`/plants/${plantB}/frequency`)).send({ task: 'WATER', intervalDays: 7 }).expect(403);
+      await asDoc(request(server()).delete(`/plants/${plantB}/frequency/WATER`)).expect(403);
     });
 
     it('REJECTS (403) a non-allowlisted endpoint even for plant A (default-deny narrows, never widens)', async () => {
@@ -212,6 +242,81 @@ describe('Plant Doctor (e2e)', () => {
 
     it('a NORMAL owner token is unaffected on a non-allowlisted route', async () => {
       await as1(request(server()).get(`/plants/${plantA}`)).expect(200);
+    });
+  });
+
+  it('history / resume / delete of a session 404 cross-plant (same owner) and cross-owner', async () => {
+    // Same owner, wrong plant → the session is indistinguishable from not-found on EVERY mutating route.
+    await as1(request(server()).get(`/plants/${plantA2}/diagnose/sessions/${sidA}/history`)).expect(404);
+    await as1(request(server()).post(`/plants/${plantA2}/diagnose/sessions/${sidA}/runs`)).send({ prompt: 'x' }).expect(404);
+    await as1(request(server()).delete(`/plants/${plantA2}/diagnose/sessions/${sidA}`)).expect(404);
+    // Another owner cannot even reach plant A's surface (unowned plant 404), so sidA is unreachable to them.
+    await as2(request(server()).get(`/plants/${plantA}/diagnose/sessions/${sidA}/history`)).expect(404);
+    await as2(request(server()).delete(`/plants/${plantA}/diagnose/sessions/${sidA}`)).expect(404);
+    // sidA still exists after all the 404s (nothing was actually deleted).
+    await as1(request(server()).get(`/plants/${plantA}/diagnose/sessions/${sidA}`)).expect(200);
+  });
+
+  describe('admin acting-as an owner', () => {
+    const asAdminActing = (r: request.Test) =>
+      r.set('Authorization', `Bearer ${adminToken}`).set('X-Act-As-Owner', owner1Id);
+
+    it('sees the owner\'s doctor sessions and mints a token whose SUBJECT is the owner\'s user (not the admin)', async () => {
+      const list = await asAdminActing(request(server()).get(`/plants/${plantA}/diagnose/sessions`)).expect(200);
+      expect(list.body.map((s: any) => s.id)).toContain(sidA);
+
+      const res = await asAdminActing(request(server()).post(`/plants/${plantA}/diagnose/sessions`))
+        .send({ prompt: 'acting as the owner', provider: 'claude' }).expect(201);
+      const call = executeCalls.find((c) => c.runId === res.body.runId)!;
+      const workspace = call.env!.PLANT_DOCTOR_SESSION_WORKSPACE;
+      const ctx = JSON.parse(await readFile(join(workspace, 'doctor-context.json'), 'utf8'));
+      const claims = decodeJwt(ctx.apiToken);
+      // The scoped token identifies OWNER1's user (role USER), never the operating ADMIN (Spec 3 §3.3).
+      expect(claims).toMatchObject({ sub: user1Id, username: user1Username, ownerId: owner1Id, role: 'USER', scope: 'doctor', plantId: plantA });
+      expect(claims.sub).not.toBe(adminUserId);
+      const row = await prisma.knowledgeChatSession.findUnique({ where: { id: res.body.sessionId } });
+      expect(row!.ownerId).toBe(owner1Id);
+      await rm(workspace, { recursive: true, force: true });
+    });
+
+    it('a plain admin (NO acting-as header) cannot reach another owner\'s plant (404)', async () => {
+      await request(server()).get(`/plants/${plantA}/diagnose/sessions`).set('Authorization', `Bearer ${adminToken}`).expect(404);
+    });
+  });
+
+  describe('Codex fallback gate — dynamic per-engine record, both pipelines, sealed-aware', () => {
+    it('DOCTOR: the record flips codex availability + create acceptance dynamically (no restart)', async () => {
+      await verification.write('DOCTOR', true);
+      const psOn = await as1(request(server()).get(`/plants/${plantA}/diagnose/provider-status?force=1`)).expect(200);
+      expect(psOn.body.find((p: any) => p.provider === 'codex').available).toBe(true);
+      const created = await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions`))
+        .send({ prompt: 'codex allowed now', provider: 'codex' }).expect(201);
+      const call = executeCalls.find((c) => c.runId === created.body.runId);
+      if (call?.env?.PLANT_DOCTOR_SESSION_WORKSPACE) await rm(call.env.PLANT_DOCTOR_SESSION_WORKSPACE, { recursive: true, force: true });
+
+      await verification.write('DOCTOR', false); // dynamic read → the running process fails closed again
+      const psOff = await as1(request(server()).get(`/plants/${plantA}/diagnose/provider-status?force=1`)).expect(200);
+      expect(psOff.body.find((p: any) => p.provider === 'codex').available).toBe(false);
+      await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions`)).send({ prompt: 'nope', provider: 'codex' }).expect(422);
+    });
+
+    it('DOCTOR: a SEALED codex session is refused while unverified whether provider is omitted OR spoofed claude', async () => {
+      // Sealed = providerSessionId set; the run path ignores the request provider and uses session.provider.
+      const sealed = await prisma.knowledgeChatSession.create({
+        data: { title: 'sealed codex', provider: 'codex', kind: 'DOCTOR', plantId: plantA, ownerId: owner1Id, providerSessionId: 'codex-thread-1' },
+      });
+      await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions/${sealed.id}/runs`)).send({ prompt: 'omit' }).expect(422);
+      await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions/${sealed.id}/runs`)).send({ prompt: 'spoof', provider: 'claude' }).expect(422);
+      await prisma.knowledgeChatSession.delete({ where: { id: sealed.id } });
+    });
+
+    it('KE: the KE controller reflects ITS OWN engine record, independently of the doctor record', async () => {
+      const off = await request(server()).get('/knowledge-chat/provider-status?force=1').set('Authorization', `Bearer ${adminToken}`).expect(200);
+      expect(off.body.find((p: any) => p.provider === 'codex').available).toBe(false);
+      await verification.write('KNOWLEDGE', true);
+      const on = await request(server()).get('/knowledge-chat/provider-status?force=1').set('Authorization', `Bearer ${adminToken}`).expect(200);
+      expect(on.body.find((p: any) => p.provider === 'codex').available).toBe(true);
+      await verification.write('KNOWLEDGE', false);
     });
   });
 

@@ -84,6 +84,10 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
       update: async ({ where, data }: any) => { const r = runs.get(where.id); if (!r) throw new Error(`run not found: ${where.id}`); Object.assign(r, data); return r; },
       updateMany: async ({ where, data }: any) => { let count = 0; for (const r of runs.values()) { const active = where.status?.in ? where.status.in.includes(r.status) : true; if ((where.id ? r.id === where.id : where.sessionId ? r.sessionId === where.sessionId : true) && active) { Object.assign(r, data); count++; } } return { count }; },
     },
+    // User.ownerId is @unique: resolve THE user of an owner (the doctor token's subject, Spec 3 §3.3).
+    user: {
+      findUnique: async ({ where }: any) => ({ id: `u-${where.ownerId}`, username: `user-${where.ownerId}`, ownerId: where.ownerId }),
+    },
     // The fake is already in-memory and single-threaded, so a transaction is just "run the callback".
     $transaction: async (fn: any) => fn(db),
   } as any;
@@ -252,12 +256,23 @@ describe('KnowledgeChatService.getRunLog', () => {
   it('returns the raw file contents', async () => {
     const { svc, run, logDir } = setup({ sessions: [session()], runs: [doneRun()] });
     writeFileSync(join(logDir, 'r1.ndjson'), '{"a":1}\n{"b":2}');
-    expect(await run(() => svc.getRunLog('r1'))).toBe('{"a":1}\n{"b":2}');
+    expect(await run(() => svc.getRunLog('r1', KS))).toBe('{"a":1}\n{"b":2}');
   });
 
   it('404 when the file is gone', async () => {
     const { svc, run } = setup({ sessions: [session()], runs: [doneRun()] });
-    await expect(run(() => svc.getRunLog('r1'))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(run(() => svc.getRunLog('r1', KS))).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('404s when the run\'s session is OUT of scope (a KNOWLEDGE surface never reads a DOCTOR transcript)', async () => {
+    const { svc, run, logDir } = setup({
+      sessions: [session({ id: 's1', kind: 'DOCTOR', plantId: 'A', ownerId: 'O' } as any)],
+      runs: [doneRun()],
+    });
+    writeFileSync(join(logDir, 'r1.ndjson'), 'secret');
+    // The KNOWLEDGE scope must not reach a DOCTOR run's log; a doctor scope for another plant must not either.
+    await expect(run(() => svc.getRunLog('r1', KS))).rejects.toBeInstanceOf(NotFoundException);
+    await expect(run(() => svc.getRunLog('r1', { kind: 'DOCTOR', plantId: 'B', ownerId: 'O' }))).rejects.toBeInstanceOf(NotFoundException);
   });
 });
 

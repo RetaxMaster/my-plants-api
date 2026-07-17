@@ -263,13 +263,18 @@ export class KnowledgeChatService {
       await mkdir(this.engines.logDirFor(kind), { recursive: true });
       let perRunEnv: Record<string, string> | undefined;
       if (kind === 'DOCTOR') {
-        const actor = this.owner.currentActor();
+        // The scoped token represents the OWNER of the pinned plant (role USER), NOT whoever is operating the
+        // chat — an ADMIN acting-as an owner must still mint a token whose sub/username identify that owner's
+        // user (Spec 3 §3.3), or the token's subject would be inconsistent with its ownerId. User.ownerId is
+        // @unique, so there is exactly one such user.
+        const ownerUser = await this.prisma.user.findUnique({ where: { ownerId: session.ownerId! } });
+        if (!ownerUser) throw new Error(`DOCTOR session ${session.id}: owner ${session.ownerId} has no user`);
         const { workspaceDir } = await this.doctorRunContext.prepareRun({
           sessionId: session.id,
           plantId: session.plantId!,
           ownerId: session.ownerId!,
-          userId: actor?.userId ?? '',
-          username: actor?.username ?? '',
+          userId: ownerUser.id,
+          username: ownerUser.username,
         });
         perRunEnv = { [WORKSPACE_ENV]: workspaceDir };
       }
@@ -331,9 +336,11 @@ export class KnowledgeChatService {
     }
   }
 
-  async getRunLog(runId: string): Promise<string> {
+  async getRunLog(runId: string, scope: SessionScope): Promise<string> {
     const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId }, include: { session: true } });
-    if (!run) throw new NotFoundException(`Unknown run: ${runId}`);
+    // A run whose session belongs to another plant/owner/kind is indistinguishable from "not found" (Spec 3
+    // §3.2) — the KE admin surface must never read a DOCTOR transcript, and vice versa.
+    if (!run || !sessionMatchesScope(run.session, scope)) throw new NotFoundException(`Unknown run: ${runId}`);
     try {
       return await readFile(this.logPath(run.session.kind as SessionKind, runId), 'utf8');
     } catch {
