@@ -334,21 +334,30 @@ describe('proposal concurrency (real MariaDB)', () => {
     const applying = runAs(() => svc.create(tokenFor(runId), setWater()));
     await reachedBarrier; // inside the apply transaction, lock held, claim not yet issued
 
-    let revokeDone = false;
-    const revoke = prisma.knowledgeChatSession
-      .update({ where: { id: sessionId }, data: { skipPermissions: false } })
-      .then(() => { revokeDone = true; });
+    // ⚠️ ASSERT A DB FACT, NOT A STOPWATCH. An earlier version concluded "blocked" from the revoke not
+    // finishing within 800 ms — which on a loaded CI box is also what "the query had not reached MariaDB
+    // yet" looks like, so removing FOR UPDATE could still have passed. Instead the revoke runs on its own
+    // connection with a SHORT `innodb_lock_wait_timeout`: if the row is locked it fails with MariaDB's
+    // lock-wait error (a specific, positive signal that it really did contend), and if it is not locked
+    // it simply succeeds. Both outcomes are deterministic and neither depends on wall-clock luck.
+    const revokeAttempt = prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET SESSION innodb_lock_wait_timeout = 3');
+      await tx.$executeRawUnsafe('UPDATE knowledge_chat_sessions SET skip_permissions = 0 WHERE id = ?', sessionId);
+    });
 
-    await new Promise((r) => setTimeout(r, 800));
-    expect(
-      revokeDone,
-      'the revoke committed while the apply held the session row — FOR UPDATE is not in effect, so a write can land after a committed revocation',
-    ).toBe(false);
+    await expect(
+      revokeAttempt,
+      'the revoke acquired the row while the apply was mid-transaction — FOR UPDATE is not in effect, so a write can land after a committed revocation',
+    ).rejects.toThrow(/[Ll]ock wait timeout/);
 
     releaseBarrier();
     await applying;
-    await revoke;
-    expect(revokeDone).toBe(true);
+
+    // And once the apply has finished, the very same revoke succeeds — proving the lock was the only
+    // thing standing in its way, not a broken query or an unreachable row.
+    await prisma.knowledgeChatSession.update({ where: { id: sessionId }, data: { skipPermissions: false } });
+    const after = await prisma.knowledgeChatSession.findUnique({ where: { id: sessionId }, select: { skipPermissions: true } });
+    expect(after?.skipPermissions).toBe(false);
   }, 40_000);
 
   it('lets exactly one of two concurrent approve calls apply — and writes ONCE', async () => {
