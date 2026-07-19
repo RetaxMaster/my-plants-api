@@ -11,9 +11,9 @@ import {
   ProposalRenderService,
   FIELD_LABELS,
   FIELD_LABELS_ES,
-  TASK_LABELS_ES,
+  TASK_LABELS,
   resolveLocale,
-  VALUE_VOCAB_ES,
+  VALUE_VOCAB,
 } from './proposal-render.service.js';
 import { operationSchema } from './proposal-operations.schema.js';
 
@@ -87,7 +87,7 @@ describe('ProposalRenderService', () => {
     f.snapshotSvc.capture.mockResolvedValueOnce([{ intervalDays: 7 }]); // live == snapshot: not stale
     const view = await svc.render(baseProposal as never);
     expect(view.summary).toBe('update the nickname');
-    expect(view.operations[0]).toMatchObject({ type: 'frequency.set', targetLabel: 'WATER', destructive: false });
+    expect(view.operations[0]).toMatchObject({ type: 'frequency.set', targetLabel: 'Water', destructive: false });
     // Every value on the wire is a display STRING the server owns — never a raw payload object.
     expect(view.operations[0]!.changes).toEqual([{ field: 'Every (days)', before: '7', after: '5' }]);
   });
@@ -169,7 +169,7 @@ describe('ProposalRenderService', () => {
     // A destructive operation proposes NO values. If `changes` were built from the proposed keys alone
     // this would be [], and the banner would ask the owner to approve a blank.
     expect(view.operations[0]!.changes).toEqual([
-      { field: 'Health', before: 'GOOD', after: null },
+      { field: 'Health', before: 'Good', after: null },
       { field: 'Observations', before: 'looking better', after: null },
     ]);
   });
@@ -178,7 +178,7 @@ describe('ProposalRenderService', () => {
     f.snapshotSvc.capture.mockResolvedValueOnce([{ intervalDays: 7 }]);
     const p = withOps([{ type: 'frequency.clear', task: 'WATER' }], [{ intervalDays: 7 }]);
     const view = await svc.render(p as never);
-    expect(view.operations[0]!.targetLabel).toBe('WATER');
+    expect(view.operations[0]!.targetLabel).toBe('Water');
     expect(view.operations[0]!.changes).toEqual([{ field: 'Every (days)', before: '7', after: null }]);
   });
 
@@ -220,7 +220,7 @@ describe('ProposalRenderService', () => {
     f.snapshotSvc.capture.mockResolvedValueOnce([{ tags: ['NEW_LEAF'] }]);
     const p = withOps([{ type: 'progress.update', entryId: 'e1', tags: [] }], [{ tags: ['NEW_LEAF'] }]);
     const view = await svc.render(p as never);
-    expect(view.operations[0]!.changes[0]).toEqual({ field: 'Tags', before: 'NEW_LEAF', after: null });
+    expect(view.operations[0]!.changes[0]).toEqual({ field: 'Tags', before: 'New leaf', after: null });
   });
 
   it('never emits an empty change list for an operation that touches at least one field', async () => {
@@ -260,52 +260,77 @@ describe('ProposalRenderService', () => {
     });
   });
 
-  describe('value vocabularies — parity against the SHARED-PACKAGE / Prisma source of truth', () => {
+  describe('value vocabularies — parity against the SHARED-PACKAGE / Prisma source of truth, BOTH locales', () => {
+    // Every check below runs for `en` AND `es` off the SAME real constant array — a vocabulary gaining
+    // a member must fail for `en` exactly as it already failed for `es` before this file gave `en` its
+    // own value dictionary. Never a hand-written list of expected keys.
+    const locales = ['en', 'es'] as const;
+
     it('translates every WINDOW_DISTANCES member', () => {
-      for (const v of WINDOW_DISTANCES) {
-        expect(VALUE_VOCAB_ES.windowDistance![v], `missing Spanish windowDistance for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of WINDOW_DISTANCES) {
+          expect(VALUE_VOCAB[locale].windowDistance![v], `missing ${locale} windowDistance for "${v}"`).toBeTruthy();
+        }
       }
     });
 
     it('translates every POT_TYPES member', () => {
-      for (const v of POT_TYPES) {
-        expect(VALUE_VOCAB_ES.potType![v], `missing Spanish potType for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of POT_TYPES) {
+          expect(VALUE_VOCAB[locale].potType![v], `missing ${locale} potType for "${v}"`).toBeTruthy();
+        }
       }
     });
 
     it('translates every SOIL_MIXES member', () => {
-      for (const v of SOIL_MIXES) {
-        expect(VALUE_VOCAB_ES.soilMix![v], `missing Spanish soilMix for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of SOIL_MIXES) {
+          expect(VALUE_VOCAB[locale].soilMix![v], `missing ${locale} soilMix for "${v}"`).toBeTruthy();
+        }
       }
     });
 
     it('translates every GROWTH_HABITS member', () => {
-      for (const v of GROWTH_HABITS) {
-        expect(VALUE_VOCAB_ES.growthHabit![v], `missing Spanish growthHabit for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of GROWTH_HABITS) {
+          expect(VALUE_VOCAB[locale].growthHabit![v], `missing ${locale} growthHabit for "${v}"`).toBeTruthy();
+        }
       }
     });
 
     it('translates every PROGRESS_TAG_KEYS member', () => {
-      for (const v of PROGRESS_TAG_KEYS) {
-        expect(VALUE_VOCAB_ES.tags![v], `missing Spanish tag label for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of PROGRESS_TAG_KEYS) {
+          expect(VALUE_VOCAB[locale].tags![v], `missing ${locale} tag label for "${v}"`).toBeTruthy();
+        }
       }
     });
 
     it('translates every ProgressHealth member', () => {
-      for (const v of Object.values(ProgressHealth)) {
-        expect(VALUE_VOCAB_ES.health![v], `missing Spanish health label for "${v}"`).toBeTruthy();
+      for (const locale of locales) {
+        for (const v of Object.values(ProgressHealth)) {
+          expect(VALUE_VOCAB[locale].health![v], `missing ${locale} health label for "${v}"`).toBeTruthy();
+        }
       }
     });
 
-    it('translates every Task member (targetLabel vocabulary)', () => {
-      for (const v of Object.values(Task)) {
-        expect(TASK_LABELS_ES[v], `missing Spanish task name for "${v}"`).toBeTruthy();
+    it('names every Task member in BOTH locales (the targetLabel vocabulary)', () => {
+      for (const locale of locales) {
+        for (const v of Object.values(Task)) {
+          expect(TASK_LABELS[locale][v], `missing ${locale} task name for "${v}"`).toBeTruthy();
+          // The raw enum member is precisely what must NOT reach the owner: it is the machine token.
+          expect(TASK_LABELS[locale][v], `${locale} task name for "${v}" is still the raw enum`).not.toBe(v);
+        }
       }
+    });
+
+    it('never has a vocabulary in one locale that the other lacks (same field-key set)', () => {
+      expect(Object.keys(VALUE_VOCAB.en).sort()).toEqual(Object.keys(VALUE_VOCAB.es).sort());
     });
   });
 
-  describe('en output stays byte-identical to today (pure-addition requirement)', () => {
-    it('renders one representative proposal of EACH operation type, unchanged, whether or not `locale` is passed', async () => {
+  describe('en output — identical whether or not `locale` is passed, with every vocabulary resolved', () => {
+    it('renders one representative proposal of EACH operation type identically with an implicit vs explicit `en`', async () => {
       const ops = [
         { type: 'profile.update', potType: 'terracotta', growLight: true },
         { type: 'plant.update', nickname: 'Monty' },
@@ -324,12 +349,16 @@ describe('ProposalRenderService', () => {
       const explicit = await svc.render(p as never, 'en');
       expect(explicit).toEqual(implicit);
 
+      // Enum VALUES now render prose in English too — this is this file's fix (the consent surface's
+      // value dictionary, symmetric with `es`).
       const potChange = explicit.operations[0]!.changes.find((c) => c.field === 'Pot type');
-      expect(potChange).toEqual({ field: 'Pot type', before: null, after: 'terracotta' }); // RAW slug, as today
+      expect(potChange).toEqual({ field: 'Pot type', before: null, after: 'Terracotta' });
       const healthChange = explicit.operations[2]!.changes.find((c) => c.field === 'Health');
-      expect(healthChange).toEqual({ field: 'Health', before: null, after: 'EXCELLENT' }); // RAW enum, as today
-      expect(explicit.operations[5]!.targetLabel).toBe('WATER'); // RAW enum, as today
-      expect(explicit.operations[6]!.targetLabel).toBe('MIST');
+      expect(healthChange).toEqual({ field: 'Health', before: null, after: 'Excellent' });
+      // Task TARGET LABELS (frequency.set/clear, care.done) are explicitly OUT of scope for this fix —
+      // `label()`'s own comment pins the raw enum here as "today's shipped behaviour", proven unchanged.
+      expect(explicit.operations[5]!.targetLabel).toBe('Water');
+      expect(explicit.operations[6]!.targetLabel).toBe('Mist leaves');
       expect(explicit.operations[1]!.targetLabel).toBe('nickname');
     });
   });
@@ -428,6 +457,51 @@ describe('ProposalRenderService', () => {
         before: 'a-future-pot-type',
         after: 'a-future-pot-type',
       });
+    });
+
+    // The English mirror of the test above — same guarantee, same fallback path, now that `en` also
+    // has a value vocabulary to fall through when a member is unresolvable.
+    it('falls back to the raw value for an enum member the English vocabulary does not recognise', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ potType: 'a-future-pot-type' }]);
+      const p = withOps([{ type: 'profile.update', potType: 'a-future-pot-type' }], [{ potType: 'a-future-pot-type' }]);
+      const view = await svc.render(p as never, 'en');
+      expect(view.operations[0]!.changes[0]).toEqual({
+        field: 'Pot type',
+        before: 'a-future-pot-type',
+        after: 'a-future-pot-type',
+      });
+    });
+  });
+
+  describe('en output — translated enum values (the fix), proper nouns/free text/numbers untouched', () => {
+    it('translates a profile.update (enum values, a boolean field) into English prose, not raw slugs', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ potType: 'plastic', growLight: false }]);
+      const p = withOps([{ type: 'profile.update', potType: 'terracotta', growLight: true }], [
+        { potType: 'plastic', growLight: false },
+      ]);
+      const view = await svc.render(p as never, 'en');
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Pot type', before: 'Plastic', after: 'Terracotta' },
+          { field: 'Grow light', before: 'No', after: 'Yes' },
+        ]),
+      );
+    });
+
+    it('translates progress health + tags, but leaves observations (free text) untouched', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{}]);
+      const p = withOps(
+        [{ type: 'progress.create', health: 'EXCELLENT', tags: ['NEW_LEAF', 'FLOWERING'], observations: 'looking great' }],
+        [{}],
+      );
+      const view = await svc.render(p as never, 'en');
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Health', before: null, after: 'Excellent' },
+          { field: 'Tags', before: null, after: 'New leaf, Flowering' },
+          { field: 'Observations', before: null, after: 'looking great' }, // free text — verbatim
+        ]),
+      );
     });
   });
 });

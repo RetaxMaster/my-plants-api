@@ -23,6 +23,7 @@ import { ProposalSnapshotService } from './proposal-snapshot.service.js';
 import { ProposalRenderService } from './proposal-render.service.js';
 import { ProposalApplierService } from './proposal-applier.service.js';
 import { admitRun } from '../../knowledge-chat/knowledge-chat.service.js';
+import { cleanupOwners } from '../../../test/helpers/boot.js';
 
 const prisma = new PrismaService(buildDatabaseUrl(loadDbEnv()));
 const cls = new ClsService(new AsyncLocalStorage());
@@ -128,12 +129,15 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  // Audit rows carry NO FK, so they never cascade — delete them explicitly, THEN hand the rest of the
+  // teardown to the shared, schema-derived `cleanupOwners` (test/helpers/boot.ts) instead of a second
+  // hand-rolled per-table list. A hand list here previously left `due_caches` uncovered: any `nest start
+  // --watch` restart's startup recompute (src/startup/startup.service.ts) writes a due-cache row for
+  // EVERY plant in the shared dev database, including this test's — so the plant delete below would
+  // silently fail behind a swallowed `.catch(() => {})` exactly when a recompute had fired mid-run. See
+  // the 2026-07-18 retax ledger's "the suite leaked fixtures into the shared dev database" entry.
   await prisma.plantWriteAudit.deleteMany({ where: { plantId } }).catch(() => {});
-  await prisma.plant.deleteMany({ where: { id: plantId } }).catch(() => {});
-  await prisma.place.deleteMany({ where: { id: placeId } }).catch(() => {});
-  await prisma.city.deleteMany({ where: { id: cityId } }).catch(() => {});
-  await prisma.user.deleteMany({ where: { id: userId } }).catch(() => {});
-  await prisma.owner.deleteMany({ where: { id: ownerId } }).catch(() => {});
+  await cleanupOwners(prisma, [ownerId], [userId]);
   await prisma.onModuleDestroy();
 }, 30_000);
 

@@ -18,6 +18,7 @@ import { buildDatabaseUrl } from '../config/database-url.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { ProgressService } from './progress.service.js';
+import { cleanupOwners } from '../../test/helpers/boot.js';
 
 const prisma = new PrismaService(buildDatabaseUrl(loadDbEnv()));
 const cls = new ClsService(new AsyncLocalStorage());
@@ -96,13 +97,20 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  // Clean up in FK order: photos cascade with the entry; then entry, plant, place, city, user, owner.
-  await prisma.plantProgressEntry.deleteMany({ where: { plantId } }).catch(() => {});
-  await prisma.plant.deleteMany({ where: { id: plantId } }).catch(() => {});
-  await prisma.place.deleteMany({ where: { id: placeId } }).catch(() => {});
-  await prisma.city.deleteMany({ where: { id: cityId } }).catch(() => {});
-  await prisma.user.deleteMany({ where: { id: userId } }).catch(() => {});
-  await prisma.owner.deleteMany({ where: { id: ownerId } }).catch(() => {});
+  // Routed through the SHARED cleanup rather than a hand-written FK order, and that is the whole point.
+  //
+  // The hand-written version this replaces was already broken and had not noticed: it never deleted
+  // `due_caches`, which carries a RESTRICT FK to `plants`. Any care-plan recompute touching this test's
+  // plant — the API's startup recompute does exactly that on every `nest start --watch` restart — leaves
+  // a row that blocks the plant delete, and every delete here swallows its own error, so the owner simply
+  // survived. The sibling proposals int test leaked FOUR owners into the shared dev database this way,
+  // where they surfaced in the real app's "Act as" list. This file had the identical defect and had only
+  // been luckier about when a restart landed.
+  //
+  // `cleanupOwners` derives the FK table set from `information_schema` at call time, so a model added
+  // later is covered without anyone remembering, and it VERIFIES the owner is gone and throws loudly if
+  // not — a silent cleanup is the same family of defect as a silent test.
+  await cleanupOwners(prisma, [ownerId], [userId]);
   await prisma.onModuleDestroy();
 }, 30_000);
 

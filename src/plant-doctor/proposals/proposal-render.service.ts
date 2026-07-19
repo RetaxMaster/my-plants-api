@@ -169,14 +169,29 @@ const TARGET_LABEL_LITERALS_ES: Record<string, string> = {
  * parity test walks the real enum, and a table keyed to a subset would pass that test for the wrong
  * reason if the excluded member ever became reachable some other way.
  */
-export const TASK_LABELS_ES: Record<Task, string> = {
-  WATER: 'Regar',
-  FERTILIZE: 'Fertilizar',
-  REPOT: 'Revisar las raíces',
-  ROTATE: 'Rotar',
-  CLEAN_LEAVES: 'Limpiar hojas',
-  MIST: 'Rociar hojas',
-  PROGRESS: 'Registrar progreso',
+export const TASK_LABELS: Record<Locale, Record<Task, string>> = {
+  // Taken verbatim from the web's `tasks.labels.*` in BOTH locales, so the name the owner approves here
+  // is the same name they see on the plant's own care list. `WATER` had been left as the raw enum in
+  // English — the last machine token on the consent surface, and the one attached to the operation that
+  // changes when a plant gets watered.
+  en: {
+    WATER: 'Water',
+    FERTILIZE: 'Fertilize',
+    REPOT: 'Check the roots',
+    ROTATE: 'Rotate',
+    CLEAN_LEAVES: 'Clean leaves',
+    MIST: 'Mist leaves',
+    PROGRESS: 'Log progress',
+  },
+  es: {
+    WATER: 'Regar',
+    FERTILIZE: 'Fertilizar',
+    REPOT: 'Revisar las raíces',
+    ROTATE: 'Rotar',
+    CLEAN_LEAVES: 'Limpiar hojas',
+    MIST: 'Rociar hojas',
+    PROGRESS: 'Registrar progreso',
+  },
 };
 
 // Profile-field enum vocabularies, Spanish — copied verbatim from the matching `*Options` maps in the
@@ -261,31 +276,128 @@ const PROGRESS_TAG_LABELS_ES: Record<ProgressTagKey, string> = {
   DISCOLORATION: 'Decoloración',
 };
 
+// Profile-field enum vocabularies, English — the mirror of the six ES tables above, copied verbatim
+// from the SAME product strings those were copied from (`my-plants-web/i18n/locales/en.json` —
+// `plantProfile.*Options`, `health.*`, `progress.tags.*`), never invented wording. Before this table
+// existed, `en` fell through `formatValue` all the way to `String(value)`, so the owner's consent
+// banner showed the raw machine slug (`terracotta`, `GOOD`, `NEW_LEAF`) instead of the same prose the
+// rest of the product already uses for these exact values. `Record<PotType, string>` etc. give the
+// compiler the same parity guard the ES tables have: a new enum member fails to typecheck here until
+// this table catches up, in both locales symmetrically.
+const WINDOW_DISTANCE_LABELS_EN: Record<WindowDist, string> = {
+  'on-sill': 'On the windowsill',
+  'within-1m': 'Within 1 m of a window',
+  '1-to-2m': '1–2 m from a window',
+  '2-to-3m': '2–3 m from a window',
+  'over-3m': 'More than 3 m from a window',
+  outdoors: 'Outdoors',
+};
+
+const POT_TYPE_LABELS_EN: Record<PotType, string> = {
+  terracotta: 'Terracotta',
+  'unglazed-ceramic': 'Unglazed ceramic',
+  'glazed-ceramic': 'Glazed ceramic',
+  plastic: 'Plastic',
+  porcelain: 'Porcelain',
+  metal: 'Metal',
+  concrete: 'Concrete',
+  fabric: 'Fabric',
+  other: 'Other',
+};
+
+const SOIL_MIX_LABELS_EN: Record<SoilMix, string> = {
+  aroid: 'Aroid mix',
+  'all-purpose': 'All-purpose',
+  'cactus-succulent': 'Cactus & succulent',
+  'orchid-bark': 'Orchid bark',
+  'peat-based': 'Peat-based',
+  'coco-coir': 'Coco coir',
+  'semi-hydro': 'Semi-hydro',
+  other: 'Other',
+};
+
+const GROWTH_HABIT_LABELS_EN: Record<GrowthHabit, string> = {
+  upright: 'Upright',
+  climber: 'Climber',
+  trailing: 'Trailing',
+  clumping: 'Clumping',
+  rosette: 'Rosette',
+  tree: 'Tree',
+  shrub: 'Shrub',
+  other: 'Other',
+};
+
+const PROGRESS_HEALTH_LABELS_EN: Record<ProgressHealth, string> = {
+  SICK: 'Sick',
+  POOR: 'Poor',
+  GOOD: 'Good',
+  EXCELLENT: 'Excellent',
+};
+
+const PROGRESS_TAG_LABELS_EN: Record<ProgressTagKey, string> = {
+  NEW_LEAF: 'New leaf',
+  FLOWERING: 'Flowering',
+  SEEDLING: 'Seedling',
+  LARGE_LEAVES: 'Large leaves',
+  NEW_SHOOTS: 'New shoots',
+  BLOOM_COMPLETED: 'Bloom completed',
+  FALLEN_LEAF: 'Fallen leaf',
+  DROOPING: 'Drooping',
+  DRY_LEAVES: 'Dry leaves',
+  YELLOWING_LEAVES: 'Yellowing leaves',
+  NOT_GROWING: 'Not growing',
+  STUNTED_GROWTH: 'Stunted growth',
+  LEANING: 'Leaning',
+  PESTS: 'Pests',
+  FUNGUS: 'Fungus',
+  SPOTS: 'Spots',
+  DISCOLORATION: 'Discoloration',
+};
+
 /**
  * WHICH vocabulary applies is decided by the FIELD KEY, not by the value's shape — `potType: 'plastic'`
  * and some unrelated free-text field that happened to also hold the string `'plastic'` must not share a
  * lookup. This map is the one place that decision is made; `formatValue` never guesses it per-call.
  * Fields absent here (place names, nicknames, observations, numbers, dates) are exactly the ones spec
  * says the server does not own the vocabulary of — they fall through to `String(value)` untouched.
+ *
+ * Keyed by LOCALE first, then by field key — one structure selected by `locale`, rather than an
+ * `en`/`es` table pair with the `en === undefined` special case `formatValue` used to need. Both
+ * locale's inner maps cover the exact same six field keys, which is what makes the two symmetric: a
+ * vocabulary either exists for both locales or for neither.
  */
-export const VALUE_VOCAB_ES: Record<string, Record<string, string>> = {
-  windowDistance: WINDOW_DISTANCE_LABELS_ES,
-  potType: POT_TYPE_LABELS_ES,
-  soilMix: SOIL_MIX_LABELS_ES,
-  growthHabit: GROWTH_HABIT_LABELS_ES,
-  health: PROGRESS_HEALTH_LABELS_ES,
-  tags: PROGRESS_TAG_LABELS_ES,
+export const VALUE_VOCAB: Record<Locale, Record<string, Record<string, string>>> = {
+  en: {
+    windowDistance: WINDOW_DISTANCE_LABELS_EN,
+    potType: POT_TYPE_LABELS_EN,
+    soilMix: SOIL_MIX_LABELS_EN,
+    growthHabit: GROWTH_HABIT_LABELS_EN,
+    health: PROGRESS_HEALTH_LABELS_EN,
+    tags: PROGRESS_TAG_LABELS_EN,
+  },
+  es: {
+    windowDistance: WINDOW_DISTANCE_LABELS_ES,
+    potType: POT_TYPE_LABELS_ES,
+    soilMix: SOIL_MIX_LABELS_ES,
+    growthHabit: GROWTH_HABIT_LABELS_ES,
+    health: PROGRESS_HEALTH_LABELS_ES,
+    tags: PROGRESS_TAG_LABELS_ES,
+  },
 };
 
 /**
  * Render ONE value as the display string the owner consents to. `key` is what selects a vocabulary (see
- * `VALUE_VOCAB_ES` above) — it plays no role for `en`, where every value already rendered as its own
- * label (an enum slug reads as English-ish today, e.g. `terracotta`; that is the defect this key ->
- * vocabulary path fixes for `es`, deliberately not backported to `en` — see `render()`'s parity note).
+ * `VALUE_VOCAB` above) for BOTH locales now — `en` used to fall through to `String(value)` for every
+ * enum value (an unresolved slug reading as English-ish, e.g. `terracotta`); that was the defect this
+ * key -> vocabulary path fixes, symmetrically, for `en` and `es` alike.
  */
 function formatValue(value: unknown, locale: Locale, key: string): string | null {
   if (value === undefined || value === null) return null;
-  const vocab = locale === 'es' ? VALUE_VOCAB_ES[key] : undefined;
+  // `locale` is typed `Locale`, but `render()` is a public method a caller could still hand a garbage
+  // string through a type-erasure boundary (an untyped HTTP layer, a test) — `VALUE_VOCAB[locale]` falls
+  // back to the English table rather than indexing `undefined`, the same "anything but 'es' is English"
+  // rule every other locale check in this file already follows.
+  const vocab = (VALUE_VOCAB[locale] ?? VALUE_VOCAB.en)[key];
   if (Array.isArray(value)) {
     if (!value.length) return null; // tags: [] renders as "cleared"
     // An unresolvable member (a value the vocabulary does not cover) falls back to itself, never to a
@@ -435,10 +547,10 @@ export class ProposalRenderService {
       case 'frequency.set':
       case 'frequency.clear':
       case 'care.done':
-        // English keeps rendering the RAW enum here, unchanged — that is today's shipped behaviour and
-        // this fix does not touch it (parity requirement). Spanish gets the task's actual name instead,
-        // because unlike `en` it never shipped the raw enum in the first place.
-        return locale === 'es' ? (TASK_LABELS_ES[op.task] ?? op.task) : op.task;
+        // Both locales resolve the task to its NAME. The fallback to the raw enum is the same
+        // never-blank rule every other lookup here follows: an unknown member reads as something the
+        // owner can still recognise rather than vanishing from the operation's header.
+        return (TASK_LABELS[locale] ?? TASK_LABELS.en)[op.task] ?? op.task;
       case 'progress.update':
       case 'progress.delete': {
         const entry = await this.prisma.plantProgressEntry.findFirst({ where: { id: op.entryId, plantId } });

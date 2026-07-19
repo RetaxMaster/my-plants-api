@@ -533,7 +533,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
     it('propose -> banner shows the structured list -> approve -> the data actually changed', async () => {
       // The summary is deliberately misleading: consent binds to `changes[]`, never to the agent's prose.
       const pending = await proposeAndGetPending([{ type: 'frequency.set', task: 'WATER', intervalDays: 5 }]);
-      expect(pending.operations[0]).toMatchObject({ type: 'frequency.set', targetLabel: 'WATER' });
+      expect(pending.operations[0]).toMatchObject({ type: 'frequency.set', targetLabel: 'Water' });
       expect(pending.operations[0].changes).toEqual([{ field: 'Every (days)', before: '7', after: '5' }]);
 
       const approve = await ownerPost(`/proposals/${pending.id}/approve`, {});
@@ -803,12 +803,12 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       await propose([{ type: 'profile.update', potType: 'terracotta' }]).expect(201);
       const noHeader = await ownerGet('/proposals/pending');
       expect(noHeader.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
-      expect(noHeader.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'terracotta' }]);
+      expect(noHeader.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'Plastic', after: 'Terracotta' }]);
 
       await propose([{ type: 'profile.update', potType: 'unglazed-ceramic' }], 's2').expect(201);
       const garbage = await asOwner(request(ctx.server()).get(`${base()}/proposals/pending`)).set('x-locale', 'not-a-real-locale');
       expect(garbage.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
-      expect(garbage.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'unglazed-ceramic' }]);
+      expect(garbage.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'Plastic', after: 'Unglazed ceramic' }]);
     });
 
     it('POST approve and POST decline also honour `x-locale`', async () => {
@@ -841,7 +841,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
         .send({ summary: 's', operations: [{ type: 'profile.update', potType: 'terracotta' }] });
       expect(res.status).toBe(201);
       expect(res.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
-      expect(res.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'terracotta' }]);
+      expect(res.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'Plastic', after: 'Terracotta' }]);
     });
   });
 
