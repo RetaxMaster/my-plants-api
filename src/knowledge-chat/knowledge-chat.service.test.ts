@@ -20,7 +20,7 @@ const actor = (userId = 'admin-user') => ({ userId, username: 'root', ownerId: '
 const uniqueViolation = () =>
   new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' });
 
-function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
+function setup(seed: { sessions?: Session[]; runs?: Run[]; proposals?: any[] } = {}) {
   let seq = 0;
   // Offset generated ids well past any seeded id (seeds use r1/r2/s1) so a freshly created run/session
   // never overwrites a seeded row in the in-memory map.
@@ -34,6 +34,7 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
     return [s.id, s];
   }));
   const runs = new Map((seed.runs ?? []).map((r) => [r.id, r]));
+  const proposals = new Map<string, any>((seed.proposals ?? []).map((p) => [p.id, { ...p }]));
 
   // Attach a session's runs the way Prisma's `include: { runs: { orderBy } }` would, so the service
   // code (which reads session.runs) exercises the real path against the fake.
@@ -84,12 +85,40 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
       update: async ({ where, data }: any) => { const r = runs.get(where.id); if (!r) throw new Error(`run not found: ${where.id}`); Object.assign(r, data); return r; },
       updateMany: async ({ where, data }: any) => { let count = 0; for (const r of runs.values()) { const active = where.status?.in ? where.status.in.includes(r.status) : true; if ((where.id ? r.id === where.id : where.sessionId ? r.sessionId === where.sessionId : true) && active) { Object.assign(r, data); count++; } } return { count }; },
     },
+    // Run admission now expires the session's PENDING proposal in the SAME transaction (spec 5.5.4), so
+    // the fake carries the table. It is a REAL in-memory implementation, not an empty stub: the tests
+    // below assert that admitting a turn actually expires a pending proposal and queues the nudge, which
+    // a `() => ({ count: 0 })` stub would silently make unprovable.
+    doctorWriteProposal: {
+      create: async ({ data }: any) => { const p = { id: nextId('prop'), ...data }; proposals.set(p.id, p); return p; },
+      findMany: async ({ where }: any = {}) => [...proposals.values()].filter((p: any) => (where?.sessionId ? p.sessionId === where.sessionId : true) && (where?.status ? p.status === where.status : true)),
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const p of proposals.values() as any) {
+          if ((where.sessionId ? p.sessionId === where.sessionId : true) && (where.id ? p.id === where.id : true) && (where.status ? p.status === where.status : true)) { Object.assign(p, data); count++; }
+        }
+        return { count };
+      },
+    },
     // User.ownerId is @unique: resolve THE user of an owner (the doctor token's subject, Spec 3 §3.3).
     user: {
       findUnique: async ({ where }: any) => ({ id: `u-${where.ownerId}`, username: `user-${where.ownerId}`, ownerId: where.ownerId }),
     },
-    // The fake is already in-memory and single-threaded, so a transaction is just "run the callback".
-    $transaction: async (fn: any) => fn(db),
+    // A REAL transaction, including ROLLBACK. It is not enough to "run the callback": the ordered
+    // admission (spec 5.5.4) rests entirely on expire + consume + insert sharing one atomic unit, so a
+    // fake that never rolls back cannot tell a correct implementation from one that does not share a
+    // transaction at all — and it reports a FALSE FAILURE for the case that matters most (a run losing
+    // the activeKey race must NOT have consumed the session's queued message).
+    // The maps hold flat row objects, so a shallow clone per row is a faithful snapshot.
+    $transaction: async (fn: any) => {
+      const snapshot = [sessions, runs, proposals].map((m) => new Map([...m].map(([k, v]) => [k, { ...(v as object) }])));
+      try {
+        return await fn(db);
+      } catch (err) {
+        [sessions, runs, proposals].forEach((m, i) => { m.clear(); for (const [k, v] of snapshot[i]!) m.set(k, v as never); });
+        throw err;
+      }
+    },
   } as any;
 
   const engine = { execute: vi.fn(async () => {}), loadHistory: vi.fn(async () => ({ provider: 'claude', providerSessionId: 'uuid-1', turns: [] })) };
@@ -106,7 +135,7 @@ function setup(seed: { sessions?: Session[]; runs?: Run[] } = {}) {
   const owner = new OwnerService(cls);
   const svc = new KnowledgeChatService(db, engines, tickets as any, owner, doctorRunContext, codexVerification, env);
   const run = <T>(fn: () => Promise<T>, a = actor()) => cls.run(async () => { cls.set('actor', a); return fn(); });
-  return { svc, run, engine, tickets, sessions, runs, logDir, doctorRunContext, codexVerification };
+  return { svc, run, engine, tickets, sessions, runs, proposals, logDir, doctorRunContext, codexVerification };
 }
 
 // The scope the admin KE controller passes; the existing tests all exercise the KNOWLEDGE surface.
@@ -491,5 +520,93 @@ describe('KnowledgeChatService — Codex verification gate', () => {
     codexVerification.isVerified.mockResolvedValue(false);
     await expect(run(() => svc.createSession('why?', 'codex', DS))).rejects.toBeInstanceOf(UnprocessableEntityException);
     expect(codexVerification.isVerified).toHaveBeenCalledWith('DOCTOR');
+  });
+});
+
+// A sealed, idle DOCTOR session — the precondition `startQueuedSystemTurn` needs to actually start a run.
+const doctorSession = (over: Record<string, unknown> = {}) =>
+  ({ ...session({ providerSessionId: 'uuid-1' }), kind: 'DOCTOR', plantId: 'A', ownerId: 'O', ...over }) as never as Session;
+
+describe('KnowledgeChatService.startQueuedSystemTurn', () => {
+  it('starts a run whose prompt IS the queued message, and consumes it off the session', async () => {
+    const { svc, run, sessions, runs, engine } = setup({
+      sessions: [doctorSession({ pendingSystemMessage: '[system] The user declined your request.', pendingSystemMessageProposalId: 'prop-1' })],
+      runs: [doneRun()],
+    });
+
+    const runId = await run(() => svc.startQueuedSystemTurn('s1'));
+
+    expect(runId).toBeTruthy();
+    const created = runs.get(runId!)!;
+    // Carried ALONE — no trailing blank from a naive prefix onto the empty prompt.
+    expect(created.prompt).toBe('[system] The user declined your request.');
+    expect((created as never as Record<string, unknown>).systemMessageState).toBe('CONSUMED');
+    expect((created as never as Record<string, unknown>).systemMessageProposalId).toBe('prop-1');
+    // At-most-once: it is gone from the session, so a second turn cannot redeliver it.
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBeNull();
+    // It really reached the engine, rather than only being persisted.
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId, resumeSessionId: 'uuid-1' }));
+  });
+
+  it('does nothing when no message is queued', async () => {
+    const { svc, run, runs } = setup({ sessions: [doctorSession()], runs: [doneRun()] });
+    expect(await run(() => svc.startQueuedSystemTurn('s1'))).toBeNull();
+    expect(runs.size).toBe(1); // no new run
+  });
+
+  it('does nothing on an UNSEALED session — there is no agent thread to continue yet', async () => {
+    const { svc, run, sessions, runs } = setup({
+      sessions: [doctorSession({ providerSessionId: null, pendingSystemMessage: '[system] The user declined your request.' })],
+    });
+    expect(await run(() => svc.startQueuedSystemTurn('s1'))).toBeNull();
+    expect(runs.size).toBe(0);
+    // The message is NOT consumed — it waits for the owner's first real turn.
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+  });
+
+  it('throws Conflict when a run is already active, LEAVING the message queued for that run successor', async () => {
+    // Idle is never pre-checked with a read (that would be a TOCTOU); the activeKey unique index decides.
+    const { svc, run, sessions } = setup({
+      sessions: [doctorSession({ pendingSystemMessage: '[system] The user declined your request.' })],
+      runs: [activeRun()],
+    });
+    await expect(run(() => svc.startQueuedSystemTurn('s1'))).rejects.toBeInstanceOf(ConflictException);
+    // Nothing was lost: the message is still on the session.
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+  });
+});
+
+describe('run admission expires pending proposals (through the real service)', () => {
+  it('a new prompt turn expires the PENDING proposal and prefixes the not-approved nudge', async () => {
+    // The unit tests drive admitRun directly; this proves the service actually routes through it, which a
+    // direct-only test cannot: insertActiveRun could have kept its old inline create and stayed green.
+    const { svc, run, runs, proposals, sessions } = setup({
+      sessions: [doctorSession()],
+      runs: [doneRun()],
+      proposals: [{ id: 'prop-1', sessionId: 's1', status: 'PENDING', pendingKey: 'PENDING' }],
+    });
+
+    const out = await run(() => svc.resume('s1', { prompt: 'why is it yellow?' }, undefined, DS));
+
+    expect(proposals.get('prop-1').status).toBe('EXPIRED');
+    expect(proposals.get('prop-1').pendingKey).toBeNull(); // or the index blocks every future proposal
+    expect(runs.get(out.runId)!.prompt).toBe('[system] The user still has not approved the request.\n\nwhy is it yellow?');
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBeNull(); // consumed
+  });
+
+  it('a COMMAND turn expires the proposal but is NOT prefixed, and leaves the nudge queued', async () => {
+    const { svc, run, runs, proposals, sessions } = setup({
+      sessions: [doctorSession()],
+      runs: [doneRun()],
+      proposals: [{ id: 'prop-1', sessionId: 's1', status: 'PENDING', pendingKey: 'PENDING' }],
+    });
+
+    const out = await run(() => svc.resume('s1', { command: { name: 'compact', args: '' } }, undefined, DS));
+
+    expect(proposals.get('prop-1').status).toBe('EXPIRED');
+    expect(runs.get(out.runId)!.prompt).toBeNull();
+    expect((runs.get(out.runId)! as never as Record<string, unknown>).commandName).toBe('compact');
+    // Prefixing prose onto a command would corrupt it, so the message waits for the next PROMPT turn.
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user still has not approved the request.');
   });
 });

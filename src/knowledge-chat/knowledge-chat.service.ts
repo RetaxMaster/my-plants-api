@@ -15,6 +15,7 @@ import { DoctorRunContextService } from '../plant-doctor/doctor-run-context.serv
 import { resolveEffectiveProvider } from './effective-provider.js';
 import { WORKSPACE_ENV } from './doctor-workspace-env.js';
 import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
+import { SYSTEM_MESSAGE } from './system-message.js';
 
 // The engine's typed "there is nothing left to read" errors. Classified against the package's own error
 // classes rather than by matching message text, so a reworded message cannot silently turn a real outage
@@ -37,6 +38,82 @@ const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 // @@unique([sessionId, activeKey]) constraint then permits at most ONE active run per session.
 const ACTIVE_KEY = 'ACTIVE';
 type KnowledgeChatRunRow = { id: string; status: string; startedAt: Date | null; createdAt: Date };
+
+/**
+ * The ordered admission transaction (spec 5.5.4). ONE transaction, in this order:
+ *   1. conditionally expire the session's PENDING proposal
+ *   2. if that expiry took effect, queue the "still has not approved" nudge
+ *   3. consume the queued message and prefix it onto the run's persisted prompt
+ *      — SKIPPED for a command turn: prompt and command are a strict XOR, and prefixing prose onto a
+ *        command corrupts it. The message waits for the next PROMPT turn.
+ *   4. insert the run with its activeKey
+ *
+ * Sharing ONE transaction is the whole point: it stops an approve from landing AFTER the run was admitted
+ * but BEFORE the expiry, which would apply a write the owner's new turn had already superseded.
+ *
+ * Exported as a module-level function (not a method) so the ordering can be unit-tested directly against a
+ * transaction client, without standing up the whole service.
+ */
+export async function admitRun(
+  tx: Prisma.TransactionClient,
+  args: { sessionId: string; provider: AgentProvider; input: TurnInput },
+) {
+  const expired = await tx.doctorWriteProposal.updateMany({
+    where: { sessionId: args.sessionId, status: 'PENDING' },
+    data: { status: 'EXPIRED', pendingKey: null, resolvedAt: new Date(), resolvedByUserId: null },
+  });
+
+  const session = await tx.knowledgeChatSession.findUnique({ where: { id: args.sessionId } });
+
+  let queuedText = session?.pendingSystemMessage ?? null;
+  let queuedProposalId = session?.pendingSystemMessageProposalId ?? null;
+  if (expired.count > 0) {
+    // A newer message REPLACES an older one — and its proposal id goes with it, or the run would carry a
+    // message about one proposal tagged with the id of another.
+    queuedText = SYSTEM_MESSAGE.notApproved;
+    queuedProposalId = null;
+    await tx.knowledgeChatSession.update({
+      where: { id: args.sessionId },
+      data: { pendingSystemMessage: queuedText, pendingSystemMessageProposalId: null },
+    });
+  }
+
+  const isCommand = args.input.command !== undefined;
+  const consume = !isCommand && queuedText !== null;
+
+  if (consume) {
+    // Consuming and inserting share this transaction, so a crash between them cannot duplicate the
+    // message nor strand it (at-most-once, spec 5.5.4).
+    await tx.knowledgeChatSession.update({
+      where: { id: args.sessionId },
+      data: { pendingSystemMessage: null, pendingSystemMessageProposalId: null },
+    });
+  }
+
+  // A decline-triggered turn carries the message ALONE (`startQueuedSystemTurn` passes prompt: ''), so
+  // prefixing unconditionally would persist a trailing blank the agent reads as content.
+  const userText = args.input.command ? null : (args.input.prompt ?? null);
+  const prompt = isCommand ? null : consume ? (userText ? `${queuedText}\n\n${userText}` : queuedText) : userText;
+
+  return tx.knowledgeChatRun.create({
+    data: {
+      sessionId: args.sessionId,
+      provider: args.provider,
+      prompt,
+      // The raw argument string, verbatim — the exact shape this column has always held. Serializing it
+      // would double-encode every command turn.
+      commandName: args.input.command?.name ?? null,
+      commandArgs: args.input.command?.args ?? null,
+      status: 'QUEUED',
+      activeKey: ACTIVE_KEY,
+      // The consumed message moves ONTO THE RUN ROW so it is never in limbo between "removed from the
+      // session" and "restored". CONSUMED is the only non-terminal state.
+      systemMessageText: consume ? queuedText : null,
+      systemMessageProposalId: consume ? queuedProposalId : null,
+      systemMessageState: consume ? 'CONSUMED' : null,
+    },
+  });
+}
 
 @Injectable()
 export class KnowledgeChatService {
@@ -105,17 +182,8 @@ export class KnowledgeChatService {
           });
           if (count === 0) return null; // sealed in the gap → this is no longer a retry
         }
-        const run = await tx.knowledgeChatRun.create({
-          data: {
-            sessionId,
-            provider,
-            prompt: input.command ? null : input.prompt,
-            commandName: input.command?.name ?? null,
-            commandArgs: input.command?.args ?? null,
-            status: 'QUEUED',
-            activeKey: ACTIVE_KEY,
-          },
-        });
+        // Admission is ORDERED and shares this transaction (spec 5.5.4) — see admitRun.
+        const run = await admitRun(tx, { sessionId, provider, input });
         await tx.knowledgeChatSession.update({
           where: { id: sessionId },
           data: { pendingRunId: run.id },
