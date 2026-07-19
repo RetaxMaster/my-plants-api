@@ -23,8 +23,10 @@ function build(opts: { owned?: boolean } = {}) {
       findUnique: async () => null,
       upsert: async (args: any) => { adjustmentUpserts.push(args); },
     },
+    plantWriteAudit: { create: async () => ({}) },
+    $transaction: async (fn: any) => fn(prisma),
   } as any;
-  const owner = { ownerFilter: () => ({}) } as any;
+  const owner = { ownerFilter: () => ({}), currentOwnerId: () => 'owner-1', currentActor: () => ({ userId: 'u1' }) } as any;
   const carePlan = { recomputePlant: vi.fn(async () => {}) } as any;
   const svc = new FeedbackService(prisma, owner, carePlan);
   return { svc, created, adjustmentUpserts, carePlan };

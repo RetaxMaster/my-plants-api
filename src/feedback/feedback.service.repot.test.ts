@@ -65,8 +65,10 @@ function build(
         adjustmentUpserts.push(a);
       },
     },
+    plantWriteAudit: { create: async () => ({}) },
+    $transaction: async (fn: any) => fn(prisma),
   } as any;
-  const owner = { ownerFilter: () => ({}) } as any;
+  const owner = { ownerFilter: () => ({}), currentOwnerId: () => 'owner-1', currentActor: () => ({ userId: 'u1' }) } as any;
   const carePlan = { recomputePlant: vi.fn(async () => {}) } as any;
   return {
     svc: new FeedbackService(prisma, owner, carePlan),
