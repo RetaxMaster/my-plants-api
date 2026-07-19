@@ -122,7 +122,19 @@ export class ProposalsService {
       });
     } catch (err) {
       // The nullable-pendingKey unique index is the authority, not a find-then-insert.
-      if ((err as { code?: string }).code === 'P2002') {
+      //
+      // TWO Prisma codes mean "another actor holds the pending slot right now", and BOTH must become a
+      // 409 — this was found against real MariaDB, not in unit tests, because a hand-thrown fake error
+      // can only ever be the code the test author already thought of:
+      //   P2002 — the unique violation, when the loser's INSERT reaches the index after the winner
+      //           committed.
+      //   P2034 — a write conflict / deadlock, which is what ACTUALLY happens ~19 times out of 20: the
+      //           expire `updateMany` takes next-key locks on `(sessionId, pendingKey)` and the two
+      //           overlapping transactions deadlock, so InnoDB kills one before the insert is ever
+      //           attempted. Leaving this uncaught surfaced a raw driver error as a 500 to the agent
+      //           instead of the actionable 409 the contract promises.
+      const code = (err as { code?: string }).code;
+      if (code === 'P2002' || code === 'P2034') {
         throw new ConflictException('a pending proposal already exists for this session');
       }
       throw err;
