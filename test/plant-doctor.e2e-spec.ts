@@ -1,21 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Test } from '@nestjs/testing';
-import { ValidationPipe, type INestApplication } from '@nestjs/common';
-import * as bcrypt from 'bcrypt';
+import type { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
-import { mkdtempSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import request from 'supertest';
-import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
-import { WeatherService } from '../src/weather/weather.service.js';
-import { ImageUploadService } from '../src/storage/image-upload.service.js';
 import { AuthService } from '../src/auth/auth.service.js';
 import { CodexRoleVerificationService } from '../src/knowledge-chat/codex-role-verification.service.js';
-import { KNOWLEDGE_ENGINE, DOCTOR_ENGINE, DOCTOR_ORCHESTRATOR } from '../src/knowledge-chat/engine/engine-params.js';
+import { DOCTOR_ORCHESTRATOR } from '../src/knowledge-chat/engine/engine-params.js';
 import type { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
+import { bootTestApp, cleanupOwners, type ExecuteCall } from './helpers/boot.js';
 
 // End-to-end for the owner-scoped Plant Doctor HTTP surface over the REAL stack (JwtAuthGuard ->
 // DoctorScopeGuard -> controller -> shared KnowledgeChatService -> Prisma -> DB). HERMETIC: both engines are
@@ -28,29 +22,8 @@ describe('Plant Doctor (e2e)', () => {
   let prisma: PrismaService;
   let doctorOrch: KnowledgeChatOrchestrator;
 
-  const executeCalls: { kind: string; runId: string; env?: Record<string, string> }[] = [];
-  const makeFakeEngine = (kind: string) => ({
-    logDir: mkdtempSync(join(tmpdir(), `pd-e2e-${kind}-`)),
-    execute: async (req: { runId: string; logPath: string; env?: Record<string, string> }) => {
-      executeCalls.push({ kind, runId: req.runId, env: req.env });
-      await mkdir(dirname(req.logPath), { recursive: true });
-      await writeFile(req.logPath, `{"type":"log.header","schemaVersion":"1.0.0","runId":"${req.runId}"}\n`, { flag: 'wx' });
-    },
-    providerStatus: async () => [
-      { provider: 'claude', installed: true, authenticated: true, available: true },
-      { provider: 'codex', installed: true, authenticated: true, available: true },
-    ],
-    commandCatalog: async () => ({ provider: 'claude', commands: [] }),
-    loadHistory: async () => ({ provider: 'claude', providerSessionId: 'x', turns: [] }),
-    onModuleInit: async () => {},
-    onModuleDestroy: async () => {},
-    get isRunning() { return false; },
-  });
-  const fakeKnowledge = makeFakeEngine('KNOWLEDGE');
-  const fakeDoctor = makeFakeEngine('DOCTOR');
-  const fakeImages = { upload: async () => ({ imageUrl: 'https://cdn.test/x.webp', imageObjectKey: 'k/x.webp' }), delete: async () => {} };
+  let executeCalls: ExecuteCall[];
 
-  const password = 'e2e-secret';
   const n1 = `e2e-pd-o1-${randomUUID()}`;
   const n2 = `e2e-pd-o2-${randomUUID()}`;
   const nAdmin = `e2e-pd-admin-${randomUUID()}`;
@@ -63,47 +36,28 @@ describe('Plant Doctor (e2e)', () => {
   let verification: CodexRoleVerificationService;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(WeatherService).useValue({ forLocation: async () => null, forCity: async () => null })
-      .overrideProvider(ImageUploadService).useValue(fakeImages)
-      .overrideProvider(KNOWLEDGE_ENGINE).useValue(fakeKnowledge)
-      .overrideProvider(DOCTOR_ENGINE).useValue(fakeDoctor)
-      .compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-    await app.init();
-    prisma = app.get(PrismaService);
+    // ONE shared hermetic boot (test/helpers/boot.ts) — never a second copy of the overrides.
+    const booted = await bootTestApp();
+    app = booted.app;
+    prisma = booted.prisma;
+    executeCalls = booted.executeCalls;
     doctorOrch = app.get<KnowledgeChatOrchestrator>(DOCTOR_ORCHESTRATOR);
 
-    const server = app.getHttpServer();
-    const mkOwner = async (name: string, role: 'USER' | 'ADMIN' = 'USER') => {
-      const owner = await prisma.owner.create({ data: { name } });
-      const user = await prisma.user.create({ data: { username: name, passwordHash: await bcrypt.hash(password, 10), role, ownerId: owner.id } });
-      const token = (await request(server).post('/auth/login').send({ username: name, password }).expect(201)).body.token;
-      return { ownerId: owner.id, userId: user.id, token };
-    };
-    ({ ownerId: owner1Id, userId: user1Id, token: token1 } = await mkOwner(n1));
+    ({ ownerId: owner1Id, userId: user1Id, token: token1 } = await booted.mkOwner(n1));
     user1Username = n1;
-    ({ ownerId: owner2Id, userId: user2Id, token: token2 } = await mkOwner(n2));
-    ({ ownerId: adminOwnerId, userId: adminUserId, token: adminToken } = await mkOwner(nAdmin, 'ADMIN'));
+    ({ ownerId: owner2Id, userId: user2Id, token: token2 } = await booted.mkOwner(n2));
+    ({ ownerId: adminOwnerId, userId: adminUserId, token: adminToken } = await booted.mkOwner(nAdmin, 'ADMIN'));
 
     // The Codex fallback gate is default-DENY; pin BOTH engine records to false up front so this suite is
     // deterministic regardless of any record a prior/crashed run left on disk (agent-parity Spec 2 §5).
-    verification = app.get(CodexRoleVerificationService);
+    verification = booted.verification;
     await verification.write('DOCTOR', false);
     await verification.write('KNOWLEDGE', false);
 
-    const slug = (await request(server).get('/species').expect(200)).body[0].slug as string;
-    const mkPlant = async (token: string, label: string) => {
-      const as = (r: request.Test) => r.set('Authorization', `Bearer ${token}`);
-      const city = await as(request(server).post('/cities')).send({ name: `${label} City`, latitude: 19.43, longitude: -99.13, timezone: 'America/Mexico_City', isPrimary: true }).expect(201);
-      const place = await as(request(server).post('/places')).send({ cityId: city.body.id, name: `${label} Room`, indoor: true, lightType: 'BRIGHT_INDIRECT' }).expect(201);
-      const plant = await as(request(server).post('/plants')).send({ placeId: place.body.id, speciesSlug: slug, acquiredOn: '2020-01-01' }).expect(201);
-      return plant.body.id as string;
-    };
-    plantA = await mkPlant(token1, 'A');
-    plantA2 = await mkPlant(token1, 'A2');
-    plantB = await mkPlant(token2, 'B');
+    const slug = await booted.firstSpeciesSlug();
+    plantA = await booted.mkPlant(token1, 'A', slug);
+    plantA2 = await booted.mkPlant(token1, 'A2', slug);
+    plantB = await booted.mkPlant(token2, 'B', slug);
 
     // A progress entry on plant A the doctor's `plant-edit` PATCH can target (native Date binding — MariaDB
     // date rule, never an ISO string on a date column).
@@ -119,20 +73,7 @@ describe('Plant Doctor (e2e)', () => {
       await verification.write('KNOWLEDGE', false);
     }
     if (prisma) {
-      const owners = [owner1Id, owner2Id, adminOwnerId];
-      await prisma.knowledgeChatSession.deleteMany({ where: { ownerId: { in: owners } } });
-      for (const oid of owners) {
-        await prisma.knowledgeChatSession.deleteMany({ where: { plant: { ownerId: oid } } });
-        await prisma.plantTaskFrequency.deleteMany({ where: { plant: { ownerId: oid } } });
-        await prisma.dueCache.deleteMany({ where: { plant: { ownerId: oid } } });
-        await prisma.plantProgressEntry.deleteMany({ where: { plant: { ownerId: oid } } });
-        await prisma.plantProfile.deleteMany({ where: { plant: { ownerId: oid } } });
-        await prisma.plant.deleteMany({ where: { ownerId: oid } });
-        await prisma.place.deleteMany({ where: { ownerId: oid } });
-        await prisma.city.deleteMany({ where: { ownerId: oid } });
-      }
-      await prisma.user.deleteMany({ where: { id: { in: [user1Id, user2Id, adminUserId] } } });
-      await prisma.owner.deleteMany({ where: { id: { in: owners } } });
+      await cleanupOwners(prisma, [owner1Id, owner2Id, adminOwnerId], [user1Id, user2Id, adminUserId]);
     }
     if (app) await app.close();
   });
@@ -215,24 +156,26 @@ describe('Plant Doctor (e2e)', () => {
     const asDoc = (r: request.Test) => r.set('Authorization', `Bearer ${docTokenA}`);
 
     it('mints a plant-A doctor token', async () => {
-      docTokenA = await app.get(AuthService).mintDoctorToken({ userId: user1Id, username: user1Username, ownerId: owner1Id, plantId: plantA });
+      docTokenA = await app.get(AuthService).mintDoctorToken({
+        userId: user1Id, username: user1Username, ownerId: owner1Id, plantId: plantA,
+        sessionId: sidA, runId: runA,
+      });
       expect(docTokenA).toBeTruthy();
     });
 
-    it('ACCEPTS every allowlisted plant-A endpoint (care + profile + progress + frequency PUT/DELETE)', async () => {
+    // The allowlist is now READ-ONLY. The four write endpoints that used to sit on it were revoked
+    // when the write-proposal path landed: the doctor's only write is POST .../proposals, gated by the
+    // owner's approval. The full mutating surface is asserted 403 in plant-doctor-proposals.e2e-spec.ts.
+    it('ACCEPTS the allowlisted READ for plant A, and REJECTS every write that used to be allowed', async () => {
       await asDoc(request(server()).get(`/plants/${plantA}/care`)).expect(200);
-      await asDoc(request(server()).patch(`/plants/${plantA}/profile`)).send({ potType: 'plastic', hasDrainage: true }).expect(200);
-      await asDoc(request(server()).patch(`/plants/${plantA}/progress/${progressEntryA}`)).field('observations', 'doctor note').expect(200);
-      await asDoc(request(server()).put(`/plants/${plantA}/frequency`)).send({ task: 'WATER', intervalDays: 7 }).expect(200);
-      await asDoc(request(server()).delete(`/plants/${plantA}/frequency/WATER`)).expect(200);
+      await asDoc(request(server()).patch(`/plants/${plantA}/profile`)).send({ potType: 'plastic', hasDrainage: true }).expect(403);
+      await asDoc(request(server()).patch(`/plants/${plantA}/progress/${progressEntryA}`)).field('observations', 'doctor note').expect(403);
+      await asDoc(request(server()).put(`/plants/${plantA}/frequency`)).send({ task: 'WATER', intervalDays: 7 }).expect(403);
+      await asDoc(request(server()).delete(`/plants/${plantA}/frequency/WATER`)).expect(403);
     });
 
-    it('REJECTS (403) EVERY allowlisted endpoint for a DIFFERENT plant (the pin, not just care/frequency)', async () => {
+    it('REJECTS (403) the allowlisted READ for a DIFFERENT plant (the plant pin still holds)', async () => {
       await asDoc(request(server()).get(`/plants/${plantB}/care`)).expect(403);
-      await asDoc(request(server()).patch(`/plants/${plantB}/profile`)).send({ potType: 'plastic' }).expect(403);
-      await asDoc(request(server()).patch(`/plants/${plantB}/progress/${progressEntryA}`)).field('observations', 'x').expect(403);
-      await asDoc(request(server()).put(`/plants/${plantB}/frequency`)).send({ task: 'WATER', intervalDays: 7 }).expect(403);
-      await asDoc(request(server()).delete(`/plants/${plantB}/frequency/WATER`)).expect(403);
     });
 
     it('REJECTS (403) a non-allowlisted endpoint even for plant A (default-deny narrows, never widens)', async () => {

@@ -1,5 +1,4 @@
 import { Body, Controller, Delete, Get, Param, Put } from '@nestjs/common';
-import { DoctorAllowed } from '../auth/doctor-scope.decorator.js';
 import { SetFrequencyDto } from './frequency.dto.js';
 import { FrequencyService } from './frequency.service.js';
 
@@ -11,12 +10,14 @@ export class FrequencyController {
     return this.frequency.list(id);
   }
 
-  // Doctor "move cycles" writes (Spec 3 §3.3 allowlist): pinned to :id === token.plantId by DoctorScopeGuard.
-  @Put() @DoctorAllowed() set(@Param('id') id: string, @Body() dto: SetFrequencyDto) {
+  // Owner-only. The doctor CANNOT write cadences: it proposes `frequency.set` / `frequency.clear`
+  // operations and the owner approves them (spec §10). Do not restore @DoctorAllowed() on either
+  // handler — see test/plant-doctor-proposals.e2e-spec.ts.
+  @Put() set(@Param('id') id: string, @Body() dto: SetFrequencyDto) {
     return this.frequency.set(id, dto);
   }
 
-  @Delete(':task') @DoctorAllowed() clear(@Param('id') id: string, @Param('task') task: string) {
+  @Delete(':task') clear(@Param('id') id: string, @Param('task') task: string) {
     return this.frequency.clear(id, task);
   }
 }

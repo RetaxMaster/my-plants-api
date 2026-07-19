@@ -1,6 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
-import { DoctorAllowed } from '../auth/doctor-scope.decorator.js';
 import { imageUploadMulterOptions } from '../storage/multipart.config.js';
 import { CreateProgressDto, UpdateProgressDto } from './progress.dto.js';
 import { ProgressService } from './progress.service.js';
@@ -31,10 +30,9 @@ export class ProgressController {
     return this.progress.getEntry(id, entryId);
   }
 
-  // Doctor corrects/enriches an existing progress entry's textual fields (Spec 3 §3.3 allowlist), pinned to
-  // :id === token.plantId by DoctorScopeGuard (the doctor uploads no images — that stays a UI action).
+  // Owner-only. The doctor CANNOT write this: it proposes a `progress.update` operation and the owner
+  // approves it (spec §10). Do not restore @DoctorAllowed() here — see test/plant-doctor-proposals.e2e-spec.ts.
   @Patch('plants/:id/progress/:entryId')
-  @DoctorAllowed()
   @UseInterceptors(FilesInterceptor('photos', 8, imageUploadMulterOptions))
   update(
     @Param('id') id: string,

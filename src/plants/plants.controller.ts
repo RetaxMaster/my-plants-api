@@ -53,9 +53,9 @@ export class PlantsController {
     return this.plants.getPhotos(id);
   }
 
-  // Doctor completes/corrects the physical profile (Spec 3 §3.3 allowlist), pinned to :id === token.plantId.
+  // Owner-only. The doctor CANNOT write this: it proposes a `profile.update` operation and the owner
+  // approves it (spec §10). Do not restore @DoctorAllowed() here — see test/plant-doctor-proposals.e2e-spec.ts.
   @Patch(':id/profile')
-  @DoctorAllowed()
   updateProfile(
     @Param('id') id: string,
     @Body(new ZodValidationPipe(plantProfileUpdateSchema)) body: PlantProfileUpdate,
