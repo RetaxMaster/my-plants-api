@@ -48,7 +48,20 @@ export class DoctorSessionCleanupService {
       await Promise.all(s.runs.map((r) => rm(join(doctorLogDir, `${r.id}.ndjson`), { force: true })));
     }
 
-    // (3) Delete rows LAST (cascade removes runs/tickets). Reached only if every sweep succeeded.
+    // (3) No pending proposal outlives its session's usefulness (spec 5.8). The rows themselves cascade on
+    // session delete, so this is not about the end state — it is about the WINDOW. Between here and the
+    // delete below a concurrent reader can still see a PENDING proposal for a session that is being torn
+    // down, and its owner could approve it. Expiring first closes that window; it also nulls `pendingKey`,
+    // without which the null-exempt unique index would keep the slot occupied for that session id.
+    const sessionIds = sessions.map((s) => s.id);
+    if (sessionIds.length) {
+      await this.prisma.doctorWriteProposal.updateMany({
+        where: { sessionId: { in: sessionIds }, status: 'PENDING' },
+        data: { status: 'EXPIRED', pendingKey: null, resolvedAt: new Date(), resolvedByUserId: null },
+      });
+    }
+
+    // (4) Delete rows LAST (cascade removes runs/tickets/proposals). Reached only if every sweep succeeded.
     await this.prisma.knowledgeChatSession.deleteMany({ where: { kind: 'DOCTOR', plantId } });
   }
 }

@@ -31,7 +31,15 @@ describe('DoctorSessionCleanupService.purgeForPlant', () => {
     const prisma = {
       knowledgeChatSession: {
         findMany: vi.fn(async () => [session]),
-        deleteMany: vi.fn(async () => ({ count: 1 })),
+        deleteMany: vi.fn(async () => { order.push('deleteSessions'); return { count: 1 }; }),
+      },
+      // Recorded into `order`, not stubbed to a bare count: the point of the expiry is WHEN it happens
+      // relative to the delete, and a `() => ({ count: 0 })` stub cannot express that.
+      doctorWriteProposal: {
+        updateMany: vi.fn(async (_a: { where: unknown; data: unknown }) => {
+          order.push('expireProposals');
+          return { count: 1 };
+        }),
       },
     };
     const chat = {
@@ -61,8 +69,16 @@ describe('DoctorSessionCleanupService.purgeForPlant', () => {
 
     expect(runContext.sweep).toHaveBeenCalledWith('sess-1');
 
-    // Cancel happens strictly before the sweep phase.
-    expect(order).toEqual(['cancelRun:run-active', 'sweep:sess-1']);
+    // Cancel happens strictly before the sweep phase, and the pending proposals are expired BEFORE the
+    // session rows are deleted (spec 5.8).
+    expect(order).toEqual(['cancelRun:run-active', 'sweep:sess-1', 'expireProposals', 'deleteSessions']);
+
+    // Scoped to exactly the sessions being retired, and `pendingKey` nulled — an EXPIRED row that kept
+    // pendingKey='PENDING' would permanently occupy that session's slot in the null-exempt unique index.
+    expect(prisma.doctorWriteProposal.updateMany).toHaveBeenCalledWith({
+      where: { sessionId: { in: ['sess-1'] }, status: 'PENDING' },
+      data: expect.objectContaining({ status: 'EXPIRED', pendingKey: null, resolvedByUserId: null }),
+    });
 
     // The run logs are removed as part of the FS sweep.
     await expect(stat(join(logDir, `${activeRun.id}.ndjson`))).rejects.toThrow();
@@ -82,6 +98,7 @@ describe('DoctorSessionCleanupService.purgeForPlant', () => {
         findMany: vi.fn(async () => [session]),
         deleteMany: vi.fn(async () => ({ count: 1 })),
       },
+      doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
     };
     const chat = { cancelRun: vi.fn(async () => {}) };
     const runContext = { sweep: vi.fn(async () => { throw new Error('disk gone'); }) };
@@ -93,5 +110,26 @@ describe('DoctorSessionCleanupService.purgeForPlant', () => {
 
     // Rows must stay intact — deleting them here would orphan whatever the sweep failed to clean up.
     expect(prisma.knowledgeChatSession.deleteMany).not.toHaveBeenCalled();
+    // ...and nothing was expired either: the purge aborted, so the session is still live and its pending
+    // proposal is still legitimately the owner's to resolve.
+    expect(prisma.doctorWriteProposal.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('expires nothing when the plant has no doctor sessions (never an unscoped updateMany)', async () => {
+    // An `in: []` would be harmless, but an updateMany that lost its scope entirely would expire every
+    // pending proposal in the table. Skipping the call when there is nothing to retire makes that
+    // impossible rather than merely unlikely.
+    const prisma = {
+      knowledgeChatSession: { findMany: vi.fn(async () => []), deleteMany: vi.fn(async () => ({ count: 0 })) },
+      doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    };
+    const service = new DoctorSessionCleanupService(
+      prisma as any,
+      { cancelRun: vi.fn() } as any,
+      { sweep: vi.fn() } as any,
+      { logDirFor: () => tmpdir() } as any,
+    );
+    await service.purgeForPlant('plant-3');
+    expect(prisma.doctorWriteProposal.updateMany).not.toHaveBeenCalled();
   });
 });
