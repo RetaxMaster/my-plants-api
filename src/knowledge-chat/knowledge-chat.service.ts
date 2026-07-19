@@ -130,6 +130,47 @@ export class KnowledgeChatService {
     }
   }
 
+  /**
+   * Start a turn whose ENTIRE input is the queued system message (spec 5.3 step 4: a decline "starts that
+   * run immediately when the session is idle"). `ProposalsService.decline` is the ONLY caller.
+   *
+   * Deliberately NOT a special path: it goes through the same admission + launch the owner's own prompt
+   * turns use, so the message is consumed by `admitRun`'s ordered transaction (expire → queue → consume →
+   * insert) and inherits at-most-once delivery, the activeKey guard and the launch lease for free. A
+   * second implementation of "start a run" is exactly the fork the project rules forbid.
+   *
+   * Idle is NOT pre-checked with a read — that would be a TOCTOU race against a run starting concurrently.
+   * The activeKey unique index is the authority: if a run is already active the insert violates it and
+   * this throws ConflictException, which the caller treats as "the message stays queued". No message is
+   * lost: it is still on the session, and the active run's successor will carry it.
+   */
+  async startQueuedSystemTurn(sessionId: string): Promise<string | null> {
+    const session = await this.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
+    // Nothing queued (e.g. it was already consumed by a turn the owner just sent) → nothing to start.
+    if (!session?.pendingSystemMessage) return null;
+    // An unsealed session has no providerSessionId yet, so there is no agent thread to continue. The
+    // message simply waits for the owner's first real turn.
+    if (!session.providerSessionId) return null;
+
+    const kind = session.kind as SessionKind;
+    const provider = session.provider as AgentProvider;
+    await this.assertCodexAllowed(kind, provider);
+
+    // The EMPTY prompt is intentional: admitRun consumes the queued message and PREFIXES it onto the
+    // run's persisted prompt. Passing the text here as well would deliver it twice and break the
+    // at-most-once guarantee of spec 5.5.4.
+    const input: TurnInput = { prompt: '' };
+
+    // insertActiveRun returns string | null — null means it lost the active-slot race, which is the
+    // in-contract "a run is already active" outcome: the message stays queued for that run's successor.
+    // It can also throw ConflictException on P2002; the caller treats both the same way.
+    const runId = await this.insertActiveRun(sessionId, provider, input);
+    if (!runId) return null;
+
+    await this.launch(runId, provider, input, session.providerSessionId, kind, session);
+    return runId;
+  }
+
   async listSessions(scope: SessionScope) {
     const sessions = await this.prisma.knowledgeChatSession.findMany({
       where: whereForScope(scope),
