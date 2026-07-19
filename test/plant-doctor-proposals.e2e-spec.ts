@@ -143,4 +143,89 @@ describe('doctor token cannot mutate any domain record (e2e)', () => {
       .set('Authorization', `Bearer ${doctorToken}`);
     expect(res.status).toBe(200);
   });
+
+  /**
+   * The five proposal endpoints are MOUNTED and answer as themselves.
+   *
+   * This exists because "the controller compiles and the app boots" proves neither. A controller that is
+   * registered but mis-mounted (a wrong path prefix, a segment clash with `PlantDoctorController`'s own
+   * `sessions/:sid` routes) fails ONLY at request time, and it fails as a 404 — which is exactly the
+   * status several legitimate outcomes here also produce. So each assertion below pins a response that a
+   * missing route could not produce.
+   */
+  describe('the proposal endpoints are mounted', () => {
+    let sessionId: string;
+    const base = () => `/plants/${plantId}/diagnose/sessions/${sessionId}`;
+
+    beforeAll(async () => {
+      const s = await ctx.prisma.knowledgeChatSession.create({
+        data: { title: 'mount check', kind: 'DOCTOR', plantId, ownerId, provider: 'claude' },
+      });
+      sessionId = s.id;
+    });
+
+    it('GET proposals/pending answers 200 with null when nothing is pending', async () => {
+      const res = await request(ctx.server()).get(`${base()}/proposals/pending`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({});  // an empty 200 body — Nest serializes a null return as no content
+    });
+
+    it('GET and PATCH settings round-trip the owner-only switch', async () => {
+      const read = await request(ctx.server()).get(`${base()}/settings`).set('Authorization', `Bearer ${ownerToken}`);
+      expect(read.status).toBe(200);
+      expect(read.body).toEqual({ skipPermissions: false });
+
+      const write = await request(ctx.server())
+        .patch(`${base()}/settings`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ skipPermissions: true });
+      expect(write.status).toBe(200);
+      expect(write.body).toEqual({ skipPermissions: true });
+
+      // Provenance is recorded, not just the boolean (spec 6.4) — this is what makes an auto-approve
+      // attributable later.
+      const row = await ctx.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
+      expect(row!.skipPermissionsSetByUserId).toBe(userId);
+      expect(row!.skipPermissionsSetAt).toBeInstanceOf(Date);
+
+      await request(ctx.server())
+        .patch(`${base()}/settings`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ skipPermissions: false });
+    });
+
+    it('403s POST proposals for an ordinary OWNER token — @DoctorAllowed alone would have admitted it', async () => {
+      const res = await request(ctx.server())
+        .post(`${base()}/proposals`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ summary: 's', operations: [{ type: 'frequency.clear', task: 'WATER' }] });
+      expect(res.status).toBe(403);
+    });
+
+    it('403s PATCH settings for a doctor token (an agent cannot disable its own supervision)', async () => {
+      const res = await request(ctx.server())
+        .patch(`${base()}/settings`)
+        .set('Authorization', `Bearer ${doctorToken}`)
+        .send({ skipPermissions: true });
+      expect(res.status).toBe(403);
+    });
+
+    it('403s a doctor token filing against a session it is not pinned to', async () => {
+      // The token above is pinned to `sess-guard`; this path names the real session. The seal — not the
+      // plant pin — is what must reject it (spec 5.2).
+      const res = await request(ctx.server())
+        .post(`${base()}/proposals`)
+        .set('Authorization', `Bearer ${doctorToken}`)
+        .send({ summary: 's', operations: [{ type: 'frequency.clear', task: 'WATER' }] });
+      expect(res.status).toBe(403);
+    });
+
+    it('400s a malformed proposal body before any scope check leaks information', async () => {
+      const res = await request(ctx.server())
+        .post(`${base()}/proposals`)
+        .set('Authorization', `Bearer ${doctorToken}`)
+        .send({ summary: 's', operations: [{ type: 'nope' }] });
+      expect(res.status).toBe(400);
+    });
+  });
 });
