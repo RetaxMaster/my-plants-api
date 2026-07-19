@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
 
 type Status = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
-interface Run { id: string; sessionId: string; provider: string; providerSessionId?: string | null; sessionTracked?: boolean; commandName?: string | null; createdAt?: Date; status: Status; activeKey: string | null; pid: number | null; procStartTime: string | null; startedAt: Date | null; finishedAt: Date | null; exitCode: number | null; error: string | null }
-interface Session { id: string; provider?: string; providerSessionId: string | null; pendingRunId?: string | null }
+interface Run { id: string; sessionId: string; provider: string; providerSessionId?: string | null; sessionTracked?: boolean; commandName?: string | null; createdAt?: Date; status: Status; activeKey: string | null; pid: number | null; procStartTime: string | null; startedAt: Date | null; finishedAt: Date | null; exitCode: number | null; error: string | null;
+  // The `[system]` message this run claimed from its session, and what became of it (migration 0022).
+  systemMessageText?: string | null; systemMessageProposalId?: string | null; systemMessageState?: string | null }
+interface Session { id: string; provider?: string; providerSessionId: string | null; pendingRunId?: string | null;
+  pendingSystemMessage?: string | null; pendingSystemMessageProposalId?: string | null }
 
 function makePrismaFake(runs: Run[], sessions: Session[]) {
   const runMap = new Map(runs.map((r) => [r.id, r]));
@@ -17,7 +20,7 @@ function makePrismaFake(runs: Run[], sessions: Session[]) {
     (where.procStartTime?.not === undefined || r.procStartTime !== null) &&
     (where.startedAt?.not === undefined || r.startedAt !== null) &&
     (where.status === undefined || typeof where.status === 'object' || r.status === where.status);
-  return {
+  const fake: any = {
     runMap, sessMap,
     knowledgeChatRun: {
       findUnique: async ({ where }: any) => runMap.get(where.id) ?? null,
@@ -61,7 +64,21 @@ function makePrismaFake(runs: Run[], sessions: Session[]) {
         return { count: 1 };
       },
     },
+    // `runFinished` now settles any consumed `[system]` message in the SAME transaction as the status
+    // write. This is a REAL transaction, rollback included: a double that merely runs the callback cannot
+    // distinguish "these two writes are atomic" — the property the at-most-once guarantee rests on — from
+    // two independent writes, so it would be green either way.
+    $transaction: async (fn: any) => {
+      const snapshot = [runMap, sessMap].map((m) => new Map([...m].map(([k, v]) => [k, { ...(v as object) }])));
+      try {
+        return await fn(fake);
+      } catch (err) {
+        [runMap, sessMap].forEach((m, i) => { m.clear(); for (const [k, v] of snapshot[i]!) m.set(k, v as never); });
+        throw err;
+      }
+    },
   };
+  return fake;
 }
 
 // The engine params a KNOWLEDGE orchestrator is constructed with: logDir '/logs' anchors the logPath
@@ -413,5 +430,67 @@ describe('KnowledgeChatOrchestrator.runsForSession — an UNTRACKED run is unkno
     const fresh = run('r2', 2000, {});
     const orch = orchWith([orphan, fresh], [sess()]);
     expect(await orch.runsForSession('claude', 'uuid-1')).toEqual([{ runId: 'r2', startedAtMs: 2000 }]);
+  });
+});
+
+describe('KnowledgeChatOrchestrator.runFinished — [system] message settling', () => {
+  const consumingRun = (over: Partial<Run> = {}): Run => ({
+    id: 'r1', sessionId: 's1', provider: 'claude', providerSessionId: null, status: 'RUNNING',
+    activeKey: 'ACTIVE', pid: 1, procStartTime: '1', startedAt: new Date(), finishedAt: null,
+    exitCode: null, error: null,
+    systemMessageText: '[system] The user declined your request.',
+    systemMessageProposalId: 'prop-1',
+    systemMessageState: 'CONSUMED',
+    ...over,
+  });
+
+  it('marks the message DELIVERED on a clean exit and leaves the session slot empty', async () => {
+    const run = consumingRun();
+    const session: Session = { id: 's1', providerSessionId: 'uuid-1' };
+    const prisma = makePrismaFake([run], [session]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runFinished('r1', { exitCode: 0, stopped: false, stderrTail: null });
+
+    expect(run.systemMessageState).toBe('DELIVERED');
+    // Re-queueing a message the agent already read would reach it as a SECOND refusal.
+    expect(session.pendingSystemMessage).toBeUndefined();
+  });
+
+  it('RESTOREs the message onto the session when the run died without reaching the agent', async () => {
+    // The case the whole mechanism exists for: the nudge must not be silently lost because a run crashed.
+    const run = consumingRun({ providerSessionId: null });
+    const session: Session = { id: 's1', providerSessionId: 'uuid-1' };
+    const prisma = makePrismaFake([run], [session]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'boom' });
+
+    expect(run.systemMessageState).toBe('RESTORED');
+    expect(session.pendingSystemMessage).toBe('[system] The user declined your request.');
+    expect(session.pendingSystemMessageProposalId).toBe('prop-1');
+    expect(run.activeKey).toBeNull(); // and the slot is freed in the same transaction
+  });
+
+  it('does NOT settle the message when it loses the single-winner claim', async () => {
+    // A competing finalizer already took the run terminal; this call affects 0 rows and must not touch
+    // the message — otherwise two finalizers could restore it twice.
+    const run = consumingRun({ status: 'SUCCEEDED', activeKey: null });
+    const session: Session = { id: 's1', providerSessionId: 'uuid-1' };
+    const prisma = makePrismaFake([run], [session]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'boom' });
+
+    expect(run.systemMessageState).toBe('CONSUMED'); // untouched
+    expect(session.pendingSystemMessage).toBeUndefined();
+  });
+
+  it('leaves an ordinary run carrying NO message completely unaffected', async () => {
+    const run = consumingRun({ systemMessageText: null, systemMessageProposalId: null, systemMessageState: null });
+    const session: Session = { id: 's1', providerSessionId: 'uuid-1' };
+    const prisma = makePrismaFake([run], [session]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runFinished('r1', { exitCode: 0, stopped: false, stderrTail: null });
+
+    expect(run.status).toBe('SUCCEEDED');
+    expect(session.pendingSystemMessage).toBeUndefined();
   });
 });

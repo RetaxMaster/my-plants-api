@@ -16,6 +16,7 @@ import { resolveEffectiveProvider } from './effective-provider.js';
 import { WORKSPACE_ENV } from './doctor-workspace-env.js';
 import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
 import { SYSTEM_MESSAGE } from './system-message.js';
+import { classifyLaunchFailure, restoreOnPreSpawnFailure, settleConsumedMessage } from './system-message-delivery.js';
 
 // The engine's typed "there is nothing left to read" errors. Classified against the package's own error
 // classes rather than by matching message text, so a reworded message cannot silently turn a real outage
@@ -37,7 +38,18 @@ const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 // The value in `activeKey` while a run is non-terminal. Cleared to null on every terminal transition. The
 // @@unique([sessionId, activeKey]) constraint then permits at most ONE active run per session.
 const ACTIVE_KEY = 'ACTIVE';
-type KnowledgeChatRunRow = { id: string; status: string; startedAt: Date | null; createdAt: Date };
+type KnowledgeChatRunRow = {
+  id: string;
+  sessionId: string;
+  status: string;
+  startedAt: Date | null;
+  createdAt: Date;
+  // Reconciliation needs these: whether the run reached the agent, and what message (if any) it consumed.
+  providerSessionId: string | null;
+  systemMessageText: string | null;
+  systemMessageProposalId: string | null;
+  systemMessageState: string | null;
+};
 
 /**
  * The ordered admission transaction (spec 5.5.4). ONE transaction, in this order:
@@ -155,9 +167,17 @@ export class KnowledgeChatService {
     })) as unknown as KnowledgeChatRunRow[];
     for (const run of active) {
       if (this.isStale(run)) {
-        await this.prisma.knowledgeChatRun.updateMany({
-          where: { id: run.id, status: { in: [...ACTIVE] } },
-          data: { status: 'FAILED', finishedAt: new Date(), error: 'Reconciled: run went stale.', activeKey: null },
+        // Settling the run and settling any message it consumed share ONE transaction: a stale run that
+        // never reached the agent must give its message back before its slot is freed, or the next run is
+        // admitted without it.
+        await this.prisma.$transaction(async (tx) => {
+          await tx.knowledgeChatRun.updateMany({
+            where: { id: run.id, status: { in: [...ACTIVE] } },
+            data: { status: 'FAILED', finishedAt: new Date(), error: 'Reconciled: run went stale.', activeKey: null },
+          });
+          // `providerSessionId` being set is this repo's existing signal that the run reached the agent
+          // and produced output; a stale run without one never got that far.
+          await settleConsumedMessage(tx, run, { producedAgentTurn: run.providerSessionId !== null });
         });
       }
     }
@@ -396,9 +416,26 @@ export class KnowledgeChatService {
       );
       return ticket;
     } catch (err) {
-      await this.prisma.knowledgeChatRun.updateMany({
-        where: { id: runId, status: { in: [...ACTIVE] } },
-        data: { status: 'FAILED', finishedAt: new Date(), error: `Launch failed: ${(err as Error).message}`, activeKey: null },
+      // A launch failure may or may not have left a spawned run behind, and a run may be carrying a
+      // CONSUMED system message. Restoring blindly would re-deliver it (spec 5.5.4), so the classification
+      // decides: only a CONFIRMED pre-spawn failure puts the message back.
+      const failure = classifyLaunchFailure(err);
+      await this.prisma.$transaction(async (tx) => {
+        if (failure === 'PRE_SPAWN') {
+          await restoreOnPreSpawnFailure(tx, runId, `Launch failed: ${(err as Error).message}`);
+        } else {
+          // AMBIGUOUS: do NOT restore. Leave the message CONSUMED on the run row and let reconciliation
+          // settle it once it can establish whether a turn was actually produced.
+          await tx.knowledgeChatRun.updateMany({
+            where: { id: runId, status: { in: [...ACTIVE] } },
+            data: {
+              status: 'FAILED',
+              finishedAt: new Date(),
+              error: `Launch failed: ${(err as Error).message}`,
+              activeKey: null,
+            },
+          });
+        }
       });
       throw err;
     }

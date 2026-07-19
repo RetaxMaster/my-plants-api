@@ -5,6 +5,7 @@ import type { AgentProvider } from '@retaxmaster/agents-realtime-protocol';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import type { EngineParams } from './engine-params.js';
 import { KnowledgeChatTicketService } from './knowledge-chat-ticket.service.js';
+import { settleConsumedMessage } from '../system-message-delivery.js';
 
 const ACTIVE = ['QUEUED', 'RUNNING'] as const;
 
@@ -106,16 +107,31 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
             `the agent binary is installed and on PATH (CLAUDE_BIN / CODEX_BIN) and authenticated, that ` +
             `${names.cwd} exists, and that ${names.log} (the engine's logRoot) and ` +
             `${names.state} are absolute, writable directories.`;
-    const { count } = await this.prisma.knowledgeChatRun.updateMany({
-      where: { id: runId, status: { in: [...ACTIVE] } },
-      data: {
-        status,
-        exitCode: info.exitCode,
-        pid: null,
-        finishedAt: new Date(),
-        error,
-        activeKey: null, // terminal → release the unique active slot
-      },
+    // The status write and the settling of any `[system]` message this run consumed share ONE transaction
+    // (spec 5.5.4): a run that ends without ever reaching the agent must give the message back BEFORE its
+    // active slot is freed, or the next run is admitted without it and the nudge is silently lost.
+    const { count } = await this.prisma.$transaction(async (tx) => {
+      const run = await tx.knowledgeChatRun.findUnique({ where: { id: runId } });
+      const res = await tx.knowledgeChatRun.updateMany({
+        where: { id: runId, status: { in: [...ACTIVE] } },
+        data: {
+          status,
+          exitCode: info.exitCode,
+          pid: null,
+          finishedAt: new Date(),
+          error,
+          activeKey: null, // terminal → release the unique active slot
+        },
+      });
+      // Only the winner of the single-winner claim settles the message; a loser must not touch it.
+      if (res.count > 0 && run) {
+        // A clean exit means the agent ran and read its prompt — the message was DELIVERED. Otherwise
+        // fall back to the existing "did it reach the agent at all?" signal.
+        await settleConsumedMessage(tx, run, {
+          producedAgentTurn: info.exitCode === 0 || run.providerSessionId !== null,
+        });
+      }
+      return res;
     });
     // Log at the appropriate level (secret-safe: we log the exit code + whether stderr was present, not
     // its content). count===0 means someone already finalized (single-winner) — nothing to report.
