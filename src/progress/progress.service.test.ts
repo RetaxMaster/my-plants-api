@@ -30,6 +30,9 @@ function setup(opts: { txnThrows?: boolean; capacityThrows?: boolean; entryPhoto
       },
     },
     careEvent: { create: async ({ data }: any) => { events.push(data); } },
+    // The write core re-checks ownership INSIDE the transaction (it is the applier's boundary too).
+    plant: { findFirst: async ({ where }: any) => (where.id === 'p1' && where.ownerId === 'owner-1' ? plant : null) },
+    plantWriteAudit: { create: async () => ({}) },
   };
 
   const prisma = {
@@ -331,6 +334,9 @@ function setupCrud(opts: {
     return {
       $queryRaw: async (sqlObj: SqlLike) => { const { sql, params } = renderSql(sqlObj); return interpretQuery(sql, params); },
       $executeRaw: async (sqlObj: SqlLike) => { const { sql, params } = renderSql(sqlObj); return interpretExecute(sql, params); },
+      // The write cores re-check ownership INSIDE the transaction (it is the applier's boundary too).
+      plant: { findFirst: async ({ where }: any) => (where.id === 'p1' && where.ownerId === ownerId ? plant : null) },
+      plantWriteAudit: { create: async () => ({}) },
       plantProgressPhoto: {
         findMany: async ({ where }: any) =>
           [...photos.values()].filter((p) => p.entryId === where.entryId)
@@ -480,7 +486,19 @@ describe('ProgressService.update (PATCH)', () => {
     });
     expect(photos.has('ph1')).toBe(false);
     expect(images.delete).toHaveBeenCalledWith('k1');
-    expect(inbox.deleteMany).toHaveBeenCalledWith([null]); // ph1.inboxPath was null
+    // ph1.inboxPath was null → there is nothing to clean, so the inbox is never called. (Before the
+    // write-core refactor the service forwarded the raw nulls; the core filters them out.)
+    expect(inbox.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('forwards a removed photo REAL inbox path to the inbox cleanup after commit', async () => {
+    const staledPhoto: CrudPhoto = { id: 'ph1', entryId: 'entry-1', status: 'FAILED', imageUrl: null, imageObjectKey: null, inboxPath: '/inbox/ph1.bin', originalName: 'a.jpg', claimToken: null, failureKind: 'transient', failureCode: null, sortOrder: 0, attempts: 1, nextAttemptAt: null };
+    const { svc, run, photos, inbox } = setupCrud({ photos: [staledPhoto] });
+    await run(actor('owner-1'), async () => {
+      await svc.update('p1', 'entry-1', { removePhotoIds: JSON.stringify(['ph1']) } as any, []);
+    });
+    expect(photos.has('ph1')).toBe(false);
+    expect(inbox.deleteMany).toHaveBeenCalledWith(['/inbox/ph1.bin']);
   });
 
   it('removing a PROCESSING/claimed photo → 409 photo_processing and mutates NOTHING', async () => {
@@ -666,7 +684,8 @@ describe('ProgressService.delete', () => {
     });
     expect(images.delete).toHaveBeenCalledWith('k1');
     expect(images.delete).toHaveBeenCalledWith('k2');
-    expect(inbox.deleteMany).toHaveBeenCalledWith([null, null]);
+    // Both fixtures have a null inboxPath → nothing staged to clean, so the inbox is never called.
+    expect(inbox.deleteMany).not.toHaveBeenCalled();
   });
 
   it("can't delete another owner's entry → 404", async () => {

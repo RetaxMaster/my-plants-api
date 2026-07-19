@@ -9,6 +9,13 @@ import { PhotoWorkerService } from '../photo-worker/photo-worker.service.js';
 import { startOfTodayUtc, ymdToUtcDate, ymdFromUtcDate } from '../common/time/local-date.js';
 import { PROGRESS_TAGS, parseProgressTags, resolveProgressTags } from './progress-catalog.js';
 import { MAX_SIZE_CM, type CreateProgressDto, type UpdateProgressDto } from './progress.dto.js';
+import {
+  createProgressCore,
+  updateProgressCore,
+  deleteProgressCore,
+  type UpdateProgressData,
+} from './progress.write-core.js';
+import { runEffects } from '../common/write-effects.js';
 
 // The six species-scheduled care tasks. PROGRESS is intentionally excluded — it is the richer
 // 'progress' item, not an action note. Single source for the history action allowlist.
@@ -60,47 +67,34 @@ export class ProgressService {
     // 2. ONE transaction: entry + PENDING photo rows + the PROGRESS DONE CareEvent (carrying progressEntryId).
     //    On a throw, delete the staged files (compensation) and rethrow.
     let entryId: string;
+    let effects;
     try {
-      entryId = await this.prisma.$transaction(async (tx) => {
-        const entry = await tx.plantProgressEntry.create({
+      const out = await this.prisma.$transaction((tx) =>
+        createProgressCore(tx, {
+          plantId,
+          ownerId: this.owner.currentOwnerId(),
           data: {
-            plantId,
-            occurredOn,
             health: dto.health,
+            occurredOn,
             observations: dto.observations ?? null,
             sizeCm: dto.sizeCm ?? null,
-            tags: tags.length ? (tags as unknown as Prisma.InputJsonValue) : undefined,
-            photos: staged.length
-              ? { create: staged.map((s, i) => ({
-                  status: 'PENDING' as const, // async path ALWAYS sets PENDING explicitly (default is READY)
-                  inboxPath: s.inboxPath,
-                  originalName: s.originalName,
-                  sortOrder: i,
-                })) }
-              : undefined,
+            tags,
           },
-          select: { id: true },
-        });
-        await tx.careEvent.create({
-          data: { plantId, task: 'PROGRESS', type: 'DONE', occurredOn, progressEntryId: entry.id },
-        });
-        return entry.id;
-      });
+          photos: staged.map((s) => ({ inboxPath: s.inboxPath, originalName: s.originalName })),
+          audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+        }),
+      );
+      entryId = out.result.entryId;
+      effects = out.effects;
     } catch (err) {
       await this.inbox.deleteMany(staged.map((s) => s.inboxPath)); // compensate staged files on any throw
       throw err;
     }
 
-    // 3. AFTER commit: re-anchor Progress. recomputePlant reads COMMITTED state, so it runs outside the txn.
-    //    Its failure is NEVER a reason to fail the request — the entry is durable; the daily cron re-anchors.
-    try {
-      await this.carePlan.recomputePlant(plantId);
-    } catch (err) {
-      this.logger.warn(`Progress saved (${entryId}) but recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
-    }
-
-    // 4. Nudge the worker so the photos process within a moment (not on the next 30 s sweep).
-    this.worker.enqueueTick();
+    // 3. AFTER commit: re-anchor Progress and nudge the photo worker. recomputePlant reads COMMITTED
+    //    state, so it runs outside the txn, and its failure is NEVER a reason to fail the request — the
+    //    entry is durable and the daily cron re-anchors. runEffects owns both, and never throws.
+    await runEffects(effects, this.effectRunner());
 
     return this.getEntry(plantId, entryId);
   }
@@ -128,122 +122,56 @@ export class ProgressService {
       ? await this.inbox.stage(files.map((f) => ({ buffer: f.buffer, originalName: f.originalname })))
       : [];
 
+    // The field edits, in the core's typed vocabulary. Presence means "edit"; the transport-level
+    // representations ('' clears observations, '' clears sizeCm) are resolved HERE, above the core,
+    // because they are multipart-form concerns the proposal applier does not share.
+    const data: UpdateProgressData = {};
+    if (dto.health !== undefined) data.health = dto.health;
+    if (occurredOnPresent) data.occurredOn = newOccurredOn;
+    if (dto.observations !== undefined) data.observations = dto.observations === '' ? null : dto.observations;
+    if (sizeCmPresent) data.sizeCm = sizeCm ?? null;
+    if (tagsPresent) data.tags = tags as string[];
+
     // Collected inside the transaction for post-commit cleanup (consistent with the rows actually deleted).
-    let removedObjects: { imageObjectKey: string | null; inboxPath: string | null }[] = [];
-    let recompute = false;
+    let effects;
 
     try {
-      await this.prisma.$transaction(async (tx) => {
-        // Lock the entry row so a second PATCH serialises behind us (count + sortOrder are read-modify-write).
-        const locked = await tx.$queryRaw<{ id: string; occurred_on: Date }[]>(
-          Prisma.sql`SELECT id, occurred_on FROM plant_progress_entries WHERE id = ${entryId} AND plant_id = ${plantId} FOR UPDATE`,
-        );
-        if (locked.length === 0) throw new NotFoundException(`Unknown progress entry: ${entryId}`);
-        const oldOccurredOn = locked[0].occurred_on;
-
-        // Read the entry's photos (already implicitly protected by the entry lock for our own writes).
-        const photos = await tx.plantProgressPhoto.findMany({
-          where: { entryId },
-          select: { id: true, status: true, claimToken: true, imageObjectKey: true, inboxPath: true, sortOrder: true },
-        });
-        const byId = new Map(photos.map((p) => [p.id, p]));
-
-        // Validate + apply removals. A claimed row (PROCESSING/RECOVERING → claim_token set) is un-removable:
-        // hard-deleting it would strand its in-flight R2 object (async spec §4.2). 409, mutate nothing.
-        const toRemove = [];
-        for (const rid of removeIds) {
-          const row = byId.get(rid);
-          if (!row) throw new BadRequestException({ code: 'invalid_photo', message: `Not a photo of this entry: ${rid}` });
-          if (row.claimToken !== null || row.status === 'PROCESSING' || row.status === 'RECOVERING') {
-            throw new ConflictException({ code: 'photo_processing', message: 'That photo is still processing — try again in a moment.' });
-          }
-          toRemove.push(row);
-        }
-
-        // ≤8 total invariant (existing − removed + added), under the lock. Else 400.
-        const remaining = photos.length - toRemove.length;
-        if (remaining + staged.length > 8) {
-          throw new BadRequestException({ code: 'too_many_photos', message: 'A progress entry can hold at most 8 photos.' });
-        }
-
-        // Guarded conditional delete per id: the claim_token IS NULL guard is defence-in-depth (the lock
-        // already prevents a mid-delete claim). Collect the object/inbox keys FIRST for post-commit cleanup.
-        for (const row of toRemove) {
-          const affected = await tx.$executeRaw(
-            Prisma.sql`DELETE FROM plant_progress_photos
-                       WHERE id = ${row.id} AND entry_id = ${entryId}
-                         AND status IN ('READY','FAILED','PENDING') AND claim_token IS NULL`,
-          );
-          if (affected !== 1) {
-            // Raced into a claim despite the lock (should be impossible) — refuse rather than orphan.
-            throw new ConflictException({ code: 'photo_processing', message: 'That photo is still processing — try again in a moment.' });
-          }
-        }
-        removedObjects = toRemove.map((r) => ({ imageObjectKey: r.imageObjectKey, inboxPath: r.inboxPath }));
-
-        // Create the new PENDING photo rows. sortOrder continues from the current max (removals leave gaps;
-        // the sequence stays monotonic for display — no renumbering).
-        const maxSort = photos.reduce((m, p) => Math.max(m, p.sortOrder), -1);
-        for (let i = 0; i < staged.length; i++) {
-          await tx.plantProgressPhoto.create({
-            data: {
-              entryId,
-              status: 'PENDING', // async path ALWAYS sets PENDING explicitly (default is READY)
-              inboxPath: staged[i].inboxPath,
-              originalName: staged[i].originalName,
-              sortOrder: maxSort + 1 + i,
-            },
-          });
-        }
-
-        // Field edits — only the PRESENT ones (clear-vs-absent). health/occurredOn cannot be cleared.
-        const data: Prisma.PlantProgressEntryUpdateInput = {};
-        if (dto.health !== undefined) data.health = dto.health;
-        if (occurredOnPresent) data.occurredOn = newOccurredOn;
-        if (dto.observations !== undefined) data.observations = dto.observations === '' ? null : dto.observations;
-        if (sizeCmPresent) data.sizeCm = sizeCm;
-        if (tagsPresent) data.tags = (tags as string[]).length ? (tags as unknown as Prisma.InputJsonValue) : (Prisma.JsonNull as unknown as Prisma.InputJsonValue);
-        if (Object.keys(data).length) await tx.plantProgressEntry.update({ where: { id: entryId }, data });
-
-        // Move the paired CareEvent when occurredOn changed (the event IS the "logged progress that day"
-        // signal — leaving it on the old date would lie). Conditional by progressEntryId, with the bounded
-        // null-FK date-fallback for a legacy event (async spec §3.3). Native Dates only — MariaDB date rule.
-        if (occurredOnPresent && newOccurredOn && newOccurredOn.getTime() !== oldOccurredOn.getTime()) {
-          const paired = await tx.$executeRaw(
-            Prisma.sql`UPDATE care_events SET occurred_on = ${newOccurredOn} WHERE progress_entry_id = ${entryId}`,
-          );
-          if (paired === 0) {
-            await tx.$executeRaw(
-              Prisma.sql`UPDATE care_events SET occurred_on = ${newOccurredOn}
-                         WHERE plant_id = ${plantId} AND task = 'PROGRESS' AND occurred_on = ${oldOccurredOn}
-                           AND progress_entry_id IS NULL LIMIT 1`,
-            );
-          }
-        }
-
-        // Recompute on any PATCH that changes occurredOn or sizeCm (both feed care surfaces). Skip otherwise.
-        recompute = occurredOnPresent || sizeCmPresent;
-      });
+      effects = (
+        await this.prisma.$transaction((tx) =>
+          updateProgressCore(tx, {
+            plantId,
+            ownerId: this.owner.currentOwnerId(),
+            entryId,
+            data,
+            photos: staged.map((s) => ({ inboxPath: s.inboxPath, originalName: s.originalName })),
+            removePhotoIds: removeIds,
+            audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+          }),
+        )
+      ).effects;
     } catch (err) {
       await this.inbox.deleteMany(staged.map((s) => s.inboxPath)); // compensate staged files on any throw
       throw err;
     }
 
-    // AFTER commit: best-effort R2 + inbox cleanup for the removed photos (never rolls back the removal).
-    await Promise.all(removedObjects.filter((o) => o.imageObjectKey).map((o) => this.images.delete(o.imageObjectKey!)));
-    await this.inbox.deleteMany(removedObjects.map((o) => o.inboxPath));
-
-    if (recompute) {
-      try {
-        await this.carePlan.recomputePlant(plantId);
-      } catch (err) {
-        this.logger.warn(`PATCH ${entryId}: recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
-      }
-    }
-    if (staged.length) this.worker.enqueueTick(); // process the newly-added photos within a moment
+    // AFTER commit: best-effort R2 + inbox cleanup for the removed photos (never rolls back the removal),
+    // the conditional recompute, and the worker nudge for newly-added photos. runEffects never throws.
+    await runEffects(effects, this.effectRunner());
 
     return this.getEntry(plantId, entryId);
   }
+
+  /** Post-commit runner for this service — every effect a progress write core can report. */
+  private effectRunner() {
+    return {
+      recomputePlant: (plantId: string) => this.carePlan.recomputePlant(plantId),
+      deleteObject: (key: string) => this.images.delete(key),
+      deleteInboxPaths: (paths: string[]) => this.inbox.deleteMany(paths),
+      enqueuePhotoTick: () => this.worker.enqueueTick(),
+      logger: this.logger,
+    };
+  }
+
 
   // Parse + validate the JSON-encoded removePhotoIds (spec §2.1/§2.5). Absent/'' → []. Bad JSON or a
   // non-string-array → 400. No second parser — one place, like parseProgressTags.
@@ -318,66 +246,19 @@ export class ProgressService {
   }
 
   async delete(plantId: string, entryId: string): Promise<void> {
-    const plant = await this.prisma.plant.findFirst({
-      where: { id: plantId, ...this.owner.ownerFilter() },
-      select: { id: true },
-    });
-    if (!plant) throw new NotFoundException(`Unknown plant: ${plantId}`);
+    const { effects } = await this.prisma.$transaction((tx) =>
+      deleteProgressCore(tx, {
+        plantId,
+        ownerId: this.owner.currentOwnerId(),
+        entryId,
+        audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+      }),
+    );
 
-    let objects: { imageObjectKey: string | null; inboxPath: string | null }[] = [];
-
-    await this.prisma.$transaction(async (tx) => {
-      // Lock the entry AND all its photo rows. Locking the entry alone is NOT enough: the worker's claim is
-      // an UPDATE on a CHILD photo row, so only FOR UPDATE on the photo rows blocks a concurrent
-      // PENDING→PROCESSING claim (async spec §4.2 / spec §2.3).
-      const lockedEntry = await tx.$queryRaw<{ id: string; occurred_on: Date }[]>(
-        Prisma.sql`SELECT id, occurred_on FROM plant_progress_entries WHERE id = ${entryId} AND plant_id = ${plantId} FOR UPDATE`,
-      );
-      if (lockedEntry.length === 0) throw new NotFoundException(`Unknown progress entry: ${entryId}`);
-      const occurredOn = lockedEntry[0].occurred_on;
-
-      const photos = await tx.$queryRaw<{ id: string; status: string; claim_token: string | null; image_object_key: string | null; inbox_path: string | null }[]>(
-        Prisma.sql`SELECT id, status, claim_token, image_object_key, inbox_path
-                   FROM plant_progress_photos WHERE entry_id = ${entryId} FOR UPDATE`,
-      );
-
-      // Refuse if any photo is actively claimed (PROCESSING/RECOVERING retain claim_token). A worker trying
-      // to claim a PENDING photo of this entry now BLOCKS on the lock until we commit, after which its claim
-      // UPDATE matches 0 rows (the photo is gone) — so the cascade can't delete a row mid-upload.
-      if (photos.some((p) => p.claim_token !== null || p.status === 'PROCESSING' || p.status === 'RECOVERING')) {
-        throw new ConflictException({ code: 'photo_processing', message: 'A photo is still processing — try again in a moment.' });
-      }
-      objects = photos.map((p) => ({ imageObjectKey: p.image_object_key, inboxPath: p.inbox_path }));
-
-      // Delete the paired PROGRESS CareEvent by progressEntryId FIRST (onDelete:SetNull would otherwise null
-      // the FK the delete keys on). If it matched nothing (a legacy null-FK event), the bounded date-fallback:
-      // IS NULL + LIMIT 1 cannot touch a sibling entry's PAIRED event. Native Date — MariaDB date rule.
-      const paired = await tx.$executeRaw(
-        Prisma.sql`DELETE FROM care_events WHERE progress_entry_id = ${entryId}`,
-      );
-      if (paired === 0) {
-        await tx.$executeRaw(
-          Prisma.sql`DELETE FROM care_events
-                     WHERE plant_id = ${plantId} AND task = 'PROGRESS' AND occurred_on = ${occurredOn}
-                       AND progress_entry_id IS NULL LIMIT 1`,
-        );
-      }
-
-      // Delete the entry — photos cascade via the existing onDelete: Cascade.
-      await tx.plantProgressEntry.delete({ where: { id: entryId } });
-    });
-
-    // AFTER commit: best-effort R2 + inbox cleanup (never blocks the delete — the row is the source of truth).
-    await Promise.all(objects.filter((o) => o.imageObjectKey).map((o) => this.images.delete(o.imageObjectKey!)));
-    await this.inbox.deleteMany(objects.map((o) => o.inboxPath));
-
-    // Recompute: the deleted entry may have been the latest → Progress re-anchors; the removed care-event may
-    // re-open the Progress task. Outside-txn + logged-failure pattern.
-    try {
-      await this.carePlan.recomputePlant(plantId);
-    } catch (err) {
-      this.logger.warn(`DELETE ${entryId}: recompute failed for plant ${plantId}; daily cron will re-anchor: ${(err as Error).message}`);
-    }
+    // AFTER commit: best-effort R2 + inbox cleanup (never blocks the delete — the row is the source of
+    // truth), then the recompute (the deleted entry may have been the latest → Progress re-anchors; the
+    // removed care-event may re-open the Progress task). runEffects never throws.
+    await runEffects(effects, this.effectRunner());
   }
 
   async getEntry(plantId: string, entryId: string) {
