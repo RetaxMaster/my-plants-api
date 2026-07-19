@@ -112,10 +112,31 @@ export class ProposalRenderService {
   async render(proposal: DoctorWriteProposal): Promise<ProposalView> {
     const operations = JSON.parse(proposal.operations) as ProposalOperation[];
     const stored = JSON.parse(proposal.snapshot) as (Record<string, unknown> | null)[];
-    // Re-reading the CURRENT values through the same capture path the snapshot used is what makes the
-    // stale comparison a like-for-like one: two implementations would differ in formatting alone and
-    // mark every field as drifted.
-    const live = await this.snapshots.capture(proposal.plantId, proposal.ownerId, operations);
+    // ⚠️ THE LIVE RE-READ IS FOR PENDING PROPOSALS ONLY.
+    //
+    // Drift detection answers ONE question: "has the record moved under a proposal the owner has not
+    // decided on yet?" (spec §5.5.3). That question only exists while the proposal is PENDING. Once it is
+    // terminal — APPROVED (including auto-approved under Skip Permissions), DECLINED, EXPIRED or FAILED —
+    // this view is a STATEMENT OF RECORD: what was proposed, against the values it was proposed over.
+    // Spec §5.4 pins `before` to the stored snapshot, and this response is both the agent's answer and the
+    // audit's account of what changed.
+    //
+    // Re-reading live here on a terminal proposal reads back the proposal's OWN effect: after an apply the
+    // live value IS the proposed value, so every change renders `before === after` (a no-op) carrying a
+    // spurious `stale` marker that claims someone else moved the record. That is not a cosmetic defect —
+    // it makes an applied write describe itself as "nothing happened, and by the way it drifted".
+    // Measured on the Skip Permissions path, which is the only one that renders a terminal proposal to the
+    // agent immediately after applying it.
+    //
+    // Using the stored snapshot as its own "live" value is what makes the comparison below yield "no
+    // drift" for every field, rather than special-casing each `isStale` site.
+    const live =
+      proposal.status === 'PENDING'
+        ? // Re-reading the CURRENT values through the same capture path the snapshot used is what makes
+          // the stale comparison a like-for-like one: two implementations would differ in formatting
+          // alone and mark every field as drifted.
+          await this.snapshots.capture(proposal.plantId, proposal.ownerId, operations)
+        : stored;
 
     const rendered: RenderedOperation[] = [];
     for (let i = 0; i < operations.length; i += 1) {

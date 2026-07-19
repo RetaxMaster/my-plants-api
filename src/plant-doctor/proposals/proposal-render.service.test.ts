@@ -79,6 +79,39 @@ describe('ProposalRenderService', () => {
     expect(view.operations[0]!.changes[0]!.stale).toBeUndefined();
   });
 
+  // --- A TERMINAL proposal renders its SNAPSHOT, never the live record (spec §5.4) -------------------
+  //
+  // The defect these pin: on the Skip Permissions path the proposal is applied and then rendered, so a
+  // live re-read returns the value the apply just wrote. `before` came back equal to `after` (a no-op)
+  // plus a `stale` marker blaming a drift that never happened — the agent's and the audit's account of
+  // the write said "nothing changed".
+  describe('terminal proposals', () => {
+    // Every non-PENDING status, not just APPROVED: DECLINED/EXPIRED/FAILED views are read back by the
+    // agent and by the owner too, and a live re-read there would report unrelated later edits as drift on
+    // a proposal that was never applied.
+    for (const status of ['APPROVED', 'DECLINED', 'EXPIRED', 'FAILED'] as const) {
+      it(`renders \`before\` from the stored snapshot and never re-reads the record (${status})`, async () => {
+        // The live record now holds the APPLIED value — exactly what the buggy path read back.
+        f.snapshotSvc.capture.mockResolvedValue([{ intervalDays: 5 }]);
+        const view = await svc.render({ ...baseProposal, status } as never);
+        expect(view.operations[0]!.changes[0]).toEqual({
+          field: 'Every (days)',
+          before: '7', // the snapshot, NOT the post-apply live value
+          after: '5',
+        });
+        expect(view.operations[0]!.changes[0]!.stale).toBeUndefined();
+        // Stronger than asserting the values: proving the read never happened is what stops a future
+        // "capture it anyway and ignore it" refactor from reintroducing the cost and the race.
+        expect(f.snapshotSvc.capture).not.toHaveBeenCalled();
+      });
+    }
+
+    it('still re-reads the record while the proposal is PENDING', async () => {
+      await svc.render(baseProposal as never);
+      expect(f.snapshotSvc.capture).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('excludes identity keys from `changes` — they are the target, not a change', async () => {
     f.snapshotSvc.capture.mockResolvedValueOnce([{ observations: 'old' }]);
     const p = withOps([{ type: 'progress.update', entryId: 'e1', observations: 'new' }], [{ observations: 'old' }]);
