@@ -63,3 +63,17 @@ to do and decide.
   them.
 - Messages sent to the agent about your decisions are delivered **at most once**, surviving a crash or a
   failed launch without either duplicating or vanishing.
+
+### For developers
+
+- **`npm run qa:reset` builds a known QA scenario on demand.** It rebuilds a complete garden — a healthy
+  plant, one with an empty profile for the copilot to fill, one badly overdue, and one with a
+  photographed history of declining health — for a dedicated QA account. It is a *reset*, not a seeder:
+  running it again returns to exactly the same state, so it works equally well before a QA pass and
+  after one. The scenario is described in `docs/local-development.md`.
+- The QA account now owns its own plants. It previously owned none, so QA reached real plants by
+  impersonating their owner — and a QA run destroyed a real progress entry. It keeps its admin rights;
+  it simply no longer has a reason to borrow someone else's garden.
+- **New `APP_ENV` variable**, defaulting to `production` when unset. Nothing in the app's behaviour
+  branches on it; it exists so destructive local tooling can refuse to run anywhere it was not
+  explicitly invited. Local `.env` files need `APP_ENV=development`; production needs no change.

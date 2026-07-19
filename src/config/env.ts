@@ -10,6 +10,17 @@ const dbSchema = z.object({
 });
 
 export const envSchema = dbSchema.extend({
+  // Which environment this process believes it is running in. Introduced for the QA fixture reset
+  // (`npm run qa:reset`), a DESTRUCTIVE script that must never be able to run against production.
+  //
+  // The default is deliberately `production`, not `development`. A guard that opens when configuration
+  // is MISSING is not a guard — an unconfigured prod box would sail straight past it. Fail-closed means
+  // the destructive path unlocks only where someone deliberately wrote `APP_ENV=development`, and every
+  // other case (typo, forgotten var, a fresh server, a stray shell) is refused.
+  //
+  // Nothing in the app's runtime behaviour branches on this: it exists to gate tooling, not to fork
+  // product logic. Keep it that way — environment-conditional behaviour is how prod-only bugs are born.
+  APP_ENV: z.enum(['development', 'production']).default('production'),
   PORT: z.coerce.number().int().positive().default(3000),
   // Network interface the HTTP server binds to. Defaults to 0.0.0.0 (all interfaces) so local dev and
   // the e2e harness keep working unchanged. In production it is pinned to 127.0.0.1 so the API is

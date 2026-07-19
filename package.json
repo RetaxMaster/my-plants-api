@@ -16,6 +16,7 @@
     "prisma:generate": "npm run prisma:env && prisma generate",
     "prisma:migrate": "npm run prisma:env && prisma migrate deploy",
     "prisma:migrate:dev": "npm run prisma:env && prisma migrate dev",
+    "qa:reset": "tsx scripts/qa-reset.ts",
     "user:create": "tsx scripts/create-user.ts",
     "user:list": "tsx scripts/list-users.ts",
     "knowledge-chat:rescue-logs": "tsx scripts/rescue-legacy-logs.ts"
