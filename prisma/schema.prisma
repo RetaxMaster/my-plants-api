@@ -426,10 +426,10 @@ model DoctorWriteProposal {
   ownerId   String               @map("owner_id")
   // The validated operations array, serialized. Text, not JSON columns: MariaDB 10.x aliases JSON to
   // LONGTEXT anyway, and the shape's authority is the Zod union, not the DB.
-  operations String              @map("operations") @db.Text
+  operations String              @map("operations") @db.MediumText
   // The BEFORE values, captured at propose time and never rewritten. This is what makes the owner's
   // consent bind to what they were actually shown.
-  snapshot   String              @map("snapshot") @db.Text
+  snapshot   String              @map("snapshot") @db.MediumText
   summary    String              @db.Text
   status     DoctorProposalStatus @default(PENDING)
   // 'PENDING' while pending; null once resolved. Same null-exempt unique trick as KnowledgeChatRun's

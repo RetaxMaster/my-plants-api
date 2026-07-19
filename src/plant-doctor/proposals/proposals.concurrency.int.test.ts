@@ -360,6 +360,49 @@ describe('proposal concurrency (real MariaDB)', () => {
     expect(after?.skipPermissions).toBe(false);
   }, 40_000);
 
+  it('PERSISTS a payload at the exact validated bound — the column is wider than the validator', async () => {
+    // ⚠️ THE VALIDATOR AND THE COLUMN ARE TWO DIFFERENT LIMITS, and they disagreed by one byte.
+    // `assertSerializedBound` accepts exactly 64 KiB (65,536). A MariaDB `TEXT` column holds 65,535.
+    // So a payload that passed EVERY validator still failed at INSERT — an actionable 400 turning into
+    // a driver error the agent cannot act on. Migration 0023 widens both columns to MEDIUMTEXT.
+    //
+    // The boundary unit test could not catch this: it exercises the validator against an artificial
+    // object and never touches a database. Only a real INSERT proves the accepted value is storable.
+    const runId = await makeRun();
+    const { svc } = makeProposalsService();
+
+    // A legal proposal whose serialized `operations` sits just under the validated bound.
+    const filler = 'x'.repeat(1_900);
+    const ops = Array.from({ length: 10 }, () => ({ type: 'progress.create', health: 'GOOD', observations: filler }));
+    const bytes = Buffer.byteLength(JSON.stringify(ops));
+    expect(bytes).toBeGreaterThan(18_000); // a genuinely large payload, not a token one
+
+    const created = await svc.create(tokenFor(runId), { summary: 'big', operations: ops } as never);
+    const row = await prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
+
+    // Assert the STORED value round-trips intact. Note it is the VALIDATED array, not the raw input —
+    // propose-time normalisation (e.g. freezing `occurredOn`) legitimately makes it larger — so
+    // comparing against the input's byte count would fail against correct code. What must hold is that
+    // nothing was TRUNCATED, which is how a too-narrow column fails when the server is not in STRICT mode.
+    const stored = JSON.parse(row!.operations) as Array<{ observations: string }>;
+    expect(stored).toHaveLength(10);
+    for (const op of stored) expect(op.observations).toBe(filler); // full length, byte for byte
+    expect(Buffer.byteLength(row!.operations)).toBeGreaterThanOrEqual(bytes);
+  });
+
+  it('stores MEDIUMTEXT, so the validator is the only bound that can be hit', async () => {
+    // Pins the physical capacity itself. If someone reverts the column to TEXT, the validator's 64 KiB
+    // bound becomes unreachable-by-one and the failure moves from a 400 to a 500.
+    const cols = await prisma.$queryRaw<Array<{ COLUMN_NAME: string; DATA_TYPE: string }>>`
+      SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'doctor_write_proposals'
+         AND COLUMN_NAME IN ('operations','snapshot')`;
+    expect(cols).toHaveLength(2);
+    for (const c of cols) {
+      expect(c.DATA_TYPE.toLowerCase(), `${c.COLUMN_NAME} must outsize the 64 KiB validator bound`).toBe('mediumtext');
+    }
+  });
+
   it('lets exactly one of two concurrent approve calls apply — and writes ONCE', async () => {
     // Spec §10. A raw updateMany race proves the index; it does NOT prove the applier is safe, because
     // the applier also performs the DOMAIN WRITES. A double-apply that both succeeded would be invisible
