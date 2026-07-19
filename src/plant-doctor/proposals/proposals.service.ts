@@ -11,7 +11,7 @@ import { KnowledgeChatService } from '../../knowledge-chat/knowledge-chat.servic
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { OwnerService } from '../../owner/owner.service.js';
 import { ProposalSnapshotService } from './proposal-snapshot.service.js';
-import { ProposalRenderService, type ProposalView } from './proposal-render.service.js';
+import { ProposalRenderService, type Locale, type ProposalView } from './proposal-render.service.js';
 import { ProposalApplierService, SkipPermissionsRevokedError } from './proposal-applier.service.js';
 import { SYSTEM_MESSAGE } from '../../knowledge-chat/system-message.js';
 import { startOfTodayUtc, ymdFromUtcDate } from '../../common/time/local-date.js';
@@ -167,7 +167,10 @@ export class ProposalsService {
         });
         const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
         this.logger.log(`proposal ${created.id} auto-applied under skip-permissions: ${outcome.status}`);
-        return this.render.render(fresh ?? created);
+        // ENGLISH, explicitly and unconditionally: this response is the agent's own read-back of what it
+        // just did, and the audit's account of it — never owner-facing UI. It must never follow the
+        // owner's `x-locale`, which is why `create()` never even accepts a locale parameter.
+        return this.render.render(fresh ?? created, 'en');
       } catch (err) {
         // Revoked between the pre-read and the lock. Nothing was written and the proposal is still
         // PENDING, so the owner simply gets the normal approval banner — the correct outcome for
@@ -175,22 +178,27 @@ export class ProposalsService {
         if (!(err instanceof SkipPermissionsRevokedError)) throw err;
         this.logger.log(`proposal ${created.id}: skip-permissions revoked before apply — left PENDING`);
         const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
-        return this.render.render(fresh ?? created);
+        return this.render.render(fresh ?? created, 'en'); // agent-facing — see the note above
       }
     }
 
-    return this.render.render(created);
+    return this.render.render(created, 'en'); // agent-facing — see the note above
   }
 
   // ---------- owner-facing ----------
 
-  async getPending(plantId: string, sessionId: string): Promise<ProposalView | null> {
+  /**
+   * `locale` defaults to `'en'` so every EXISTING caller of this method (unit tests, the
+   * `proposals.concurrency.int.test.ts` suite) keeps its current behaviour untouched; the controller is
+   * the only real caller that ever passes something else, resolved from the request's `x-locale`.
+   */
+  async getPending(plantId: string, sessionId: string, locale: Locale = 'en'): Promise<ProposalView | null> {
     await this.assertOwnedSession(plantId, sessionId);
     const row = await this.prisma.doctorWriteProposal.findFirst({ where: { sessionId, status: 'PENDING' } });
-    return row ? this.render.render(row) : null;
+    return row ? this.render.render(row, locale) : null;
   }
 
-  async approve(plantId: string, sessionId: string, proposalId: string): Promise<ProposalView> {
+  async approve(plantId: string, sessionId: string, proposalId: string, locale: Locale = 'en'): Promise<ProposalView> {
     const row = await this.loadOwned(plantId, sessionId, proposalId);
     const actorUserId = this.owner.currentActor()?.userId ?? null;
     try {
@@ -208,10 +216,10 @@ export class ProposalsService {
       throw err;
     }
     const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: proposalId } });
-    return this.render.render(fresh ?? row);
+    return this.render.render(fresh ?? row, locale);
   }
 
-  async decline(plantId: string, sessionId: string, proposalId: string): Promise<ProposalView> {
+  async decline(plantId: string, sessionId: string, proposalId: string, locale: Locale = 'en'): Promise<ProposalView> {
     const row = await this.loadOwned(plantId, sessionId, proposalId);
     const actorUserId = this.owner.currentActor()?.userId ?? null;
 
@@ -250,7 +258,7 @@ export class ProposalsService {
     }
 
     const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: proposalId } });
-    return this.render.render(fresh ?? row);
+    return this.render.render(fresh ?? row, locale);
   }
 
   /**

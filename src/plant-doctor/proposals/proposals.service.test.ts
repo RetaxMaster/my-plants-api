@@ -77,7 +77,7 @@ function harness(over: { tx?: Record<string, unknown>; prisma?: Record<string, u
     owner as never,
     chat as never,
   );
-  return { svc, prisma, tx, applier, snapshots, chat };
+  return { svc, prisma, tx, applier, snapshots, chat, render };
 }
 
 const token = { userId: 'u1', plantId: 'p1', ownerId: 'o1', sessionId: 's1', runId: 'r1' };
@@ -242,6 +242,30 @@ describe('ProposalsService.create', () => {
       } as never),
     ).rejects.toMatchObject({ status: 400 });
   });
+
+  // spec B2: the propose response is the agent's own read-back and the audit's account — never
+  // owner-facing UI — so it must never follow the owner's locale. `create()` has no locale PARAMETER at
+  // all (there is nothing an `x-locale` header on the doctor-token request could even reach), and it
+  // renders with `'en'` explicitly on every branch: the plain PENDING return, the skip-permissions
+  // auto-apply, and the skip-permissions-revoked-mid-flight fallback.
+  it('always renders English (`en`), explicitly, on the plain PENDING path', async () => {
+    const { svc, render } = harness();
+    await svc.create(token as never, body);
+    expect(render.render).toHaveBeenCalledWith(expect.anything(), 'en');
+  });
+
+  it('always renders English (`en`) on the skip-permissions auto-apply path', async () => {
+    const { svc, render } = harness({
+      prisma: {
+        knowledgeChatSession: {
+          findUnique: vi.fn(async () => ({ ...session, skipPermissions: true, skipPermissionsSetByUserId: 'owner-9' })),
+          update: vi.fn(),
+        },
+      },
+    });
+    await svc.create(token as never, body);
+    expect(render.render).toHaveBeenCalledWith(expect.anything(), 'en');
+  });
 });
 
 describe('ProposalsService.decline', () => {
@@ -262,6 +286,29 @@ describe('ProposalsService.decline', () => {
     });
     await svc.decline('p1', 's1', 'prop-1');
     expect(prisma.$transaction).toHaveBeenCalled();
+  });
+
+  it('threads the resolved locale through to the renderer, owner-facing default is English', async () => {
+    const { svc, render } = harness({
+      prisma: {
+        doctorWriteProposal: {
+          findUnique: vi.fn(async () => ({
+            id: 'prop-1',
+            sessionId: 's1',
+            plantId: 'p1',
+            ownerId: 'o1',
+            status: 'PENDING',
+          })),
+          updateMany: vi.fn(async () => ({ count: 1 })),
+        },
+      },
+    });
+    await svc.decline('p1', 's1', 'prop-1', 'es');
+    expect(render.render).toHaveBeenCalledWith(expect.objectContaining({ id: 'prop-1' }), 'es');
+
+    render.render.mockClear();
+    await svc.decline('p1', 's1', 'prop-1'); // no locale passed — the owner-facing default
+    expect(render.render).toHaveBeenCalledWith(expect.anything(), 'en');
   });
 
   it('409s when the proposal is already terminal, returning the terminal status', async () => {
@@ -297,6 +344,48 @@ describe('ProposalsService.decline', () => {
       },
     });
     await expect(svc.decline('p1', 's1', 'prop-1')).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('ProposalsService.getPending', () => {
+  it('threads the resolved locale through to the renderer', async () => {
+    const { svc, render } = harness({
+      prisma: {
+        doctorWriteProposal: { findFirst: vi.fn(async () => ({ id: 'prop-1', sessionId: 's1', status: 'PENDING' })) },
+      },
+    });
+    await svc.getPending('p1', 's1', 'es');
+    expect(render.render).toHaveBeenCalledWith(expect.objectContaining({ id: 'prop-1' }), 'es');
+  });
+
+  it('defaults to English when no locale is passed', async () => {
+    const { svc, render } = harness({
+      prisma: {
+        doctorWriteProposal: { findFirst: vi.fn(async () => ({ id: 'prop-1', sessionId: 's1', status: 'PENDING' })) },
+      },
+    });
+    await svc.getPending('p1', 's1');
+    expect(render.render).toHaveBeenCalledWith(expect.anything(), 'en');
+  });
+});
+
+describe('ProposalsService.approve', () => {
+  it('threads the resolved locale through to the renderer', async () => {
+    const { svc, render } = harness({
+      prisma: {
+        doctorWriteProposal: {
+          findUnique: vi.fn(async () => ({
+            id: 'prop-1',
+            sessionId: 's1',
+            plantId: 'p1',
+            ownerId: 'o1',
+            status: 'PENDING',
+          })),
+        },
+      },
+    });
+    await svc.approve('p1', 's1', 'prop-1', 'es');
+    expect(render.render).toHaveBeenCalledWith(expect.objectContaining({ id: 'prop-1' }), 'es');
   });
 });
 

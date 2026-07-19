@@ -771,6 +771,80 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
     }, 60_000);
   });
 
+  // ─────────────────────────────── locale (spec B2 fix) ───────────────────────────────
+  //
+  // The consent surface is server-rendered, per operation, per locale — proven here over REAL HTTP with
+  // the actual `x-locale` header the BFF forwards (`my-plants-web/server/api/[...].ts`), not just at the
+  // unit level. `potType` is a good field to exercise end-to-end: it is a closed enum the owner must
+  // recognise, and `'plastic'`/`'terracotta'` read as raw English-ish slugs today — exactly the B2 defect.
+  describe('locale (spec B2 fix — server-rendered consent surface)', () => {
+    // `plantProfile` is NOT reset by the per-test `beforeEach` (only proposals/frequencies/progress are),
+    // so a `potType` left over from an earlier lifecycle test would make "before" nondeterministic here.
+    // Pinning a known baseline through the ordinary owner PATCH — the same write path the applier itself
+    // uses — makes every assertion below independent of execution order.
+    const pinPotType = (value: string) => asOwner(request(ctx.server()).patch(`/plants/${plantId}/profile`)).send({ potType: value });
+
+    it('GET proposals/pending renders in Spanish when `x-locale: es` is sent', async () => {
+      await pinPotType('plastic').expect(200);
+      await propose([{ type: 'profile.update', potType: 'terracotta', growLight: true }]).expect(201);
+      const res = await asOwner(request(ctx.server()).get(`${base()}/proposals/pending`)).set('x-locale', 'es');
+      expect(res.status).toBe(200);
+      expect(res.body.operations[0].targetLabel).toBe('perfil');
+      expect(res.body.operations[0].changes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ field: 'Tipo de maceta', before: 'Plástico', after: 'Terracota' }),
+          expect.objectContaining({ field: 'Luz de cultivo', after: 'Sí' }),
+        ]),
+      );
+    });
+
+    it('GET proposals/pending renders English when `x-locale` is absent or garbage', async () => {
+      await pinPotType('plastic').expect(200);
+      await propose([{ type: 'profile.update', potType: 'terracotta' }]).expect(201);
+      const noHeader = await ownerGet('/proposals/pending');
+      expect(noHeader.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
+      expect(noHeader.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'terracotta' }]);
+
+      await propose([{ type: 'profile.update', potType: 'unglazed-ceramic' }], 's2').expect(201);
+      const garbage = await asOwner(request(ctx.server()).get(`${base()}/proposals/pending`)).set('x-locale', 'not-a-real-locale');
+      expect(garbage.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
+      expect(garbage.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'unglazed-ceramic' }]);
+    });
+
+    it('POST approve and POST decline also honour `x-locale`', async () => {
+      const pending = await proposeAndGetPending([{ type: 'frequency.set', task: 'WATER', intervalDays: 5 }]);
+      const approve = await asOwner(request(ctx.server()).post(`${base()}/proposals/${pending.id}/approve`))
+        .set('x-locale', 'es')
+        .send({});
+      expect(approve.status).toBe(200);
+      expect(approve.body.operations[0]).toMatchObject({ targetLabel: 'Regar' });
+      expect(approve.body.operations[0].changes).toEqual([{ field: 'Cada (días)', before: '7', after: '5' }]);
+
+      await freshRun();
+      await propose([{ type: 'frequency.clear', task: 'MIST' }], 's2').expect(201);
+      const pending2 = (await ownerGet('/proposals/pending').expect(200)).body;
+      const decline = await asOwner(request(ctx.server()).post(`${base()}/proposals/${pending2.id}/decline`))
+        .set('x-locale', 'es')
+        .send({});
+      expect(decline.status).toBe(200);
+      expect(decline.body.operations[0]).toMatchObject({ targetLabel: 'Rociar hojas' });
+    });
+
+    // Spec: the agent-facing propose response is the agent's own read-back and the audit's account —
+    // never owner-facing UI — so it must stay English even when a Spanish `x-locale` header rides along
+    // on the doctor-token request (which it never legitimately would, but a defence must not depend on
+    // the caller behaving).
+    it('POST proposals (agent-facing, doctor token) stays English even when `x-locale: es` is sent', async () => {
+      await pinPotType('plastic').expect(200);
+      const res = await asDoctor(request(ctx.server()).post(`${base()}/proposals`))
+        .set('x-locale', 'es')
+        .send({ summary: 's', operations: [{ type: 'profile.update', potType: 'terracotta' }] });
+      expect(res.status).toBe(201);
+      expect(res.body.operations[0]).toMatchObject({ targetLabel: 'profile' });
+      expect(res.body.operations[0].changes).toEqual([{ field: 'Pot type', before: 'plastic', after: 'terracotta' }]);
+    });
+  });
+
   // ─────────────────────────────── skip permissions ───────────────────────────────
 
   describe('skip permissions', () => {

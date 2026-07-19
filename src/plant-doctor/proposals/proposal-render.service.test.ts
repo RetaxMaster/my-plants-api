@@ -1,6 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ProposalRenderService, FIELD_LABELS } from './proposal-render.service.js';
+import { Task, ProgressHealth } from '@prisma/client';
+import {
+  WINDOW_DISTANCES,
+  POT_TYPES,
+  SOIL_MIXES,
+  GROWTH_HABITS,
+  PROGRESS_TAG_KEYS,
+} from '@retaxmaster/my-plants-species-schema';
+import {
+  ProposalRenderService,
+  FIELD_LABELS,
+  FIELD_LABELS_ES,
+  TASK_LABELS_ES,
+  resolveLocale,
+  VALUE_VOCAB_ES,
+} from './proposal-render.service.js';
 import { operationSchema } from './proposal-operations.schema.js';
+
+/**
+ * DERIVED from the operations union itself, never a hand-written list — shared by both the English and
+ * the Spanish field-label parity tests so the two can never drift apart from each other, or from what a
+ * new operation field actually needs.
+ */
+function operationFields(): Set<string> {
+  const union = operationSchema.innerType();
+  const identity = new Set(['type', 'entryId', 'task']);
+  const fields = new Set<string>();
+  for (const member of union.options) {
+    for (const key of Object.keys(member.shape)) if (!identity.has(key)) fields.add(key);
+  }
+  return fields;
+}
 
 type Query = { where: Record<string, unknown> };
 
@@ -205,15 +235,228 @@ describe('ProposalRenderService', () => {
     // operations union without labelling it goes red HERE rather than shipping a raw key like
     // `potSizeCm` into the owner's approval banner. A hand-maintained list in this test would simply
     // be a second thing to forget to update.
-    const union = operationSchema.innerType();
-    const identity = new Set(['type', 'entryId', 'task']);
-    const fields = new Set<string>();
-    for (const member of union.options) {
-      for (const key of Object.keys(member.shape)) if (!identity.has(key)) fields.add(key);
-    }
+    const fields = operationFields();
     expect(fields.size).toBeGreaterThan(10); // the walk actually found the shapes
     for (const field of fields) {
       expect(FIELD_LABELS[field], `missing owner-facing label for operation field "${field}"`).toBeTruthy();
+    }
+  });
+
+  // ─────────────────────────────── locale (spec B2 — server-rendered Spanish) ───────────────────────
+  //
+  // The consent surface is the ONE screen an owner must fully understand before authorising a write. A
+  // vocabulary that gains a member without a Spanish string must fail a test, not ship an English/slug
+  // leak into a Spanish-speaking owner's approval banner. Every "iterate the actual constants" test below
+  // exists so that guarantee survives someone adding a ninth pot type or a fourth health level without
+  // ever opening this file.
+
+  describe('field labels — parity across BOTH locales', () => {
+    it('has a Spanish label for every field ANY operation in the union can write', () => {
+      // Same derivation as the English parity test above (never a hand-written list) — this is what
+      // makes it impossible for `FIELD_LABELS` and `FIELD_LABELS_ES` to drift apart silently.
+      for (const field of operationFields()) {
+        expect(FIELD_LABELS_ES[field], `missing Spanish label for operation field "${field}"`).toBeTruthy();
+      }
+    });
+  });
+
+  describe('value vocabularies — parity against the SHARED-PACKAGE / Prisma source of truth', () => {
+    it('translates every WINDOW_DISTANCES member', () => {
+      for (const v of WINDOW_DISTANCES) {
+        expect(VALUE_VOCAB_ES.windowDistance![v], `missing Spanish windowDistance for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every POT_TYPES member', () => {
+      for (const v of POT_TYPES) {
+        expect(VALUE_VOCAB_ES.potType![v], `missing Spanish potType for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every SOIL_MIXES member', () => {
+      for (const v of SOIL_MIXES) {
+        expect(VALUE_VOCAB_ES.soilMix![v], `missing Spanish soilMix for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every GROWTH_HABITS member', () => {
+      for (const v of GROWTH_HABITS) {
+        expect(VALUE_VOCAB_ES.growthHabit![v], `missing Spanish growthHabit for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every PROGRESS_TAG_KEYS member', () => {
+      for (const v of PROGRESS_TAG_KEYS) {
+        expect(VALUE_VOCAB_ES.tags![v], `missing Spanish tag label for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every ProgressHealth member', () => {
+      for (const v of Object.values(ProgressHealth)) {
+        expect(VALUE_VOCAB_ES.health![v], `missing Spanish health label for "${v}"`).toBeTruthy();
+      }
+    });
+
+    it('translates every Task member (targetLabel vocabulary)', () => {
+      for (const v of Object.values(Task)) {
+        expect(TASK_LABELS_ES[v], `missing Spanish task name for "${v}"`).toBeTruthy();
+      }
+    });
+  });
+
+  describe('en output stays byte-identical to today (pure-addition requirement)', () => {
+    it('renders one representative proposal of EACH operation type, unchanged, whether or not `locale` is passed', async () => {
+      const ops = [
+        { type: 'profile.update', potType: 'terracotta', growLight: true },
+        { type: 'plant.update', nickname: 'Monty' },
+        { type: 'progress.create', health: 'EXCELLENT', tags: ['NEW_LEAF'] },
+        { type: 'progress.update', entryId: 'e1', observations: 'x' },
+        { type: 'progress.delete', entryId: 'e1' },
+        { type: 'frequency.set', task: 'WATER', intervalDays: 5 },
+        { type: 'frequency.clear', task: 'MIST' },
+        { type: 'care.done', task: 'ROTATE', occurredOn: '2026-07-01' },
+      ];
+      const snap = ops.map(() => ({}) as Record<string, unknown>);
+      f.snapshotSvc.capture.mockResolvedValue(snap); // no drift for any operation
+      const p = withOps(ops, snap);
+
+      const implicit = await svc.render(p as never); // no `locale` argument — the default
+      const explicit = await svc.render(p as never, 'en');
+      expect(explicit).toEqual(implicit);
+
+      const potChange = explicit.operations[0]!.changes.find((c) => c.field === 'Pot type');
+      expect(potChange).toEqual({ field: 'Pot type', before: null, after: 'terracotta' }); // RAW slug, as today
+      const healthChange = explicit.operations[2]!.changes.find((c) => c.field === 'Health');
+      expect(healthChange).toEqual({ field: 'Health', before: null, after: 'EXCELLENT' }); // RAW enum, as today
+      expect(explicit.operations[5]!.targetLabel).toBe('WATER'); // RAW enum, as today
+      expect(explicit.operations[6]!.targetLabel).toBe('MIST');
+      expect(explicit.operations[1]!.targetLabel).toBe('nickname');
+    });
+  });
+
+  describe('es output — translated fields, values, booleans and targetLabel; proper nouns/free text/numbers untouched', () => {
+    it('translates a profile.update (enum values, a boolean field, and the field labels)', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ potType: 'plastic', growLight: false }]);
+      const p = withOps([{ type: 'profile.update', potType: 'terracotta', growLight: true }], [
+        { potType: 'plastic', growLight: false },
+      ]);
+      const view = await svc.render(p as never, 'es');
+      expect(view.operations[0]!.targetLabel).toBe('perfil');
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Tipo de maceta', before: 'Plástico', after: 'Terracota' },
+          { field: 'Luz de cultivo', before: 'No', after: 'Sí' },
+        ]),
+      );
+    });
+
+    it('translates progress health + tags, but leaves observations (free text) untouched', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{}]);
+      const p = withOps(
+        [{ type: 'progress.create', health: 'EXCELLENT', tags: ['NEW_LEAF', 'FLOWERING'], observations: 'looking great' }],
+        [{}],
+      );
+      const view = await svc.render(p as never, 'es');
+      expect(view.operations[0]!.targetLabel).toBe('nuevo registro de progreso');
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Salud', before: null, after: 'Excelente' },
+          { field: 'Etiquetas', before: null, after: 'Hoja nueva, Floreciendo' },
+          { field: 'Observaciones', before: null, after: 'looking great' }, // free text — verbatim
+        ]),
+      );
+    });
+
+    it('translates a task targetLabel for frequency.set/clear and care.done', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ intervalDays: 7 }]);
+      const p = withOps([{ type: 'frequency.set', task: 'WATER', intervalDays: 5 }], [{ intervalDays: 7 }]);
+      const view = await svc.render(p as never, 'es');
+      expect(view.operations[0]!.targetLabel).toBe('Regar');
+      expect(view.operations[0]!.changes).toEqual([{ field: 'Cada (días)', before: '7', after: '5' }]);
+    });
+
+    it('leaves a place NAME and a nickname (proper nouns) verbatim', async () => {
+      f.prisma.place.findFirst
+        .mockResolvedValueOnce({ id: 'pl1', name: 'Recámara' })
+        .mockResolvedValueOnce({ id: 'pl2', name: 'Living room' });
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ placeId: 'pl1', nickname: 'Monty' }]);
+      const p = withOps(
+        [{ type: 'plant.update', placeId: 'pl2', nickname: 'Monty Jr' }],
+        [{ placeId: 'pl1', nickname: 'Monty' }],
+      );
+      const view = await svc.render(p as never, 'es');
+      expect(view.operations[0]!.targetLabel).toBe('Living room'); // a place NAME, never translated
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Lugar', before: 'Recámara', after: 'Living room' },
+          { field: 'Apodo', before: 'Monty', after: 'Monty Jr' }, // proper noun, verbatim
+        ]),
+      );
+    });
+
+    it('leaves numbers and dates verbatim', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ sizeCm: 12, occurredOn: '2026-06-01' }]);
+      const p = withOps(
+        [{ type: 'progress.update', entryId: 'e1', sizeCm: 20, occurredOn: '2026-07-01' }],
+        [{ sizeCm: 12, occurredOn: '2026-06-01' }],
+      );
+      const view = await svc.render(p as never, 'es');
+      expect(view.operations[0]!.changes).toEqual(
+        expect.arrayContaining([
+          { field: 'Tamaño (cm)', before: '12', after: '20' },
+          { field: 'Fecha', before: '2026-06-01', after: '2026-07-01' },
+        ]),
+      );
+    });
+  });
+
+  describe('fallbacks — never blank, never a thrown error', () => {
+    it('falls back to English for an unknown/garbage locale rather than throwing', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ intervalDays: 7 }]);
+      const view = await svc.render(baseProposal as never, 'fr' as never);
+      // Identical to the plain `en` rendering of the same proposal.
+      expect(view.operations[0]!.changes[0]).toEqual({ field: 'Every (days)', before: '7', after: '5' });
+    });
+
+    it('falls back to the raw value for an enum member the Spanish vocabulary does not recognise', async () => {
+      f.snapshotSvc.capture.mockResolvedValueOnce([{ potType: 'a-future-pot-type' }]);
+      const p = withOps([{ type: 'profile.update', potType: 'a-future-pot-type' }], [{ potType: 'a-future-pot-type' }]);
+      const view = await svc.render(p as never, 'es');
+      // Never blank, never thrown — the raw slug is still SOMETHING the owner can read and query about.
+      expect(view.operations[0]!.changes[0]).toEqual({
+        field: 'Tipo de maceta',
+        before: 'a-future-pot-type',
+        after: 'a-future-pot-type',
+      });
+    });
+  });
+});
+
+/**
+ * `resolveLocale` gets its own tests because it is the SINGLE GATE for the entire Spanish path, and
+ * because breaking it fails in the one way this project keeps getting caught by: SILENTLY, in English.
+ *
+ * Everything else in this file calls `render(proposal, 'es')` directly, so it proves the string tables
+ * are right while proving nothing about whether a real request ever reaches them. Measured: making
+ * `resolveLocale` always answer `'en'` left all 110 tests in this directory green — only the (much
+ * slower) e2e suite noticed, and only because it sends a real `x-locale` header. A guard that only the
+ * slowest gate can see is a guard most runs do not have.
+ *
+ * The failure mode is also the one the spec's B2 ruling calls out as worse than the bug: the owner does
+ * not get an error, they get the approval screen in a language they may not read, with every test green.
+ */
+describe('resolveLocale — the one gate between the wire and the string tables', () => {
+  it('accepts the exact locale code the app ships', () => {
+    expect(resolveLocale('es')).toBe('es');
+    expect(resolveLocale('en')).toBe('en');
+  });
+
+  // The BFF forwards the `i18n_redirected` cookie, whose value is one of nuxt.config's locale CODES
+  // ('en' | 'es') — never a BCP-47 tag. Pinned so that if that ever changes, this fails HERE, next to the
+  // table that would otherwise be silently skipped, rather than as "the banner is in English again".
+  it('falls back to English for anything else, and never throws', () => {
+    for (const raw of ['es-MX', 'ES', 'fr', '', ' es', 'en-US', 'not-a-real-locale', undefined, null, 42, {}]) {
+      expect(resolveLocale(raw), `expected English for ${JSON.stringify(raw)}`).toBe('en');
     }
   });
 });
