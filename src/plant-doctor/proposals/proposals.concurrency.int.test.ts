@@ -251,6 +251,35 @@ describe('proposal concurrency (real MariaDB)', () => {
     expect(await prisma.plantTaskFrequency.count({ where: { plantId } })).toBe(0);
   });
 
+  it('refuses the auto-apply when skip-permissions is revoked AFTER the service\'s pre-read', async () => {
+    // ⚠️ THE WINDOW THE TEST ABOVE CANNOT SEE. That one revokes during `snapshots.capture`, i.e. before
+    // the service ever consults the setting — so it is satisfied by a check placed ANYWHERE afterwards,
+    // including one that is not atomic with the write.
+    //
+    // This one revokes strictly BETWEEN the service's pre-read and the applier's claim, which is the
+    // interleaving a real owner produces by hitting the switch while the agent is proposing. It fails
+    // against any implementation that decides on a value read outside the applying transaction, and
+    // passes only because the applier re-reads under `FOR UPDATE`.
+    const runId = await makeRun();
+    const { svc, applier } = makeProposalsService();
+    await prisma.knowledgeChatSession.update({ where: { id: sessionId }, data: { skipPermissions: true } });
+
+    const originalApply = applier.apply.bind(applier);
+    vi.spyOn(applier, 'apply').mockImplementation(async (p, ctx) => {
+      // The pre-read has already observed `true` and chosen the auto-apply branch. Revoke now.
+      await prisma.knowledgeChatSession.update({ where: { id: sessionId }, data: { skipPermissions: false } });
+      return originalApply(p, ctx);
+    });
+
+    const proposal = await svc.create(tokenFor(runId), setWater());
+
+    // Left PENDING for the owner's banner — NOT auto-applied, and NOT burned as FAILED.
+    expect(proposal.status).toBe('PENDING');
+    expect(proposal.autoApproved).toBe(false);
+    // The decisive assertion: the plant was never written after the owner revoked.
+    expect(await prisma.plantTaskFrequency.count({ where: { plantId } })).toBe(0);
+  });
+
   it('lets exactly one of two concurrent approve calls apply — and writes ONCE', async () => {
     // Spec §10. A raw updateMany race proves the index; it does NOT prove the applier is safe, because
     // the applier also performs the DOMAIN WRITES. A double-apply that both succeeded would be invisible

@@ -81,6 +81,13 @@ describe('doctor token cannot mutate any domain record (e2e)', () => {
       { method: 'post', path: `/plants/${plantId}/progress`, body: { health: 'GOOD' }, wasAllowed: false },
       { method: 'delete', path: `/plants/${plantId}/cover-photo`, body: undefined, wasAllowed: false },
       { method: 'put', path: `/plants/${plantId}/cover-photo`, body: undefined, wasAllowed: false },
+      // Added by the tail review: these were denied all along, but the guard did not COVER them, so a
+      // future accidental @DoctorAllowed() on any of them would not have turned this test red.
+      { method: 'delete', path: `/plants/${plantId}/progress/${entryId}`, body: undefined, wasAllowed: false },
+      // The photo id need not exist: the global guard runs BEFORE the handler resolves the entity, so a
+      // doctor token is refused at the guard. Were the guard removed, this returns 404 rather than 403 —
+      // still red, which is what matters. The ROUTE is what must be real, and it is.
+      { method: 'post', path: `/plants/${plantId}/progress/${entryId}/photos/00000000-0000-4000-8000-000000000000/retry`, body: undefined, wasAllowed: false },
     ] as const;
   // NOTE: every path above must be a route that EXISTS. A non-existent route returns 404 (no handler),
   // which would pass a "not 2xx" assertion while proving nothing about the guard — the test would be
@@ -93,6 +100,38 @@ describe('doctor token cannot mutate any domain record (e2e)', () => {
         `Bearer ${doctorToken}`,
       );
       const res = await (body ? req.send(body) : req);
+      expect(res.status, `${method.toUpperCase()} ${path} must be 403 for a doctor token`).toBe(403);
+    }
+  });
+
+  /**
+   * Mutating endpoints that are NOT scoped to a plant id. The default-deny guard is global, so these are
+   * refused for the same reason — but the guard is only as good as what this test covers, and the
+   * previous list was entirely plant-scoped. A doctor token creating a plant, editing a shared place, or
+   * publishing a blog post would all have been catastrophic and invisible here.
+   *
+   * These are deliberately NOT run through the plant-id swap below: there is no plant id in them.
+   */
+  const globalMutatingEndpoints = () =>
+    [
+      { method: 'post', path: '/plants', body: { speciesSlug: 'x', placeId: 'x' } },
+      { method: 'post', path: '/places', body: { name: 'x', cityId: 'x', indoor: true } },
+      { method: 'post', path: '/cities', body: { name: 'x', latitude: 0, longitude: 0 } },
+      { method: 'post', path: '/care-plan/recompute', body: {} },
+      { method: 'post', path: '/media', body: {} },
+      { method: 'post', path: '/blogposts', body: { title: 'x' } },
+      { method: 'post', path: '/knowledge-chat/sessions', body: { title: 'x' } },
+    ] as const;
+
+  it('403s on every mutating endpoint that is not scoped to a plant either', async () => {
+    for (const { method, path, body } of globalMutatingEndpoints()) {
+      const req = (request(ctx.server()) as never as Record<string, (p: string) => request.Test>)[method]!(path).set(
+        'Authorization',
+        `Bearer ${doctorToken}`,
+      );
+      const res = await req.send(body);
+      // 403 specifically — never merely "not 2xx". A 404 would pass a weaker assertion while proving the
+      // route is missing rather than the token refused.
       expect(res.status, `${method.toUpperCase()} ${path} must be 403 for a doctor token`).toBe(403);
     }
   });
@@ -410,10 +449,13 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       expect(res.status).toBe(403);
     });
 
-    it('400s when the body carries sessionId/runId/plantId (unknown property, never ignored)', async () => {
+    it('400s when the body carries sessionId/runId/plantId/ownerId (unknown property, never ignored)', async () => {
       // Silently ignoring them would be worse than rejecting: the agent would believe it had chosen the
       // target, while the server derived a different one from the token.
-      for (const extra of [{ sessionId: 'x' }, { runId: 'x' }, { plantId: 'x' }]) {
+      //
+      // ⚠️ All FOUR sealed identities are covered. `ownerId` was missing, and it is the one whose silent
+      // acceptance would be worst — it is the tenancy boundary, not just the target.
+      for (const extra of [{ sessionId: 'x' }, { runId: 'x' }, { plantId: 'x' }, { ownerId: 'x' }]) {
         const res = await post({ ...body, ...extra });
         expect(res.status, JSON.stringify(extra)).toBe(400);
       }

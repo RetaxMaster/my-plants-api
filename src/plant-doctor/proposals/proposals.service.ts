@@ -12,7 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { OwnerService } from '../../owner/owner.service.js';
 import { ProposalSnapshotService } from './proposal-snapshot.service.js';
 import { ProposalRenderService, type ProposalView } from './proposal-render.service.js';
-import { ProposalApplierService } from './proposal-applier.service.js';
+import { ProposalApplierService, SkipPermissionsRevokedError } from './proposal-applier.service.js';
 import { SYSTEM_MESSAGE } from '../../knowledge-chat/system-message.js';
 import { startOfTodayUtc, ymdFromUtcDate } from '../../common/time/local-date.js';
 import {
@@ -140,24 +140,43 @@ export class ProposalsService {
       throw err;
     }
 
-    // Skip Permissions is read from the STORED setting, never from anything the agent sends — and it is
-    // RE-READ HERE, immediately before applying (spec 6.4: "read AT APPLY TIME from the stored setting").
-    // The `session` fetched at the top of this method is stale by now: the owner may have flipped the
-    // switch off while the proposal was being validated and snapshotted. Auto-applying on that stale read
-    // would write to the plant after the owner revoked the authorization to do so — the single worst
-    // failure this feature can have. Re-read the setting AND its provenance together.
-    const current = await this.prisma.knowledgeChatSession.findUnique({
+    // Skip Permissions is read from the STORED setting, never from anything the agent sends — and the
+    // authoritative read happens INSIDE the applier's transaction, under a row lock (spec 6.4: "read AT
+    // APPLY TIME from the stored setting").
+    //
+    // ⚠️ Do NOT re-read it here and pass the boolean down. That is a TOCTOU window: the owner can revoke
+    // between this method's read and the applier's claim, and the write then lands after the revocation
+    // committed. The applier is handed the SESSION ID, not a decision, precisely so the check and the
+    // write it authorizes cannot be separated. `session`, fetched at the top of this method, is stale by
+    // now and must not be consulted either.
+    //
+    // The cheap pre-read below is an OPTIMISATION ONLY — it avoids opening a transaction for the
+    // overwhelmingly common case where the mode is off. It is never trusted: if it races and says true
+    // when the setting is false, the applier's locked re-read still refuses, and we fall through to the
+    // owner's banner exactly as if we had never tried.
+    const likelyAuto = await this.prisma.knowledgeChatSession.findUnique({
       where: { id: token.sessionId },
-      select: { skipPermissions: true, skipPermissionsSetByUserId: true },
+      select: { skipPermissions: true },
     });
-    if (current?.skipPermissions) {
-      const outcome = await this.applier.apply(created, {
-        actorUserId: current.skipPermissionsSetByUserId,
-        autoApproved: true,
-      });
-      const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
-      this.logger.log(`proposal ${created.id} auto-applied under skip-permissions: ${outcome.status}`);
-      return this.render.render(fresh ?? created);
+    if (likelyAuto?.skipPermissions) {
+      try {
+        const outcome = await this.applier.apply(created, {
+          actorUserId: null, // authoritative provenance is taken from the applier's own locked read
+          autoApproved: true,
+          requireSkipPermissionsSessionId: token.sessionId,
+        });
+        const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
+        this.logger.log(`proposal ${created.id} auto-applied under skip-permissions: ${outcome.status}`);
+        return this.render.render(fresh ?? created);
+      } catch (err) {
+        // Revoked between the pre-read and the lock. Nothing was written and the proposal is still
+        // PENDING, so the owner simply gets the normal approval banner — the correct outcome for
+        // "I turned that off", and the reason this is not surfaced to the agent as an error.
+        if (!(err instanceof SkipPermissionsRevokedError)) throw err;
+        this.logger.log(`proposal ${created.id}: skip-permissions revoked before apply — left PENDING`);
+        const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: created.id } });
+        return this.render.render(fresh ?? created);
+      }
     }
 
     return this.render.render(created);

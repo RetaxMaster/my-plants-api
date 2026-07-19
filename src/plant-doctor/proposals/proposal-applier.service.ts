@@ -39,6 +39,22 @@ class ProposalAlreadyResolvedError extends Error {
   }
 }
 
+/**
+ * Raised when an auto-apply under Skip Permissions finds the setting NO LONGER enabled at the instant
+ * it takes the row lock — i.e. the owner revoked the authorization while this proposal was being
+ * validated and snapshotted.
+ *
+ * It is NOT a failure: nothing was written, the proposal is left PENDING, and the owner is asked to
+ * approve it by hand — which is exactly what "I turned that off" should mean. It is therefore rethrown
+ * to the caller rather than routed through `markFailed`, which would burn the proposal on a terminal
+ * `FAILED` status for what is really a change of mind.
+ */
+export class SkipPermissionsRevokedError extends Error {
+  constructor() {
+    super('skip-permissions was revoked before the proposal could be auto-applied');
+  }
+}
+
 @Injectable()
 export class ProposalApplierService {
   private readonly logger = new Logger(ProposalApplierService.name);
@@ -58,15 +74,68 @@ export class ProposalApplierService {
    */
   async apply(
     proposal: DoctorWriteProposal,
-    ctx: { actorUserId: string | null; autoApproved: boolean },
+    ctx: {
+      actorUserId: string | null;
+      autoApproved: boolean;
+      /**
+       * Set ONLY for an auto-apply under Skip Permissions. The setting is then re-read — under a row
+       * lock — inside this transaction, and `actorUserId` is taken from that same read.
+       *
+       * ⚠️ This is an AUTHORIZATION precondition, not a second per-caller knob on the write path: it is
+       * evaluated once, before the claim, and never reaches `applyOne`. The phase-1 contract that the
+       * AuditContext is the only thing distinguishing a proposal-applied write from an owner's own edit
+       * is untouched — every core still receives `{ plantId, ownerId, audit }` and nothing else.
+       */
+      requireSkipPermissionsSessionId?: string;
+    },
   ): Promise<ApplyOutcome> {
     const operations = JSON.parse(proposal.operations) as ProposalOperation[];
-    const audit: AuditContext = { origin: 'DOCTOR', proposalId: proposal.id, actorUserId: ctx.actorUserId };
 
     let effects: WriteEffects = emptyEffects();
+    let audit: AuditContext = { origin: 'DOCTOR', proposalId: proposal.id, actorUserId: ctx.actorUserId };
     try {
       effects = await this.prisma.$transaction(async (tx) => {
-        // The claim LEADS the transaction: nothing may be written before we own the row, or a losing
+        let resolvedByUserId = ctx.actorUserId;
+
+        // ⚠️ Skip Permissions is re-read HERE, inside the applying transaction, under an EXCLUSIVE ROW
+        // LOCK — not by the caller beforehand. A plain read before the transaction is a TOCTOU window:
+        // the owner can flip the switch off between that read and this claim, and the proposal is then
+        // written to their plant AFTER they revoked the authorization to do so. That is the single worst
+        // failure this feature can have, so the check has to be atomic with the write it authorizes.
+        //
+        // `FOR UPDATE` is what makes it atomic rather than merely narrower: `PATCH …/settings` issues an
+        // UPDATE against this same row, so it BLOCKS here until this transaction commits or rolls back.
+        // There is no interleaving left in which the write lands after a committed revocation.
+        //
+        // MEASURED against the real MariaDB, not assumed — two connections, one holding the read while
+        // the other updates the same row:
+        //     FOR UPDATE  -> concurrent UPDATE completed while held? false
+        //     plain SELECT-> concurrent UPDATE completed while held? true
+        // ⚠️ The int-test suite deliberately does NOT carry that probe as a test. Inside a real apply the
+        // claim's own locks already block a concurrent revoke, so such a test passes with `FOR UPDATE`
+        // deleted — it would read as coverage while proving nothing. The guard that actually bites is
+        // `proposals.concurrency.int.test.ts` → "refuses the auto-apply when skip-permissions is revoked
+        // AFTER the service's pre-read" (verified: removing this re-read turns it red, PENDING→APPROVED).
+        //
+        // The lock also LEADS the transaction deliberately (phase-1 read-view rule): a locking read does
+        // not establish InnoDB's REPEATABLE READ snapshot, so taking it first cannot freeze a stale view
+        // for the statements that follow.
+        if (ctx.requireSkipPermissionsSessionId) {
+          const rows = await tx.$queryRaw<{ skip_permissions: number; skip_permissions_set_by_user_id: string | null }[]>`
+            SELECT skip_permissions, skip_permissions_set_by_user_id
+              FROM knowledge_chat_sessions
+             WHERE id = ${ctx.requireSkipPermissionsSessionId}
+             FOR UPDATE`;
+          const row = rows[0];
+          // Fails CLOSED: a missing row, or anything other than a truthy flag, is "not authorized".
+          if (!row || !row.skip_permissions) throw new SkipPermissionsRevokedError();
+          // Provenance comes from the SAME locked read, so the recorded approver can never be a user
+          // taken from one version of the row and a permission taken from another.
+          resolvedByUserId = row.skip_permissions_set_by_user_id;
+          audit = { origin: 'DOCTOR', proposalId: proposal.id, actorUserId: resolvedByUserId };
+        }
+
+        // The claim LEADS the writes: nothing may be written before we own the row, or a losing
         // actor would mutate plant data and depend entirely on the rollback to undo it.
         const claimed = await tx.doctorWriteProposal.updateMany({
           where: { id: proposal.id, status: 'PENDING' },
@@ -75,7 +144,7 @@ export class ProposalApplierService {
             pendingKey: null,
             autoApproved: ctx.autoApproved,
             resolvedAt: new Date(),
-            resolvedByUserId: ctx.actorUserId,
+            resolvedByUserId,
           },
         });
         if (claimed.count === 0) throw new ProposalAlreadyResolvedError();
@@ -86,6 +155,10 @@ export class ProposalApplierService {
       });
     } catch (err) {
       if (err instanceof ProposalAlreadyResolvedError) throw new ConflictException(err.message);
+      // A revoked authorization is a change of mind, not a failed write: nothing was written (the throw
+      // precedes the claim), so the proposal must stay PENDING for the owner to approve by hand. Routing
+      // it through markFailed would burn it on a terminal FAILED status instead.
+      if (err instanceof SkipPermissionsRevokedError) throw err;
       return this.markFailed(proposal, err, ctx);
     }
 

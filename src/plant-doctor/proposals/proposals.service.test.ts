@@ -165,7 +165,12 @@ describe('ProposalsService.create', () => {
     await expect(svc2.create(token as never, body)).rejects.toMatchObject({ status: 403 });
   });
 
-  it('auto-applies when the session has skip permissions on, attributing it to the user who enabled it', async () => {
+  it('delegates the skip-permissions decision to the applier by SESSION ID, never by a pre-read boolean', async () => {
+    // ⚠️ The service must hand over the session id, not a decision. Passing `actorUserId` / a resolved
+    // boolean read out here would put the authorization check outside the transaction that performs the
+    // write, which is a TOCTOU window: the owner can revoke in between and the write still lands.
+    // Provenance (`skipPermissionsSetByUserId`) therefore comes from the applier's own LOCKED re-read,
+    // which is why `actorUserId` is explicitly null on this call.
     const { svc, applier } = harness({
       prisma: {
         knowledgeChatSession: {
@@ -179,7 +184,11 @@ describe('ProposalsService.create', () => {
       },
     });
     await svc.create(token as never, body);
-    expect(applier.apply).toHaveBeenCalledWith(expect.anything(), { actorUserId: 'owner-9', autoApproved: true });
+    expect(applier.apply).toHaveBeenCalledWith(expect.anything(), {
+      actorUserId: null,
+      autoApproved: true,
+      requireSkipPermissionsSessionId: 's1',
+    });
   });
 
   it('re-reads skip permissions at apply time and does NOT auto-apply when it was revoked mid-flight', async () => {
