@@ -280,6 +280,77 @@ describe('proposal concurrency (real MariaDB)', () => {
     expect(await prisma.plantTaskFrequency.count({ where: { plantId } })).toBe(0);
   });
 
+  it('holds the session row locked from the re-read until the claim, so a concurrent revoke BLOCKS', async () => {
+    // ⚠️ THE BARRIER MUST SIT BETWEEN THE LOCKING READ AND THE CLAIM. An earlier attempt paused AFTER
+    // the claim and was DELETED: by then the claim's own locks already block a concurrent revoke, so it
+    // stayed green with `FOR UPDATE` removed — coverage that proved nothing. Between the two, the
+    // ONLY thing that can block the revoke is the `FOR UPDATE`, which is what isolates the mechanism.
+    //
+    // Without the lock the revoke commits first and the apply then writes to the plant AFTER a committed
+    // revocation — the precise failure the whole fix exists to prevent.
+    const runId = await makeRun();
+    const { svc, applier } = makeProposalsService();
+    await prisma.knowledgeChatSession.update({ where: { id: sessionId }, data: { skipPermissions: true } });
+
+    let releaseBarrier: () => void = () => {};
+    const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+    let atBarrier: () => void = () => {};
+    const reachedBarrier = new Promise<void>((resolve) => { atBarrier = resolve; });
+
+    // Only the APPLIER's transaction is instrumented — `create()` opens its own transaction that also
+    // calls doctorWriteProposal.updateMany (the expire), and pausing that one would prove nothing.
+    let inApply = false;
+    const originalApply = applier.apply.bind(applier);
+    vi.spyOn(applier, 'apply').mockImplementation(async (p, ctx) => {
+      inApply = true;
+      try { return await originalApply(p, ctx); } finally { inApply = false; }
+    });
+
+    const realTransaction = prisma.$transaction.bind(prisma);
+    vi.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts: unknown) => {
+      if (typeof fn !== 'function') return (realTransaction as never as (a: unknown, b: unknown) => unknown)(fn, opts);
+      return (realTransaction as never as (a: unknown, b: unknown) => unknown)(async (tx: Record<string, never>) => {
+        const proxied = new Proxy(tx, {
+          get(target, prop) {
+            if (prop !== 'doctorWriteProposal' || !inApply) return target[prop as never];
+            const model = target[prop as never] as Record<string, never>;
+            return new Proxy(model, {
+              get(m, p2) {
+                if (p2 !== 'updateMany') return m[p2 as never];
+                // The FOR UPDATE has returned; the claim has not run yet. Pause exactly here.
+                return async (...args: unknown[]) => {
+                  atBarrier();
+                  await barrier;
+                  return (m[p2 as never] as never as (...a: unknown[]) => unknown)(...args);
+                };
+              },
+            });
+          },
+        });
+        return (fn as (t: unknown) => unknown)(proxied);
+      }, opts);
+    }) as never);
+
+    const applying = runAs(() => svc.create(tokenFor(runId), setWater()));
+    await reachedBarrier; // inside the apply transaction, lock held, claim not yet issued
+
+    let revokeDone = false;
+    const revoke = prisma.knowledgeChatSession
+      .update({ where: { id: sessionId }, data: { skipPermissions: false } })
+      .then(() => { revokeDone = true; });
+
+    await new Promise((r) => setTimeout(r, 800));
+    expect(
+      revokeDone,
+      'the revoke committed while the apply held the session row — FOR UPDATE is not in effect, so a write can land after a committed revocation',
+    ).toBe(false);
+
+    releaseBarrier();
+    await applying;
+    await revoke;
+    expect(revokeDone).toBe(true);
+  }, 40_000);
+
   it('lets exactly one of two concurrent approve calls apply — and writes ONCE', async () => {
     // Spec §10. A raw updateMany race proves the index; it does NOT prove the applier is safe, because
     // the applier also performs the DOMAIN WRITES. A double-apply that both succeeded would be invisible

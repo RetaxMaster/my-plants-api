@@ -111,11 +111,16 @@ export class ProposalApplierService {
         // the other updates the same row:
         //     FOR UPDATE  -> concurrent UPDATE completed while held? false
         //     plain SELECT-> concurrent UPDATE completed while held? true
-        // ⚠️ The int-test suite deliberately does NOT carry that probe as a test. Inside a real apply the
-        // claim's own locks already block a concurrent revoke, so such a test passes with `FOR UPDATE`
-        // deleted — it would read as coverage while proving nothing. The guard that actually bites is
-        // `proposals.concurrency.int.test.ts` → "refuses the auto-apply when skip-permissions is revoked
-        // AFTER the service's pre-read" (verified: removing this re-read turns it red, PENDING→APPROVED).
+        //
+        // TWO tests in `proposals.concurrency.int.test.ts` guard this, and they fail on DIFFERENT
+        // mutations — which is the point, because either one alone leaves half the fix unproven:
+        //   • "refuses the auto-apply when skip-permissions is revoked AFTER the service's pre-read"
+        //     — bites when the re-read is removed entirely (PENDING -> APPROVED).
+        //   • "holds the session row locked from the re-read until the claim" — bites when ONLY the
+        //     `FOR UPDATE` is dropped, i.e. the half-fix that merely narrows the window.
+        // ⚠️ The second test's barrier MUST sit between this read and the claim. An earlier version
+        // paused after the claim and was deleted: the claim's own locks already block a concurrent
+        // revoke there, so it stayed green with `FOR UPDATE` gone.
         //
         // The lock also LEADS the transaction deliberately (phase-1 read-view rule): a locking read does
         // not establish InnoDB's REPEATABLE READ snapshot, so taking it first cannot freeze a stale view

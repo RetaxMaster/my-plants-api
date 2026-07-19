@@ -116,11 +116,31 @@ describe('doctor token cannot mutate any domain record (e2e)', () => {
     [
       { method: 'post', path: '/plants', body: { speciesSlug: 'x', placeId: 'x' } },
       { method: 'post', path: '/places', body: { name: 'x', cityId: 'x', indoor: true } },
+      { method: 'patch', path: '/places/00000000-0000-4000-8000-000000000000', body: { name: 'x' } },
       { method: 'post', path: '/cities', body: { name: 'x', latitude: 0, longitude: 0 } },
+      { method: 'post', path: '/cities/00000000-0000-4000-8000-000000000000/make-primary', body: {} },
       { method: 'post', path: '/care-plan/recompute', body: {} },
       { method: 'post', path: '/media', body: {} },
+      { method: 'delete', path: '/media/00000000-0000-4000-8000-000000000000', body: undefined },
       { method: 'post', path: '/blogposts', body: { title: 'x' } },
+      { method: 'patch', path: '/blogposts/some-slug', body: { title: 'x' } },
+      { method: 'delete', path: '/blogposts/some-slug', body: undefined },
+      { method: 'post', path: '/blogposts/some-slug/cover', body: {} },
+      { method: 'post', path: '/moving/schedule', body: { plantId, placeId: 'x' } },
+      // Both chat surfaces: an agent must not be able to open, drive or delete conversations — its own
+      // or the admin Knowledge Engine's.
       { method: 'post', path: '/knowledge-chat/sessions', body: { title: 'x' } },
+      { method: 'post', path: '/knowledge-chat/sessions/x/runs', body: { prompt: 'x' } },
+      { method: 'delete', path: '/knowledge-chat/sessions/x', body: undefined },
+      { method: 'post', path: '/knowledge-chat/runs/x/socket-ticket', body: {} },
+      { method: 'post', path: `/plants/${plantId}/diagnose/sessions`, body: { title: 'x' } },
+      { method: 'post', path: `/plants/${plantId}/diagnose/sessions/x/runs`, body: { prompt: 'x' } },
+      { method: 'delete', path: `/plants/${plantId}/diagnose/sessions/x`, body: undefined },
+      { method: 'post', path: `/plants/${plantId}/diagnose/runs/x/socket-ticket`, body: {} },
+      // The agent must not be able to RESOLVE its own proposal — that is the owner's decision, and it is
+      // the whole consent gate. `PATCH …/settings` is covered by its own dedicated test above.
+      { method: 'post', path: `/plants/${plantId}/diagnose/sessions/sess-guard/proposals/x/approve`, body: {} },
+      { method: 'post', path: `/plants/${plantId}/diagnose/sessions/sess-guard/proposals/x/decline`, body: {} },
     ] as const;
 
   it('403s on every mutating endpoint that is not scoped to a plant either', async () => {
