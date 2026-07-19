@@ -51,34 +51,45 @@ async function transitionConsumed(
 ): Promise<boolean> {
   if (run.systemMessageState !== 'CONSUMED' || run.systemMessageText === null) return false;
 
-  // A newer message wins the slot; the older one is DROPPED rather than overwriting it.
-  let final: SettledState = desired;
-  if (desired === 'RESTORED') {
-    const session = await tx.knowledgeChatSession.findUnique({ where: { id: run.sessionId } });
-    if (session?.pendingSystemMessage) final = 'DROPPED';
-  }
-
+  // Elect the single settler for THIS run first. The row count is what makes "at most once" real when
+  // reconciliation and the engine's own callback both fire.
   const res = await tx.knowledgeChatRun.updateMany({
     where: { id: run.id, systemMessageState: 'CONSUMED' },
-    data: { ...extraRunData, systemMessageState: final },
+    data: { ...extraRunData, systemMessageState: desired },
   });
   if (res.count === 0) return false; // somebody else already settled it
 
-  if (final === 'RESTORED') {
-    await tx.knowledgeChatSession.update({
-      where: { id: run.sessionId },
-      // The proposal id travels WITH its text — a restored message that lost what it refers to is a
-      // nudge about nothing.
-      data: {
-        pendingSystemMessage: run.systemMessageText,
-        pendingSystemMessageProposalId: run.systemMessageProposalId,
-      },
-    });
-    return true;
-  }
-  if (final === 'DROPPED') {
-    logger.warn(`system message for run ${run.id} DROPPED (slot occupied): ${run.systemMessageText}`);
-  }
+  if (desired !== 'RESTORED') return false;
+
+  // ⚠️ THE SLOT IS CLAIMED CONDITIONALLY — never read-then-write.
+  //
+  // "A newer message wins the slot" was previously decided by a plain `findUnique` followed by an
+  // UNCONDITIONAL `update`. Those are two statements with a gap between them, and the gap is writable:
+  //
+  //   1. this transaction reads the slot and sees it empty       -> decides RESTORED
+  //   2. a decline (or another proposal's failure) commits a NEWER message into the slot
+  //   3. this transaction overwrites it with the OLDER message
+  //
+  // The newer notification is then lost for good — the exact inversion of the rule the read was meant to
+  // enforce. `updateMany ... where pendingSystemMessage: null` closes it: the guard and the write are ONE
+  // statement, it takes a row lock so concurrent settlers serialise, and the affected-row count reports
+  // which of them won. Zero rows means a newer message is already there, so THIS one is DROPPED.
+  //
+  // The proposal id travels WITH its text — a restored message that lost what it refers to is a nudge
+  // about nothing.
+  const claimed = await tx.knowledgeChatSession.updateMany({
+    where: { id: run.sessionId, pendingSystemMessage: null },
+    data: {
+      pendingSystemMessage: run.systemMessageText,
+      pendingSystemMessageProposalId: run.systemMessageProposalId,
+    },
+  });
+  if (claimed.count === 1) return true;
+
+  // Lost the slot to a newer message. The run was already marked RESTORED above, so correct it — the run
+  // row must not claim a delivery that did not happen.
+  await tx.knowledgeChatRun.update({ where: { id: run.id }, data: { systemMessageState: 'DROPPED' } });
+  logger.warn(`system message for run ${run.id} DROPPED (slot occupied): ${run.systemMessageText}`);
   return false;
 }
 

@@ -34,19 +34,59 @@ const consumedRun = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/**
+ * ⚠️ A REAL IN-MEMORY SESSION ROW, not a static stub.
+ *
+ * The slot claim is now a CONDITIONAL `updateMany ... where pendingSystemMessage: null`, and the whole
+ * point of that condition is to decide RESTORED vs DROPPED atomically. A double that ignores the `where`
+ * and always reports `count: 1` would go green for the correct implementation AND for the read-then-write
+ * version that loses a newer message — i.e. it could not fail the property it is used to prove.
+ *
+ * So the fake EVALUATES the filter against stored state, and the assertions read the resulting state.
+ */
 function txWith(session: Record<string, unknown> | null, runFindUnique?: unknown) {
+  const sessionRow: Record<string, unknown> | null = session
+    ? { pendingSystemMessageProposalId: null, ...session }
+    : null;
+  const runRow = (runFindUnique ?? null) as Record<string, unknown> | null;
   return {
     knowledgeChatRun: {
-      findUnique: vi.fn(async () => runFindUnique ?? null),
-      updateMany: vi.fn(async () => ({ count: 1 })),
+      findUnique: vi.fn(async () => runRow),
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if (runRow && where.systemMessageState && runRow.systemMessageState !== where.systemMessageState) {
+          return { count: 0 };
+        }
+        if (runRow) Object.assign(runRow, data);
+        return { count: 1 };
+      }),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (runRow) Object.assign(runRow, data);
+        return runRow ?? {};
+      }),
     },
     knowledgeChatSession: {
-      findUnique: vi.fn(async () => session),
-      update: vi.fn(async () => ({})),
+      findUnique: vi.fn(async () => sessionRow),
+      // Honours the `pendingSystemMessage: null` guard — this is the mechanism under test.
+      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if (!sessionRow) return { count: 0 };
+        if ('pendingSystemMessage' in where && sessionRow.pendingSystemMessage !== where.pendingSystemMessage) {
+          return { count: 0 };
+        }
+        Object.assign(sessionRow, data);
+        return { count: 1 };
+      }),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (sessionRow) Object.assign(sessionRow, data);
+        return sessionRow ?? {};
+      }),
     },
+    _session: sessionRow,
+    _run: runRow,
   } as never as {
-    knowledgeChatRun: { findUnique: ReturnType<typeof vi.fn>; updateMany: ReturnType<typeof vi.fn> };
-    knowledgeChatSession: { findUnique: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+    knowledgeChatRun: { findUnique: ReturnType<typeof vi.fn>; updateMany: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+    knowledgeChatSession: { findUnique: ReturnType<typeof vi.fn>; updateMany: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+    _session: Record<string, unknown> | null;
+    _run: Record<string, unknown> | null;
   };
 }
 
@@ -60,16 +100,17 @@ describe('restoreOnPreSpawnFailure', () => {
     const runUpdate = tx.knowledgeChatRun.updateMany.mock.calls[0][0];
     expect(runUpdate.where).toMatchObject({ id: 'r1', systemMessageState: 'CONSUMED' });
     expect(runUpdate.data).toMatchObject({ status: 'FAILED', activeKey: null, systemMessageState: 'RESTORED' });
-    expect(tx.knowledgeChatSession.update.mock.calls[0][0].data.pendingSystemMessage).toBe('msg');
+    expect(tx._session!.pendingSystemMessage).toBe('msg');
     // The proposal id travels back with its text, or the restored message loses what it refers to.
-    expect(tx.knowledgeChatSession.update.mock.calls[0][0].data.pendingSystemMessageProposalId).toBe('p1');
+    expect(tx._session!.pendingSystemMessageProposalId).toBe('p1');
   });
 
   it('drops the older message when a newer one already occupies the slot', async () => {
     const tx = txWith({ id: 's1', pendingSystemMessage: 'newer' }, consumedRun({ systemMessageText: 'old' }));
     await restoreOnPreSpawnFailure(tx as never, 'r1', 'boom');
-    expect(tx.knowledgeChatRun.updateMany.mock.calls[0][0].data.systemMessageState).toBe('DROPPED');
-    expect(tx.knowledgeChatSession.update).not.toHaveBeenCalled();
+    // The run must END as DROPPED, and the newer message must survive untouched.
+    expect(tx._run!.systemMessageState).toBe('DROPPED');
+    expect(tx._session!.pendingSystemMessage).toBe('newer');
   });
 
   it('still marks a run carrying NO message FAILED and frees its activeKey', async () => {
@@ -95,7 +136,32 @@ describe('settleConsumedMessage', () => {
     const tx = txWith({ id: 's1', pendingSystemMessage: null });
     await settleConsumedMessage(tx as never, consumedRun(), { producedAgentTurn: false });
     expect(tx.knowledgeChatRun.updateMany.mock.calls[0][0].data.systemMessageState).toBe('RESTORED');
-    expect(tx.knowledgeChatSession.update).toHaveBeenCalled();
+    expect(tx._session!.pendingSystemMessage).toBe('msg');
+  });
+
+  // ⚠️ THE RACE THE OLD FAKE COULD NOT EXPRESS. The previous double returned a STATIC session object, so
+  // no test could put a write between the slot read and the slot write — which is precisely where the
+  // defect lived: read slot (empty) -> a newer message commits -> overwrite it with the older one, losing
+  // the newer notification for good. The conditional claim closes it, and this proves the claim is what
+  // does the work: the write lands BETWEEN the two statements.
+  it('never overwrites a message that arrives AFTER the slot was read as empty', async () => {
+    const tx = txWith({ id: 's1', pendingSystemMessage: null }, consumedRun({ systemMessageText: 'old' }));
+    // Simulate a concurrent decline committing a NEWER message the instant the run row is settled —
+    // i.e. after any read of the slot, before the restore would write it.
+    const realRunUpdateMany = tx.knowledgeChatRun.updateMany.getMockImplementation()!;
+    tx.knowledgeChatRun.updateMany.mockImplementation(async (args: never) => {
+      const res = await realRunUpdateMany(args);
+      tx._session!.pendingSystemMessage = 'newer';
+      tx._session!.pendingSystemMessageProposalId = 'p-newer';
+      return res;
+    });
+
+    await settleConsumedMessage(tx as never, consumedRun({ systemMessageText: 'old' }), { producedAgentTurn: false });
+
+    // The newer message SURVIVES, and the older one is recorded as DROPPED rather than silently lost.
+    expect(tx._session!.pendingSystemMessage).toBe('newer');
+    expect(tx._session!.pendingSystemMessageProposalId).toBe('p-newer');
+    expect(tx._run!.systemMessageState).toBe('DROPPED');
   });
 
   it('marks it DELIVERED when the run did produce a turn — and restores nothing', async () => {
