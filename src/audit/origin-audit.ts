@@ -3,6 +3,18 @@ import type { Prisma } from '@prisma/client';
 /** Spec 5.5.1 size bounds. A payload above this is recorded as truncated rather than stored. */
 export const MAX_AUDIT_PAYLOAD_BYTES = 16 * 1024;
 
+/**
+ * Who is performing this write and under what authority. Threaded into every write core — it is THE
+ * per-context difference between the owner's own endpoint and the proposal applier, and the only one.
+ * Everything else about a write is identical, which is why the core is shared rather than forked.
+ */
+export type AuditContext = {
+  origin: 'OWNER' | 'DOCTOR';
+  /** Non-null only when origin is DOCTOR. */
+  proposalId: string | null;
+  actorUserId: string | null;
+};
+
 export type OriginAuditRow = {
   plantId: string;
   ownerId: string;

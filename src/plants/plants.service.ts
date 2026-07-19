@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { parseSpeciesRecord, primaryCommonName, type GrowthHabit, type PlantProfile, type SoilDryness } from '@retaxmaster/my-plants-species-schema';
 import { crowdingIndex, crowdingIsEngineRead } from '../engines/scheduling.js';
 import { latestSizedHeight } from './latest-sized-height.js';
@@ -13,9 +13,13 @@ import { careTaskStatus, type CareStatus } from './plant-care.js';
 import type { Task } from '@prisma/client';
 import type { CreatePlantDto } from './create-plant.dto.js';
 import type { UpdatePlantDto } from './update-plant.dto.js';
+import { updatePlantCore, updateProfileCore } from './plants.write-core.js';
+import { runEffects } from '../common/write-effects.js';
 
 @Injectable()
 export class PlantsService {
+  private readonly logger = new Logger(PlantsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly owner: OwnerService,
@@ -228,23 +232,16 @@ export class PlantsService {
   }
 
   async update(id: string, dto: UpdatePlantDto) {
-    const plant = await this.prisma.plant.findFirst({ where: { id, ...this.owner.ownerFilter() } });
-    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
-
-    const data: { nickname?: string | null; placeId?: string } = {};
-    let recompute = false;
-
-    if (dto.nickname !== undefined) data.nickname = dto.nickname.trim() || null;
-
-    if (dto.placeId !== undefined && dto.placeId !== plant.placeId) {
-      const place = await this.prisma.place.findFirst({ where: { id: dto.placeId, ownerId: plant.ownerId } });
-      if (!place) throw new BadRequestException(`Unknown place: ${dto.placeId}`);
-      data.placeId = dto.placeId;
-      recompute = true;
-    }
-
-    if (Object.keys(data).length > 0) await this.prisma.plant.update({ where: { id }, data });
-    if (recompute) await this.carePlan.recomputePlant(id);
+    const ownerId = this.owner.currentOwnerId();
+    const { effects } = await this.prisma.$transaction((tx) =>
+      updatePlantCore(tx, {
+        plantId: id,
+        ownerId,
+        patch: { nickname: dto.nickname, placeId: dto.placeId },
+        audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+      }),
+    );
+    await runEffects(effects, this.effectRunner());
     return this.get(id);
   }
 
@@ -349,19 +346,33 @@ export class PlantsService {
   // is ALREADY validated by ZodValidationPipe(plantProfileUpdateSchema) at the route, so `patch` here
   // is a trusted, partial, in-vocabulary object.
   async updateProfile(id: string, patch: Partial<PlantProfile>): Promise<PlantProfile> {
-    const plant = await this.prisma.plant.findFirst({
-      where: { id, ...this.owner.ownerFilter() },
-      select: { id: true },
-    });
-    if (!plant) throw new NotFoundException(`Unknown plant: ${id}`);
-    const row = await this.prisma.plantProfile.upsert({
-      where: { plantId: id },
-      create: { plantId: id, ...patch },
-      update: { ...patch },
-    });
-    // The profile now feeds the watering center (spec A §3/§4) — a change must move the schedule.
-    await this.carePlan.recomputePlant(id);
-    return this.toProfileView(row);
+    const ownerId = this.owner.currentOwnerId();
+    const { result, effects } = await this.prisma.$transaction((tx) =>
+      updateProfileCore(tx, {
+        plantId: id,
+        ownerId,
+        patch,
+        audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+      }),
+    );
+    // The profile feeds the watering center (spec A §3/§4) — a change must move the schedule. The core
+    // reports that as an effect; runEffects performs it after commit.
+    await runEffects(effects, this.effectRunner());
+    return this.toProfileView(result as never);
+  }
+
+  /**
+   * The owner path's post-commit runner. Only the care-plan recompute applies here: neither of this
+   * service's two write cores stages photos or object keys.
+   */
+  private effectRunner() {
+    return {
+      recomputePlant: (plantId: string) => this.carePlan.recomputePlant(plantId),
+      deleteObject: async () => {},
+      deleteInboxPaths: async () => {},
+      enqueuePhotoTick: () => {},
+      logger: this.logger,
+    };
   }
 
   // PUT /plants/:id/cover-photo — upload-then-DB, orphan-safe (mirrors blog.service setCover). On a DB

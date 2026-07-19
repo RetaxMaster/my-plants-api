@@ -47,6 +47,10 @@ function setup() {
     plantProfile: { findUnique: async () => null, upsert: async ({ create }: any) => ({ ...create }) },
     plantProgressEntry: { findFirst: async () => null },
     careEvent: { findFirst: async () => null },
+    plantWriteAudit: { create: async () => ({}) },
+    // The write cores run inside the caller's transaction; this fake runs the callback against the
+    // same client, the convention progress.service.test.ts already uses.
+    $transaction: async (fn: any) => fn(prisma),
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
   const owner = new OwnerService(cls);
