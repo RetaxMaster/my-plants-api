@@ -20,8 +20,15 @@ function setup() {
         if (existing) existing.intervalDays = update.intervalDays;
         else rows.push({ plantId: create.plantId, task: create.task, intervalDays: create.intervalDays });
       },
-      deleteMany: async ({ where }: any) => { for (let i = rows.length - 1; i >= 0; i--) if (rows[i].plantId === where.plantId && rows[i].task === where.task) rows.splice(i, 1); },
+      // Returns a Prisma-faithful { count } — the core gates its audit row on rows actually deleted.
+      deleteMany: async ({ where }: any) => {
+        let count = 0;
+        for (let i = rows.length - 1; i >= 0; i--) if (rows[i].plantId === where.plantId && rows[i].task === where.task) { rows.splice(i, 1); count += 1; }
+        return { count };
+      },
     },
+    plantWriteAudit: { create: async () => ({}) },
+    $transaction: async (fn: any) => fn(prisma),
   } as any;
   const cls = new ClsService(new AsyncLocalStorage());
   const owner = new OwnerService(cls);

@@ -1,15 +1,15 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Task } from '@prisma/client';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { OwnerService } from '../owner/owner.service.js';
 import { CarePlanService } from '../care-plan/care-plan.service.js';
 import type { SetFrequencyDto } from './frequency.dto.js';
-
-// Frequency-bearing tasks only (PROGRESS excluded — fixed weekly cadence).
-const FREQUENCY_TASKS = new Set<Task>([Task.WATER, Task.FERTILIZE, Task.REPOT, Task.ROTATE, Task.CLEAN_LEAVES, Task.MIST]);
+import { setFrequencyCore, clearFrequencyCore } from './frequency.write-core.js';
+import { runEffects } from '../common/write-effects.js';
 
 @Injectable()
 export class FrequencyService {
+  private readonly logger = new Logger(FrequencyService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly owner: OwnerService,
@@ -25,31 +25,43 @@ export class FrequencyService {
   }
 
   async set(plantId: string, dto: SetFrequencyDto) {
-    // Defense in depth: the DTO already rejects PROGRESS, but the service must also refuse it (and any
-    // non-frequency-bearing task) so the invariant holds regardless of caller — never upsert a
-    // PROGRESS PlantTaskFrequency the engine would ignore.
-    if (!FREQUENCY_TASKS.has(dto.task)) {
-      throw new BadRequestException(`Not a frequency-bearing task: ${dto.task}`);
-    }
-    await this.assertOwned(plantId);
-    await this.prisma.plantTaskFrequency.upsert({
-      where: { plantId_task: { plantId, task: dto.task } },
-      create: { plantId, task: dto.task, intervalDays: dto.intervalDays },
-      update: { intervalDays: dto.intervalDays },
-    });
-    await this.carePlan.recomputePlant(plantId); // the override substitution lives in the engine (Phase 2)
+    const { effects } = await this.prisma.$transaction((tx) =>
+      setFrequencyCore(tx, {
+        plantId,
+        ownerId: this.owner.currentOwnerId(),
+        task: dto.task,
+        intervalDays: dto.intervalDays,
+        audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+      }),
+    );
+    // The override substitution lives in the engine (Phase 2); the recompute is a post-commit effect.
+    await runEffects(effects, this.effectRunner());
     return this.list(plantId);
   }
 
   async clear(plantId: string, task: string) {
-    // The DELETE :task param is a raw string — validate it here (no DTO on a path param).
-    if (!FREQUENCY_TASKS.has(task as Task)) {
-      throw new BadRequestException(`Not a frequency-bearing task: ${task}`);
-    }
-    await this.assertOwned(plantId);
-    await this.prisma.plantTaskFrequency.deleteMany({ where: { plantId, task: task as Task } });
-    await this.carePlan.recomputePlant(plantId);
+    // The DELETE :task param is a raw string; the core validates it (no DTO on a path param).
+    const { effects } = await this.prisma.$transaction((tx) =>
+      clearFrequencyCore(tx, {
+        plantId,
+        ownerId: this.owner.currentOwnerId(),
+        task,
+        audit: { origin: 'OWNER', proposalId: null, actorUserId: this.owner.currentActor()?.userId ?? null },
+      }),
+    );
+    await runEffects(effects, this.effectRunner());
     return this.list(plantId);
+  }
+
+  /** Post-commit runner: a frequency write only ever asks for a care-plan recompute. */
+  private effectRunner() {
+    return {
+      recomputePlant: (id: string) => this.carePlan.recomputePlant(id),
+      deleteObject: async () => {},
+      deleteInboxPaths: async () => {},
+      enqueuePhotoTick: () => {},
+      logger: this.logger,
+    };
   }
 
   private async assertOwned(plantId: string): Promise<void> {
