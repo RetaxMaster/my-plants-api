@@ -129,9 +129,16 @@ describe('AuthService', () => {
   // Plant Doctor scoped token (Spec 3 §3.3): a FULL, self-consistent payload that flows through the SAME
   // verify path, narrowed by scope:'doctor' + plantId, role ALWAYS USER, and short-lived (one run window).
   it('mintDoctorToken issues a verifiable token with the full sealed doctor claims and a short TTL', async () => {
-    const token = await svc.mintDoctorToken({ userId: 'u1', username: 'carlos', ownerId: 'o1', plantId: 'p1' });
+    const token = await svc.mintDoctorToken({
+      userId: 'u1', username: 'carlos', ownerId: 'o1', plantId: 'p1', sessionId: 's1', runId: 'r1',
+    });
     const payload = await svc.verify(token); // flows through the same jti/cap checks
-    expect(payload).toMatchObject({ sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', scope: 'doctor', plantId: 'p1' });
+    expect(payload).toMatchObject({
+      sub: 'u1', username: 'carlos', ownerId: 'o1', role: 'USER', scope: 'doctor', plantId: 'p1',
+    });
+    // Sealed to ONE session and ONE run: the proposal endpoints pin a write proposal to both, so the
+    // token cannot act against another session of the same plant (which may be auto-approving).
+    expect(payload).toMatchObject({ sessionId: 's1', runId: 'r1' });
     expect(payload.jti).toBeTruthy();
     expect(payload.exp - payload.iat).toBeLessThanOrEqual(1_800); // ~30 min, not the 30-day default
   });

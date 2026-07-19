@@ -271,6 +271,7 @@ export class KnowledgeChatService {
         if (!ownerUser) throw new Error(`DOCTOR session ${session.id}: owner ${session.ownerId} has no user`);
         const { workspaceDir } = await this.doctorRunContext.prepareRun({
           sessionId: session.id,
+          runId,
           plantId: session.plantId!,
           ownerId: session.ownerId!,
           userId: ownerUser.id,

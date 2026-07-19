@@ -19,6 +19,10 @@ export interface JwtPayload {
   // owner token to a five-endpoint allowlist pinned to that one plant. Absent on every ordinary token.
   scope?: 'doctor';
   plantId?: string;
+  // Present ONLY on a `scope:'doctor'` token: the chat session and the single run it was minted for.
+  // The proposal endpoints seal a write proposal to both, so a token cannot act outside its own run.
+  sessionId?: string;
+  runId?: string;
   iat: number;
   exp: number;
 }
@@ -95,6 +99,8 @@ export class AuthService {
     username: string;
     ownerId: string;
     plantId: string;
+    sessionId: string;
+    runId: string;
   }): Promise<string> {
     const ttlSeconds = Math.floor(this.env.PLANT_DOCTOR_TOKEN_TTL_MS / 1000);
     return this.jwt.signAsync(
@@ -107,6 +113,11 @@ export class AuthService {
         sst: Math.floor(Date.now() / 1000),
         scope: 'doctor' as const,
         plantId: input.plantId,
+        // Seals the token to ONE run of ONE session. Without this a doctor token could file a proposal
+        // against a DIFFERENT session of the same plant — and that session might have Skip Permissions
+        // on, so the proposal would be auto-applied with no human ever seeing it.
+        sessionId: input.sessionId,
+        runId: input.runId,
       },
       { expiresIn: ttlSeconds }, // per-call override of the module's 30d default
     );

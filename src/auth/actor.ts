@@ -14,6 +14,11 @@ export interface Actor {
   // ordinary owner/admin token carries neither, so it takes the normal path untouched.
   scope?: 'doctor';
   plantId?: string;
+  // Present ONLY on a `scope:'doctor'` token: the chat session and the ONE run the token was minted for.
+  // A write proposal is sealed to both, so a doctor token cannot file one against another session of the
+  // same plant — that session may have Skip Permissions on, which would auto-apply it unseen.
+  sessionId?: string;
+  runId?: string;
   jti: string;
   // Session-start anchor (epoch seconds) carried forward across refreshes to enforce the absolute
   // cap. Resolved from the token's `sst`, or `iat` for legacy tokens minted before the feature.
