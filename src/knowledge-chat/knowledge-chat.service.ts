@@ -16,6 +16,8 @@ import { resolveEffectiveProvider } from './effective-provider.js';
 import { WORKSPACE_ENV } from './doctor-workspace-env.js';
 import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
 import { SYSTEM_MESSAGE } from './system-message.js';
+import { ACTIVE_RUN_STATUSES } from './run-status.js';
+import { takeLaunchLease } from './launch-lease.js';
 import { classifyLaunchFailure, restoreOnPreSpawnFailure, settleConsumedMessage } from './system-message-delivery.js';
 
 // The engine's typed "there is nothing left to read" errors. Classified against the package's own error
@@ -34,7 +36,8 @@ export type TurnInput = { prompt: string; command?: never } | { command: AgentCo
 
 type SessionKind = 'KNOWLEDGE' | 'DOCTOR';
 
-const ACTIVE = ['QUEUED', 'RUNNING'] as const;
+// ONE source of truth, shared with the orchestrator and the doctor cleanup (see run-status.ts).
+const ACTIVE = ACTIVE_RUN_STATUSES;
 // The value in `activeKey` while a run is non-terminal. Cleared to null on every terminal transition. The
 // @@unique([sessionId, activeKey]) constraint then permits at most ONE active run per session.
 const ACTIVE_KEY = 'ACTIVE';
@@ -409,6 +412,24 @@ export class KnowledgeChatService {
         perRunEnv = { [WORKSPACE_ENV]: workspaceDir };
       }
       const ticket = await this.tickets.mint(runId);
+
+      // THE LEASE (spec §8.1). Everything above — workspace prep, token mint, ticket — is real async work
+      // during which a deploy can drain and cancel this run. Only a run that wins QUEUED -> LAUNCHING here,
+      // with the verification record still reading true in the SAME transaction, may call /execute.
+      const leased = await takeLaunchLease(this.prisma, runId, () =>
+        provider === 'codex' ? this.codexVerification.isVerified(kind) : Promise.resolve(true),
+      );
+      if (!leased) {
+        // A refused lease is a CONFIRMED pre-spawn outcome — /execute has demonstrably not been called —
+        // so any `[system]` message this run consumed goes back on the session for its successor to carry.
+        // (The catch below will also fire on the throw; its conditional update matches 0 rows because the
+        // run is already terminal here, so it is a no-op.)
+        await this.prisma.$transaction((tx) =>
+          restoreOnPreSpawnFailure(tx, runId, 'Run refused the launch lease (cancelled, or the engine is draining).'),
+        );
+        throw new ConflictException('run could not acquire the launch lease');
+      }
+
       await this.engines.engineFor(kind).execute(
         input.command
           ? { runId, provider, command: input.command, logPath, resumeSessionId, env: perRunEnv }

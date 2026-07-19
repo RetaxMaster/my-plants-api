@@ -35,6 +35,8 @@ function setup(seed: { sessions?: Session[]; runs?: Run[]; proposals?: any[] } =
   }));
   const runs = new Map((seed.runs ?? []).map((r) => [r.id, r]));
   const proposals = new Map<string, any>((seed.proposals ?? []).map((p) => [p.id, { ...p }]));
+  // Serializes $transaction calls so a rollback can never touch another transaction's committed writes.
+  let txChain: Promise<void> = Promise.resolve();
 
   // Attach a session's runs the way Prisma's `include: { runs: { orderBy } }` would, so the service
   // code (which reads session.runs) exercises the real path against the fake.
@@ -110,14 +112,24 @@ function setup(seed: { sessions?: Session[]; runs?: Run[]; proposals?: any[] } =
     // transaction at all — and it reports a FALSE FAILURE for the case that matters most (a run losing
     // the activeKey race must NOT have consumed the session's queued message).
     // The maps hold flat row objects, so a shallow clone per row is a faithful snapshot.
+    // SERIALIZED, because rollback and isolation are inseparable. With a shared in-memory store, two
+    // interleaved transactions would let one's rollback erase the other's already-committed writes — which
+    // is precisely what broke the concurrent-resume test: the loser's P2002 rollback deleted the winner's
+    // run. A real DB isolates them (and its row locks serialize these conflicting writes anyway), so the
+    // fake runs them one at a time through a promise chain.
     $transaction: async (fn: any) => {
-      const snapshot = [sessions, runs, proposals].map((m) => new Map([...m].map(([k, v]) => [k, { ...(v as object) }])));
-      try {
-        return await fn(db);
-      } catch (err) {
-        [sessions, runs, proposals].forEach((m, i) => { m.clear(); for (const [k, v] of snapshot[i]!) m.set(k, v as never); });
-        throw err;
-      }
+      const result = txChain.then(async () => {
+        const snapshot = [sessions, runs, proposals].map((m) => new Map([...m].map(([k, v]) => [k, { ...(v as object) }])));
+        try {
+          return await fn(db);
+        } catch (err) {
+          [sessions, runs, proposals].forEach((m, i) => { m.clear(); for (const [k, v] of snapshot[i]!) m.set(k, v as never); });
+          throw err;
+        }
+      });
+      // The chain must not break on a rejected transaction, or every later one inherits the failure.
+      txChain = result.then(() => undefined, () => undefined);
+      return result;
     },
   } as any;
 
@@ -608,5 +620,46 @@ describe('run admission expires pending proposals (through the real service)', (
     expect((runs.get(out.runId)! as never as Record<string, unknown>).commandName).toBe('compact');
     // Prefixing prose onto a command would corrupt it, so the message waits for the next PROMPT turn.
     expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user still has not approved the request.');
+  });
+});
+
+describe('the launch lease is wired into launch()', () => {
+  it('never calls /execute when the codex record turns false during the launch window', async () => {
+    // The unit tests prove takeLaunchLease itself; this proves the service actually CONSULTS it. Without
+    // this, deleting the lease call would leave every lease test green while runs spawned during a drain.
+    const { svc, run, engine, codexVerification, runs } = setup({
+      sessions: [session({ providerSessionId: 'uuid-1', provider: 'codex' })],
+      runs: [doneRun()],
+    });
+    // Verified at admission time (so the turn is accepted), drained by the time the lease is taken.
+    codexVerification.isVerified.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await expect(run(() => svc.resume('s1', { prompt: 'hi' }, undefined, KS))).rejects.toBeInstanceOf(ConflictException);
+
+    expect(engine.execute).not.toHaveBeenCalled();
+    // The refused run is terminal and its slot is freed — a leased-but-refused run left active would
+    // block the session forever.
+    const refused = [...runs.values()].find((r) => r.id !== 'r1')!;
+    expect(refused.status).toBe('FAILED');
+    expect(refused.activeKey).toBeNull();
+  });
+
+  it('restores a consumed [system] message when the lease is refused', async () => {
+    // A refused lease is CONFIRMED pre-spawn, so the nudge must survive for the next run to carry.
+    const { svc, run, sessions, codexVerification } = setup({
+      sessions: [doctorSession({ provider: 'codex', pendingSystemMessage: '[system] The user declined your request.' })],
+      runs: [doneRun()],
+    });
+    codexVerification.isVerified.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await expect(run(() => svc.resume('s1', { prompt: 'hi' }, undefined, DS))).rejects.toBeInstanceOf(ConflictException);
+
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+  });
+
+  it('reaches /execute normally when the lease is granted', async () => {
+    const { svc, run, engine } = setup({ sessions: [session()], runs: [doneRun()] });
+    const out = await run(() => svc.resume('s1', { prompt: 'hi' }, undefined, KS));
+    expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId }));
   });
 });

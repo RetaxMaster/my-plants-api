@@ -6,8 +6,9 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import type { EngineParams } from './engine-params.js';
 import { KnowledgeChatTicketService } from './knowledge-chat-ticket.service.js';
 import { settleConsumedMessage } from '../system-message-delivery.js';
+import { ACTIVE_RUN_STATUSES } from '../run-status.js';
 
-const ACTIVE = ['QUEUED', 'RUNNING'] as const;
+const ACTIVE = ACTIVE_RUN_STATUSES;
 
 // The env-var NAMES an operator checks when a spawn fails, per engine. Naming the DOCTOR's own keys (not the
 // KE's) in a doctor spawn-failure diagnostic is the whole reason the orchestrator is now params-driven.
@@ -46,12 +47,23 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
   async runStarted(runId: string, info: { pid: number; procStartTime: string; sessionId: string | null }): Promise<void> {
     const run = await this.prisma.knowledgeChatRun.findUnique({ where: { id: runId } });
     if (!run) return;
+
+    // IDENTITY FIRST, and UNCONDITIONALLY — including for a run that was cancelled in the meantime.
+    // A process that exists must always be findable, or the deploy drain has no identity to wait for and
+    // walks away from a live agent (spec §8.1). This deliberately does NOT filter on status: the previous
+    // version folded pid into the status-guarded update, so a run cancelled between spawn and this
+    // callback recorded no pid at all and became an untrackable orphan.
+    await this.prisma.knowledgeChatRun.updateMany({
+      where: { id: runId },
+      data: { pid: info.pid, procStartTime: info.procStartTime },
+    });
+
+    // Status reconciliation happens AFTER identity is recorded, and only for a still-live run — a late
+    // callback must never resurrect a terminal one.
     await this.prisma.knowledgeChatRun.updateMany({
       where: { id: runId, status: { in: [...ACTIVE] } },
       data: {
         status: 'RUNNING',
-        pid: info.pid,
-        procStartTime: info.procStartTime,
         startedAt: run.startedAt ?? new Date(), // idempotent: keep the first wall-clock start
       },
     });

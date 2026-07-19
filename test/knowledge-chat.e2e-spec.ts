@@ -132,7 +132,10 @@ describe('Knowledge Chat (e2e)', () => {
   it('GET /sessions lists it newest-first with the latest-run status + turns count', async () => {
     const res = await asAdmin(request(server()).get('/knowledge-chat/sessions')).expect(200);
     const mine = res.body.find((s: { id: string }) => s.id === sessionId);
-    expect(mine).toMatchObject({ id: sessionId, title: 'Research Monstera deliciosa care', status: 'QUEUED', turns: 1 });
+    // LAUNCHING, not QUEUED: the run took the launch lease (spec 8.1) before calling /execute, and the
+    // test engine never reports back, so it rests in the lease state. LAUNCHING is non-terminal and counts
+    // as active everywhere (see run-status.ts) — the visible-status change is the intended contract.
+    expect(mine).toMatchObject({ id: sessionId, title: 'Research Monstera deliciosa care', status: 'LAUNCHING', turns: 1 });
   });
 
   it('GET /sessions/:id returns ordered turns with isActive + logUrl', async () => {
@@ -141,7 +144,9 @@ describe('Knowledge Chat (e2e)', () => {
     // the rows. This assertion still read the old name — so it asserted `undefined === null` and passed by
     // accident once the request above started 400ing.
     expect(res.body.providerSessionId).toBeNull();
-    expect(res.body.turns[0]).toEqual({ runId, prompt: 'Research Monstera deliciosa care', command: null, status: 'QUEUED', isActive: true, logUrl: `/knowledge-chat/runs/${runId}/log` });
+    // Same lease state as above — and `isActive` stays TRUE, which is the property that actually matters:
+    // a LAUNCHING run still holds the session's active slot.
+    expect(res.body.turns[0]).toEqual({ runId, prompt: 'Research Monstera deliciosa care', command: null, status: 'LAUNCHING', isActive: true, logUrl: `/knowledge-chat/runs/${runId}/log` });
   });
 
   // The 422 this test used to assert ("the session has no Claude session id yet") DIED with agents-realtime

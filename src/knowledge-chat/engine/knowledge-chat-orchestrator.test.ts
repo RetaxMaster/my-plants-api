@@ -494,3 +494,31 @@ describe('KnowledgeChatOrchestrator.runFinished — [system] message settling', 
     expect(session.pendingSystemMessage).toBeUndefined();
   });
 });
+
+describe('KnowledgeChatOrchestrator.runStarted — identity is recorded unconditionally', () => {
+  it('records pid and procStartTime even for a run CANCELLED before the callback arrived', async () => {
+    // Spec §8.1: a process that exists must always be findable, or the deploy drain has no identity to
+    // wait for and walks away from a live agent. The previous version folded pid into the status-guarded
+    // update, so a run cancelled between spawn and this callback recorded NO pid and became an orphan.
+    const run: Run = { id: 'r1', sessionId: 's1', provider: 'claude', status: 'CANCELLED', activeKey: null, pid: null, procStartTime: null, startedAt: null, finishedAt: new Date(), exitCode: null, error: null };
+    const prisma = makePrismaFake([run], [{ id: 's1', providerSessionId: null }]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runStarted('r1', { pid: 4242, procStartTime: '777', sessionId: null });
+
+    expect(run.pid).toBe(4242);
+    expect(run.procStartTime).toBe('777');
+    // ...but the status is NOT resurrected.
+    expect(run.status).toBe('CANCELLED');
+    expect(run.startedAt).toBeNull();
+  });
+
+  it('promotes a LAUNCHING run to RUNNING (the lease state is active, not terminal)', async () => {
+    const run: Run = { id: 'r1', sessionId: 's1', provider: 'claude', status: 'LAUNCHING' as Status, activeKey: 'ACTIVE', pid: null, procStartTime: null, startedAt: null, finishedAt: null, exitCode: null, error: null };
+    const prisma = makePrismaFake([run], [{ id: 's1', providerSessionId: null }]);
+    await new KnowledgeChatOrchestrator(kparams, prisma as never, tickets)
+      .runStarted('r1', { pid: 7, procStartTime: '1', sessionId: null });
+
+    expect(run.status).toBe('RUNNING');
+    expect(run.pid).toBe(7);
+  });
+});

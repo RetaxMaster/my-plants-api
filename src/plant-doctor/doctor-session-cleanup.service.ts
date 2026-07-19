@@ -5,8 +5,9 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { KnowledgeChatService } from '../knowledge-chat/knowledge-chat.service.js';
 import { ChatEngineRegistry } from '../knowledge-chat/engine/chat-engine-registry.js';
 import { DoctorRunContextService } from './doctor-run-context.service.js';
+import { ACTIVE_RUN_STATUSES } from '../knowledge-chat/run-status.js';
 
-const ACTIVE = ['QUEUED', 'RUNNING'];
+const ACTIVE = ACTIVE_RUN_STATUSES;
 
 // Orchestrated plant-delete cleanup for DOCTOR sessions (Spec 3 §3.1). Deleting a plant must leave NO
 // orphaned session row, workspace dir, engine log, or in-flight run. Ordered so a partial failure never
@@ -34,7 +35,7 @@ export class DoctorSessionCleanupService {
 
     // (1) Cancel/await any active run per session — never yank a row from under a live run.
     for (const s of sessions) {
-      for (const r of s.runs.filter((r) => ACTIVE.includes(r.status))) {
+      for (const r of s.runs.filter((r) => (ACTIVE as readonly string[]).includes(r.status))) {
         await this.chat.cancelRun(r.id);
       }
     }
