@@ -134,6 +134,13 @@ export async function cleanupOwners(prisma: PrismaService, ownerIds: string[], u
     await prisma.dueCache.deleteMany({ where: { plant: { ownerId: oid } } });
     await prisma.plantProgressEntry.deleteMany({ where: { plant: { ownerId: oid } } });
     await prisma.plantProfile.deleteMany({ where: { plant: { ownerId: oid } } });
+    // The feedback trio. These have NO cascade on `plantId`, so any suite that records a care event —
+    // directly or through an approved `care.done` proposal — leaves rows that make the plant delete below
+    // fail with a foreign-key violation. The failure surfaces in afterAll, long after the assertions
+    // passed, so it reads as an unrelated teardown error rather than as missing cleanup.
+    await prisma.careEvent.deleteMany({ where: { plant: { ownerId: oid } } });
+    await prisma.plantTaskAdjustment.deleteMany({ where: { plant: { ownerId: oid } } });
+    await prisma.taskOverride.deleteMany({ where: { plant: { ownerId: oid } } });
     await prisma.plant.deleteMany({ where: { ownerId: oid } });
     await prisma.place.deleteMany({ where: { ownerId: oid } });
     await prisma.city.deleteMany({ where: { ownerId: oid } });

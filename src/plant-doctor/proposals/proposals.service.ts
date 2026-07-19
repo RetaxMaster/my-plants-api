@@ -174,7 +174,20 @@ export class ProposalsService {
   async approve(plantId: string, sessionId: string, proposalId: string): Promise<ProposalView> {
     const row = await this.loadOwned(plantId, sessionId, proposalId);
     const actorUserId = this.owner.currentActor()?.userId ?? null;
-    await this.applier.apply(row, { actorUserId, autoApproved: false });
+    try {
+      await this.applier.apply(row, { actorUserId, autoApproved: false });
+    } catch (err) {
+      // The applier reports "somebody already resolved it" as a bare ConflictException. The owner is
+      // looking at a banner for a proposal that is gone, so the 409 must say WHAT it became — EXPIRED by
+      // a newer proposal reads very differently from DECLINED on another device, and the UI cannot tell
+      // them apart from the message alone. `decline` already answers in this shape; an approve that did
+      // not would make the two endpoints disagree about their own error contract (spec §10).
+      if (err instanceof ConflictException) {
+        const current = await this.prisma.doctorWriteProposal.findUnique({ where: { id: proposalId } });
+        throw new ConflictException({ message: 'proposal is no longer pending', status: current?.status ?? 'UNKNOWN' });
+      }
+      throw err;
+    }
     const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: proposalId } });
     return this.render.render(fresh ?? row);
   }
