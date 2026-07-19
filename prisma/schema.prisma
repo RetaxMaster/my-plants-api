@@ -363,10 +363,111 @@ model ScheduledMove {
 
 enum KnowledgeChatRunStatus {
   QUEUED
+  // The launch lease: the run has claimed the session's active slot and a process is being spawned for
+  // it, but no pid is recorded yet. It exists so a deploy drain can tell "nothing is running, safe to
+  // reload" apart from "a process is a millisecond away from existing" — a window QUEUED cannot express.
+  LAUNCHING
   RUNNING
   SUCCEEDED
   FAILED
   CANCELLED
+}
+
+// The lifecycle of a Plant Doctor write proposal. PENDING is the only state the owner can act on; every
+// other value is terminal (Plant Doctor Copilot spec §5).
+enum DoctorProposalStatus {
+  PENDING
+  APPROVED
+  DECLINED
+  EXPIRED
+  FAILED
+}
+
+// Why applying a proposal failed, in the sanitized vocabulary the owner and the agent are allowed to see.
+// Deliberately coarse: a raw DB/driver error text is not something a plant-scoped agent gets to read back.
+enum DoctorProposalFailureCode {
+  VALIDATION
+  NOT_FOUND
+  OWNERSHIP
+  CONFLICT
+  INTERNAL
+}
+
+// The delivery state of the one `[system]` message a run may carry. It is what makes delivery
+// AT-MOST-ONCE and durable across a crash: CONSUMED (claimed by a run that has not started yet),
+// DELIVERED (the agent actually received it), RESTORED (the run died before delivery, so the message
+// went back to the session), DROPPED (unrecoverable — recorded rather than silently lost).
+enum SystemMessageState {
+  CONSUMED
+  DELIVERED
+  RESTORED
+  DROPPED
+}
+
+// Under whose authority a plant write happened. The whole point of the audit table: after the fact, an
+// owner-made change and a doctor-proposed one must be distinguishable forever.
+enum WriteOrigin {
+  OWNER
+  DOCTOR
+}
+
+// A Plant Doctor write PROPOSAL: the operations the agent wants applied, plus the immutable snapshot of
+// the values they would overwrite. Creating one writes NOTHING to plant data — applying it does, and only
+// after the effective owner approves.
+model DoctorWriteProposal {
+  id        String               @id @default(uuid())
+  sessionId String               @map("session_id")
+  session   KnowledgeChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // The run that filed it. A proposal is sealed to BOTH its session and its run so a doctor token cannot
+  // file against a different session of the same plant — which matters because THAT session might have
+  // Skip Permissions on, silently auto-approving it.
+  runId     String               @map("run_id")
+  plantId   String               @map("plant_id")
+  ownerId   String               @map("owner_id")
+  // The validated operations array, serialized. Text, not JSON columns: MariaDB 10.x aliases JSON to
+  // LONGTEXT anyway, and the shape's authority is the Zod union, not the DB.
+  operations String              @map("operations") @db.Text
+  // The BEFORE values, captured at propose time and never rewritten. This is what makes the owner's
+  // consent bind to what they were actually shown.
+  snapshot   String              @map("snapshot") @db.Text
+  summary    String              @db.Text
+  status     DoctorProposalStatus @default(PENDING)
+  // 'PENDING' while pending; null once resolved. Same null-exempt unique trick as KnowledgeChatRun's
+  // activeKey — with @@unique([sessionId, pendingKey]) it DB-enforces "at most ONE pending proposal per
+  // session" atomically, instead of hoping a read-then-write wins the race.
+  pendingKey String?             @map("pending_key")
+  autoApproved Boolean           @default(false) @map("auto_approved")
+  failureCode   DoctorProposalFailureCode? @map("failure_code")
+  failureReason String?                    @map("failure_reason")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  resolvedAt       DateTime? @map("resolved_at")
+  resolvedByUserId String?   @map("resolved_by_user_id")
+
+  @@unique([sessionId, pendingKey])
+  @@index([plantId])
+  @@index([runId])
+  @@map("doctor_write_proposals")
+}
+
+// Append-only: one row per APPLIED operation, recording who wrote it and under what authority. Written
+// inside the same transaction as the write it describes, so the fact and its record commit together.
+model PlantWriteAudit {
+  id      String      @id @default(uuid())
+  plantId String      @map("plant_id")
+  ownerId String      @map("owner_id")
+  origin  WriteOrigin
+  // A historical identifier ONLY — deliberately NOT a relation and NOT cascaded. The audit log must
+  // outlive the chat session (and therefore the proposal) that produced it (spec §7.4).
+  proposalId    String? @map("proposal_id")
+  actorUserId   String? @map("actor_user_id")
+  operationType String  @map("operation_type")
+  targetTable   String  @map("target_table")
+  targetId      String? @map("target_id")
+  payloadJson   String  @map("payload_json") @db.Text
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([plantId, createdAt])
+  @@map("plant_write_audit")
 }
 
 // What a chat session IS: the admin Knowledge Engine chat, or a per-plant Plant Doctor diagnosis. One
@@ -405,9 +506,20 @@ model KnowledgeChatSession {
   // Deleting a plant cascade-removes its DOCTOR session ROWS; the live run + FS logs/workspaces are handled
   // by the orchestrated cleanup (Spec 3 §3.1) — the cascade is the row half only.
   plant             Plant?             @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  // Skip Permissions: when true, this session's proposals auto-approve. It is per-session and never
+  // global, and it records WHO turned it on and WHEN — an owner-granted standing consent has to be
+  // attributable, not an anonymous flag.
+  skipPermissions            Boolean   @default(false) @map("skip_permissions")
+  skipPermissionsSetByUserId String?   @map("skip_permissions_set_by_user_id")
+  skipPermissionsSetAt       DateTime? @map("skip_permissions_set_at")
+  // The one `[system]` message waiting to be handed to this session's NEXT run. It parks on the session
+  // (not the run) precisely because no run may exist yet when the owner resolves a proposal.
+  pendingSystemMessage           String? @map("pending_system_message") @db.Text
+  pendingSystemMessageProposalId String? @map("pending_system_message_proposal_id")
   createdAt         DateTime           @default(now()) @map("created_at")
   updatedAt         DateTime           @updatedAt @map("updated_at")
   runs              KnowledgeChatRun[]
+  proposals         DoctorWriteProposal[]
 
   @@index([kind, plantId])
   @@index([ownerId])
@@ -461,6 +573,12 @@ model KnowledgeChatRun {
   startedAt     DateTime?              @map("started_at")
   finishedAt    DateTime?              @map("finished_at")
   createdAt     DateTime               @default(now()) @map("created_at")
+  // The `[system]` message THIS run claimed from its session, and what became of it. Claiming moves the
+  // text off the session and onto the run in the SAME transaction that queues the run, so a crash can
+  // never both lose the message and leave it pending.
+  systemMessageText       String?             @map("system_message_text") @db.Text
+  systemMessageProposalId String?             @map("system_message_proposal_id")
+  systemMessageState      SystemMessageState? @map("system_message_state")
   tickets       KnowledgeChatTicket[]
 
   @@unique([sessionId, activeKey])
