@@ -36,7 +36,7 @@ const queued = (text: string, proposalId: string | null = null) => ({
 });
 
 describe('admitRun', () => {
-  it('expires the pending proposal, queues the not-approved nudge, and prefixes it onto the prompt', async () => {
+  it('expires the pending proposal and queues the not-approved nudge in its OWN column', async () => {
     const t = tx();
     const run = await admitRun(t as never, {
       sessionId: 's1',
@@ -47,7 +47,9 @@ describe('admitRun', () => {
       sessionId: 's1',
       status: 'PENDING',
     });
-    expect(run.prompt).toBe(`${SYSTEM_MESSAGE.notApproved}\n\nwhy is it yellow?`);
+    // The nudge no longer touches `prompt` (spec 3.1) — it rides systemMessageText and, on the wire, the
+    // package's out-of-band `systemMessage` field.
+    expect(run.prompt).toBe('why is it yellow?');
     expect(run.systemMessageState).toBe('CONSUMED');
     expect(run.systemMessageText).toBe(SYSTEM_MESSAGE.notApproved);
   });
@@ -89,7 +91,8 @@ describe('admitRun', () => {
       doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
     });
     const run = await admitRun(t as never, { sessionId: 's1', provider: 'claude', input: { prompt: 'hi' } });
-    expect(run.prompt).toBe(`${SYSTEM_MESSAGE.declined}\n\nhi`);
+    expect(run.prompt).toBe('hi');
+    expect(run.systemMessageText).toBe(SYSTEM_MESSAGE.declined);
     expect(run.systemMessageProposalId).toBe('prop-7');
     expect(run.systemMessageState).toBe('CONSUMED');
   });
@@ -109,15 +112,17 @@ describe('admitRun', () => {
     expect(clearing![0].data.pendingSystemMessageProposalId).toBeNull();
   });
 
-  it('carries the message ALONE when the turn has an empty prompt (the decline-triggered turn)', async () => {
+  it('stores a NULL prompt when the turn has an empty prompt (the decline-triggered turn)', async () => {
     // `startQueuedSystemTurn` admits a turn whose entire content IS the queued message, passing prompt:''.
-    // Naively prefixing would persist "<message>\n\n" — a trailing blank the agent receives as content.
+    // The empty string was a sentinel that looked like data — the agent received it as a blank turn. NULL
+    // is what "the user typed nothing" actually means, and 3.0.0 accepts it on the wire.
     const t = tx({
       ...queued(SYSTEM_MESSAGE.declined, 'prop-7'),
       doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
     });
     const run = await admitRun(t as never, { sessionId: 's1', provider: 'claude', input: { prompt: '' } });
-    expect(run.prompt).toBe(SYSTEM_MESSAGE.declined);
+    expect(run.prompt).toBeNull();
+    expect(run.systemMessageText).toBe(SYSTEM_MESSAGE.declined);
   });
 
   it('sets activeKey so the DB enforces one active run per session', async () => {
@@ -138,5 +143,40 @@ describe('admitRun', () => {
       input: { command: { name: 'model', args: '--model opus' } },
     });
     expect(run.commandArgs).toBe('--model opus');
+  });
+});
+
+describe('admitRun prompt composition (3.0.x transport)', () => {
+  it('persists the user text ALONE and the system message in its own column', async () => {
+    // No proposal expires here, so the session's own queued message is the one consumed.
+    const t = tx({
+      doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      ...queued(SYSTEM_MESSAGE.declined, 'p1'),
+    });
+    const run = await admitRun(t as never, {
+      sessionId: 's1',
+      provider: 'claude',
+      input: { prompt: 'How is my fern?' },
+    });
+
+    expect(run.prompt).toBe('How is my fern?');
+    expect(run.systemMessageText).toBe(SYSTEM_MESSAGE.declined);
+    expect(run.systemMessageState).toBe('CONSUMED');
+  });
+
+  it('is byte-identical to the old behaviour when no message is queued (the compatibility anchor)', async () => {
+    const t = tx({
+      doctorWriteProposal: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      ...queued(null as never),
+    });
+    const run = await admitRun(t as never, {
+      sessionId: 's1',
+      provider: 'claude',
+      input: { prompt: 'How is my fern?' },
+    });
+
+    expect(run.prompt).toBe('How is my fern?');
+    expect(run.systemMessageText).toBeNull();
+    expect(run.systemMessageState).toBeNull();
   });
 });

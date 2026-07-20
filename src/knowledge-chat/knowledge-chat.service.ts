@@ -58,7 +58,7 @@ type KnowledgeChatRunRow = {
  * The ordered admission transaction (spec 5.5.4). ONE transaction, in this order:
  *   1. conditionally expire the session's PENDING proposal
  *   2. if that expiry took effect, queue the "still has not approved" nudge
- *   3. consume the queued message and prefix it onto the run's persisted prompt
+ *   3. consume the queued message onto the run row's OWN systemMessageText column — never onto `prompt`
  *      — SKIPPED for a command turn: prompt and command are a strict XOR, and prefixing prose onto a
  *        command corrupts it. The message waits for the next PROMPT turn.
  *   4. insert the run with its activeKey
@@ -105,10 +105,12 @@ export async function admitRun(
     });
   }
 
-  // A decline-triggered turn carries the message ALONE (`startQueuedSystemTurn` passes prompt: ''), so
-  // prefixing unconditionally would persist a trailing blank the agent reads as content.
-  const userText = args.input.command ? null : (args.input.prompt ?? null);
-  const prompt = isCommand ? null : consume ? (userText ? `${queuedText}\n\n${userText}` : queuedText) : userText;
+  // The system message NO LONGER touches the prompt (spec §3.1). It rides its own column here and its own
+  // out-of-band `systemMessage` field on the wire, so `prompt` means exactly "what the user typed" — and a
+  // message-only turn stores NULL rather than the empty string that used to reach the agent as a blank turn.
+  const rawUserText = args.input.command ? null : (args.input.prompt ?? null);
+  const userText = rawUserText === '' ? null : rawUserText;
+  const prompt = isCommand ? null : userText;
 
   return tx.knowledgeChatRun.create({
     data: {

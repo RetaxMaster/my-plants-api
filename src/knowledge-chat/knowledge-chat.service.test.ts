@@ -540,7 +540,7 @@ const doctorSession = (over: Record<string, unknown> = {}) =>
   ({ ...session({ providerSessionId: 'uuid-1' }), kind: 'DOCTOR', plantId: 'A', ownerId: 'O', ...over }) as never as Session;
 
 describe('KnowledgeChatService.startQueuedSystemTurn', () => {
-  it('starts a run whose prompt IS the queued message, and consumes it off the session', async () => {
+  it('starts a run carrying the queued message in its own column, and consumes it off the session', async () => {
     const { svc, run, sessions, runs, engine } = setup({
       sessions: [doctorSession({ pendingSystemMessage: 'The user declined your request.', pendingSystemMessageProposalId: 'prop-1' })],
       runs: [doneRun()],
@@ -550,8 +550,10 @@ describe('KnowledgeChatService.startQueuedSystemTurn', () => {
 
     expect(runId).toBeTruthy();
     const created = runs.get(runId!)!;
-    // Carried ALONE — no trailing blank from a naive prefix onto the empty prompt.
-    expect(created.prompt).toBe('The user declined your request.');
+    // The message rides its OWN column; `prompt` is NULL because the user typed nothing. The empty string
+    // this used to store was a sentinel that reached the agent as a blank turn.
+    expect(created.prompt).toBeNull();
+    expect((created as never as Record<string, unknown>).systemMessageText).toBe('The user declined your request.');
     expect((created as never as Record<string, unknown>).systemMessageState).toBe('CONSUMED');
     expect((created as never as Record<string, unknown>).systemMessageProposalId).toBe('prop-1');
     // At-most-once: it is gone from the session, so a second turn cannot redeliver it.
@@ -589,7 +591,7 @@ describe('KnowledgeChatService.startQueuedSystemTurn', () => {
 });
 
 describe('run admission expires pending proposals (through the real service)', () => {
-  it('a new prompt turn expires the PENDING proposal and prefixes the not-approved nudge', async () => {
+  it('a new prompt turn expires the PENDING proposal and queues the not-approved nudge out of band', async () => {
     // The unit tests drive admitRun directly; this proves the service actually routes through it, which a
     // direct-only test cannot: insertActiveRun could have kept its old inline create and stayed green.
     const { svc, run, runs, proposals, sessions } = setup({
@@ -602,7 +604,10 @@ describe('run admission expires pending proposals (through the real service)', (
 
     expect(proposals.get('prop-1').status).toBe('EXPIRED');
     expect(proposals.get('prop-1').pendingKey).toBeNull(); // or the index blocks every future proposal
-    expect(runs.get(out.runId)!.prompt).toBe('The user still has not approved the request.\n\nwhy is it yellow?');
+    expect(runs.get(out.runId)!.prompt).toBe('why is it yellow?');
+    expect((runs.get(out.runId)! as never as Record<string, unknown>).systemMessageText).toBe(
+      'The user still has not approved the request.',
+    );
     expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBeNull(); // consumed
   });
 
