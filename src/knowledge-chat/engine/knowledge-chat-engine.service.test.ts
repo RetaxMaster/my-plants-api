@@ -154,15 +154,18 @@ describe('upload root construction (spec §4.2, B7)', () => {
       stateDir: join(root, '..', 'state'),
     });
 
-    await service['prepareServer']();
+    try {
+      await service['prepareServer']();
 
-    const st = await stat(root);
-    expect(st.isDirectory()).toBe(true);
-    // "Works on a machine that already has the directory" is exactly the failure this hides — the package
-    // resolves uploadRoot with realpathSync and THROWS if it cannot, so a default under storage/ is not
-    // enough on a fresh checkout.
-    expect(st.mode & 0o077).toBe(0);
-    await rm(root, { recursive: true, force: true });
+      const st = await stat(root);
+      expect(st.isDirectory()).toBe(true);
+      // "Works on a machine that already has the directory" is exactly the failure this hides — the package
+      // resolves uploadRoot with realpathSync and THROWS if it cannot, so a default under storage/ is not
+      // enough on a fresh checkout.
+      expect(st.mode & 0o077).toBe(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('refuses to boot on a GROUP-WRITABLE upload root', async () => {
@@ -179,11 +182,19 @@ describe('upload root construction (spec §4.2, B7)', () => {
       stateDir: join(base, 'state'),
     });
 
-    // This rejects inside createServer(), BEFORE listen() — so no port is ever bound on this path. Note
-    // prepareServer() mkdir's with `recursive: true`, which does NOT re-chmod an existing directory, so
-    // the 0o770 mode set above survives to reach the check.
-    await expect(service['prepareServer']()).rejects.toThrow(/uploadRoot|permission|writable/i);
-    await rm(base, { recursive: true, force: true });
+    try {
+      // This rejects inside createServer(), BEFORE listen() — so no port is ever bound on this path. Note
+      // prepareServer() mkdir's with `recursive: true`, which does NOT re-chmod an existing directory, so
+      // the 0o770 mode set above survives to reach the check.
+      //
+      // The pattern pins the SPECIFIC check. Every uploadRoot rejection the package can raise begins
+      // "[agents-rt] uploadRoot ...", so a loose /uploadRoot|permission|writable/ would pass just as
+      // happily if the ownership check, or "does not exist", fired instead — i.e. it would not actually
+      // discriminate the case this test is named for.
+      await expect(service['prepareServer']()).rejects.toThrow(/must not be writable by group or other/i);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 
   it('refuses to boot on an upload root owned by another OS user', async () => {
@@ -195,7 +206,12 @@ describe('upload root construction (spec §4.2, B7)', () => {
       logDir: join(base, 'logs'),
       stateDir: join(base, 'state'),
     });
-    await expect(service['prepareServer']()).rejects.toThrow();
-    await rm(base, { recursive: true, force: true });
+    try {
+      // Pinned to the ownership message for the same reason as above: a bare `.rejects.toThrow()` proves
+      // only that SOMETHING threw, which /root would satisfy for several unrelated reasons.
+      await expect(service['prepareServer']()).rejects.toThrow(/owned by uid \d+, but the engine runs as uid/i);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
