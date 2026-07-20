@@ -2,8 +2,28 @@ import { readdir, readFile, writeFile, rename, open, rm, stat, chmod } from 'nod
 import { basename, dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
-import { isLegacyLog, scanCanonicalLog, translateLegacyClaudeLog, validateCanonicalLog, type LogExpectation } from '@retaxmaster/agents-realtime-server';
+import { isLegacyLog, promoteLegacySystemMessages, scanCanonicalLog, translateLegacyClaudeLog, validateCanonicalLog, type LogExpectation } from '@retaxmaster/agents-realtime-server';
 import type { AgentProvider, DoneStatus } from '@retaxmaster/agents-realtime-protocol';
+import { splitStoredPrompt } from './legacy-prompt-split.js';
+import { makeRecognizer } from './legacy-system-recognizer.js';
+
+/**
+ * Reader 3 of the MIXED `prompt` column (spec §3.1.1). The rescue SYNTHESIZES `user.prompt` from the
+ * database, so it is the one reader with no live replay to compensate — a dropped system message here is
+ * undetectable, and a doubled one lands in precisely the field this feature exists to clean.
+ *
+ * It applies the same rule the log recognizer applies on the log side, so the two cannot drift.
+ */
+export function resolveRescuedTurnInput(run: {
+  prompt: string | null;
+  systemMessageText: string | null;
+}): { systemMessage: string | null; userMessage: string } {
+  const split = splitStoredPrompt(run.prompt, run.systemMessageText);
+  return {
+    systemMessage: run.systemMessageText ?? null,
+    userMessage: split ? split.userMessage : (run.prompt ?? ''),
+  };
+}
 
 export interface LogIndex {
   adoptExistingLog(entry: { logPath: string; startedAtMs: number; expect: LogExpectation }): void;
@@ -280,15 +300,56 @@ export async function rescueLegacyLogs(prisma: PrismaClient, logDir: string, ind
     const startedAtMs = (run.startedAt ?? run.createdAt).getTime();
     const expect: LogExpectation = { runId, provider: run.provider as AgentProvider, providerSessionId };
 
-    const { canonical, stats } = translateLegacyClaudeLog({
+    const turnInput = resolveRescuedTurnInput(run);
+
+    const { canonical: translated, stats } = translateLegacyClaudeLog({
       legacy: text,
       runId,
       providerSessionId,
+      // THE ORIGINAL STORED PROMPT, STILL CONCATENATED — deliberately not `turnInput.userMessage`.
+      //
+      // The promotion below is what SPLITS it, via the shared recognizer, and the recognizer matches the
+      // CONCATENATED text. Handing the translator the already-split half makes `promoteLegacySystemMessages`
+      // a guaranteed no-op: it finds nothing to claim, promotes zero turns, and the rescued log silently
+      // loses the system message entirely. Measured, not reasoned about — the split half yields
+      // `turnsPromoted: 0` and a log with no `systemMessage`, the concatenated one yields 1 and a log that
+      // carries it. This is the reader with no live replay to compensate, so that drop would be permanent
+      // and undetectable.
       userPrompt: run.prompt,
       startedAtMs,
       status: doneStatus,
       hashUnsupported: sha256,
     });
+
+    // The translator has no systemMessage channel, so a run that consumed one gets its `turn.input` line
+    // promoted through the SAME package function the live path's migration uses — never a hand-rolled
+    // line, or the two would drift into different shapes for the same turn.
+    //
+    // AND THE RECOGNIZER IS THE SHARED ONE (`makeRecognizer`), not an inline closure: the spec requires the
+    // rescue use the same builder the live path uses so the two cannot drift, and a hand-rolled
+    // `recognize:` here would be a second construction of the rule `legacy-prompt-split.ts` exists to own.
+    let canonical = translated;
+    if (turnInput.systemMessage) {
+      const promoted = promoteLegacySystemMessages(translated, {
+        recognize: makeRecognizer({
+          systemMessageText: run.systemMessageText,
+          systemMessageState: run.systemMessageState ?? 'CONSUMED',
+        }),
+      });
+      // FAIL LOUD RATHER THAN WRITE A LOG THAT LOST THE MESSAGE. The run row says this turn carried a
+      // system message; if the recognizer claimed no turn, the rescued log would show the agent answering
+      // a question it was never asked in the form it was asked. Skipping leaves the ORIGINAL legacy file
+      // untouched on disk, which is retryable — writing the lossy log is not.
+      if (promoted.stats.turnsPromoted === 0) {
+        report.skipped.push({
+          runId,
+          reason:
+            'run consumed a system message but the recognizer claimed no turn in its log — refusing to write a log that would drop it',
+        });
+        continue;
+      }
+      canonical = promoted.canonical;
+    }
 
     // VALIDATE BEFORE REPLACING THE ORIGINAL. The engine's reader is FAIL-CLOSED: one unparseable interior
     // line rejects the ENTIRE conversation — a malformed log does not degrade a chat, it BRICKS it. This is

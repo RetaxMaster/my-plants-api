@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, readOwnRunLog, type AgentsRealtimeServer } from '@retaxmaster/agents-realtime-server';
+import { createServer, promoteLegacySystemMessages, readOwnRunLog, translateLegacyClaudeLog, type AgentsRealtimeServer } from '@retaxmaster/agents-realtime-server';
+import { makeRecognizer } from './legacy-system-recognizer.js';
 import type { Orchestrator } from '@retaxmaster/agents-realtime-server';
 import { buildLogIdentity } from '@retaxmaster/agents-realtime-protocol';
-import { rescueLegacyLogs } from './legacy-log-rescue.core.js';
+import { rescueLegacyLogs, resolveRescuedTurnInput } from './legacy-log-rescue.core.js';
 
 // A PRE-1.0 log: raw Claude stream-json, no header line, and — critically — no user prompt and no terminal.
 // Those three facts live only in our DB, which is why the migration REQUIRES them as inputs.
@@ -489,5 +490,106 @@ describe('rescueLegacyLogs — REAL engine durable index (integration)', () => {
     });
     expect(turn.userPrompt).toBe('¿Ya volviste?');
     expect(JSON.stringify(turn.events)).toContain('aquí estoy.');
+  });
+});
+
+/**
+ * Reader 3 of the MIXED `prompt` column (spec §3.1.1).
+ *
+ * Fixture provenance: the marker-prefixed prompts below are the shape the pre-change `admitRun` was
+ * OBSERVED writing against the real database — see the header of `legacy-prompt-split.test.ts`. Using an
+ * unprefixed fixture here would make `not.toContain('[system]')` VACUOUSLY true and let the doubling this
+ * test exists to catch go straight through.
+ */
+describe('the rescue carries the system message exactly once (reader 3)', () => {
+  it('de-concatenates a PRE-change row — one system message, a clean user half, no [system] anywhere', () => {
+    const out = resolveRescuedTurnInput({
+      prompt: '[system] The user declined your request.\n\nHow is my fern?',
+      systemMessageText: 'The user declined your request.',
+    });
+    expect(out).toEqual({ systemMessage: 'The user declined your request.', userMessage: 'How is my fern?' });
+    expect(out.userMessage).not.toContain('[system]');
+    expect(out.userMessage).not.toContain('The user declined your request.');
+  });
+
+  it('de-concatenates the same row before the run row was normalised (marker on both columns)', () => {
+    const out = resolveRescuedTurnInput({
+      prompt: '[system] The user declined your request.\n\nHow is my fern?',
+      systemMessageText: '[system] The user declined your request.',
+    });
+    expect(out.userMessage).toBe('How is my fern?');
+    expect(out.userMessage).not.toContain('[system]');
+  });
+
+  it('handles a PRE-change message-only row', () => {
+    expect(
+      resolveRescuedTurnInput({
+        prompt: '[system] The user declined your request.',
+        systemMessageText: 'The user declined your request.',
+      }),
+    ).toEqual({ systemMessage: 'The user declined your request.', userMessage: '' });
+  });
+
+  it('handles a POST-change row through the same code path', () => {
+    expect(
+      resolveRescuedTurnInput({
+        prompt: 'How is my fern?',
+        systemMessageText: 'The user declined your request.',
+      }),
+    ).toEqual({ systemMessage: 'The user declined your request.', userMessage: 'How is my fern?' });
+  });
+
+  it('leaves a row with no consumed message unchanged', () => {
+    expect(resolveRescuedTurnInput({ prompt: 'How is my fern?', systemMessageText: null })).toEqual({
+      systemMessage: null,
+      userMessage: 'How is my fern?',
+    });
+  });
+});
+
+/**
+ * THE ASSERTION THE UNIT TESTS ABOVE CANNOT MAKE.
+ *
+ * `resolveRescuedTurnInput` returning the right split proves nothing about whether the RESCUED LOG ends up
+ * carrying the system message — and that is the only thing that matters, because the rescue synthesizes the
+ * log from the database and no downstream reader can detect an omission.
+ *
+ * This is not hypothetical. Handing the translator the already-split user half (the obvious reading, and
+ * what the first implementation did) makes the promotion claim ZERO turns and drops the message silently,
+ * while every unit test above stays green. So the promotion is asserted against the package end to end.
+ */
+describe('the rescued log actually CARRIES the promoted system message', () => {
+  const sys = 'The user declined your request.';
+  const legacyLine = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hello' }] } }) + '\n';
+
+  const rescueOne = (userPrompt: string) => {
+    const { canonical } = translateLegacyClaudeLog({
+      legacy: legacyLine,
+      runId: 'r1',
+      providerSessionId: 'uuid-1',
+      userPrompt,
+      startedAtMs: Date.now(),
+      status: 'succeeded',
+      hashUnsupported: () => 'h',
+    });
+    return promoteLegacySystemMessages(canonical, {
+      recognize: makeRecognizer({ systemMessageText: sys, systemMessageState: 'CONSUMED' }),
+    });
+  };
+
+  it('promotes the turn when the translator is fed the ORIGINAL concatenated prompt', () => {
+    const res = rescueOne(`[system] ${sys}\n\nHow is my fern?`);
+    expect(res.stats.turnsPromoted).toBe(1);
+    expect(res.canonical).toContain(sys);
+    // The user half survives, and the marker does not.
+    expect(res.canonical).toContain('How is my fern?');
+    expect(res.canonical).not.toContain('[system]');
+  });
+
+  it('promotes NOTHING when fed the already-split half — the regression this guards against', () => {
+    // Pinned deliberately: if a future refactor "tidies" the rescue by splitting before translating, this
+    // goes red instead of shipping a log that silently lost the host's instruction.
+    const res = rescueOne('How is my fern?');
+    expect(res.stats.turnsPromoted).toBe(0);
   });
 });
