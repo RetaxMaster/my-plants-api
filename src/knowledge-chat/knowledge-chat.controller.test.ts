@@ -35,7 +35,7 @@ describe('KnowledgeChatController', () => {
   it('delegates create → createSession(prompt, provider)', async () => {
     const { svc, ctrl } = setup();
     expect(await ctrl.create({ prompt: 'hi', provider: 'codex' } as any)).toEqual({ sessionId: 's1', runId: 'r1', ticket: 'tk' });
-    expect(svc.createSession).toHaveBeenCalledWith('hi', 'codex', KS);
+    expect(svc.createSession).toHaveBeenCalledWith('hi', 'codex', KS, undefined);
   });
 
   it('proxies provider-status, and only forces a re-probe when asked', async () => {

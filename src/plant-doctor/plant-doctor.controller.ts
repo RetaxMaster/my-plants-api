@@ -41,7 +41,7 @@ export class PlantDoctorController {
   @Post('sessions')
   async create(@Param('id') id: string, @Body() dto: CreateSessionDto) {
     const scope = await this.scopeFor(id);
-    return this.chat.createSession(dto.prompt, dto.provider, scope);
+    return this.chat.createSession(dto.prompt, dto.provider, scope, dto.attachments);
   }
 
   @Get('sessions/:sid')
@@ -61,7 +61,7 @@ export class PlantDoctorController {
     }
     const input = dto.command
       ? { command: { name: dto.command.name, args: dto.command.args } }
-      : { prompt: dto.prompt! };
+      : { prompt: dto.prompt!, attachments: dto.attachments };
     return this.chat.resume(sid, input, dto.provider, await this.scopeFor(id));
   }
 

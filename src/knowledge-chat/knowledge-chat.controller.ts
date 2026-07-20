@@ -47,7 +47,7 @@ export class KnowledgeChatController {
 
   @Post('sessions')
   create(@Body() dto: CreateSessionDto) {
-    return this.chat.createSession(dto.prompt, dto.provider, KNOWLEDGE_SCOPE);
+    return this.chat.createSession(dto.prompt, dto.provider, KNOWLEDGE_SCOPE, dto.attachments);
   }
 
   @Get('sessions/:id')
@@ -67,7 +67,7 @@ export class KnowledgeChatController {
     }
     const input = dto.command
       ? { command: { name: dto.command.name, args: dto.command.args } }
-      : { prompt: dto.prompt! };
+      : { prompt: dto.prompt!, attachments: dto.attachments };
     return this.chat.resume(id, input, dto.provider, KNOWLEDGE_SCOPE);
   }
 

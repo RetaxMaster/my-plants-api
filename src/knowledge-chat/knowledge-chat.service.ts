@@ -15,6 +15,7 @@ import { DoctorRunContextService } from '../plant-doctor/doctor-run-context.serv
 import { resolveEffectiveProvider } from './effective-provider.js';
 import { WORKSPACE_ENV } from './doctor-workspace-env.js';
 import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
+import type { AttachmentDto } from './knowledge-chat.dto.js';
 import { SYSTEM_MESSAGE } from './system-message.js';
 import { splitStoredPrompt } from './legacy-prompt-split.js';
 import { ACTIVE_RUN_STATUSES } from './run-status.js';
@@ -33,7 +34,11 @@ function isHistoryGone(err: unknown): boolean {
 export type KnowledgeChatHistory = SessionHistory & { agentSessionMissing?: boolean };
 
 // What a turn actually carries. The XOR is the contract, and it is the same one the wire and the DB enforce.
-export type TurnInput = { prompt: string; command?: never } | { command: AgentCommand; prompt?: never };
+// Attachments are NOT persisted on the run row (spec §4.1.1 — no column, deliberately): they thread through
+// this in-memory input straight to `launch()`'s extra parameter, never through `admitRun`/`insertActiveRun`.
+export type TurnInput =
+  | { prompt: string; attachments?: AttachmentDto[]; command?: never }
+  | { command: AgentCommand; prompt?: never; attachments?: never };
 
 type SessionKind = 'KNOWLEDGE' | 'DOCTOR';
 
@@ -292,7 +297,7 @@ export class KnowledgeChatService {
     const runId = await this.insertActiveRun(sessionId, provider, input);
     if (!runId) return null;
 
-    await this.launch(runId, provider, session.providerSessionId, kind, session);
+    await this.launch(runId, provider, session.providerSessionId, kind, session, undefined);
     return runId;
   }
 
@@ -343,6 +348,7 @@ export class KnowledgeChatService {
     prompt: string,
     provider: AgentProvider,
     scope: SessionScope,
+    attachments?: AttachmentDto[],
   ): Promise<{ sessionId: string; runId: string; ticket: string }> {
     // Codex gate BEFORE we create anything (isCreate → the create provider is the effective one).
     await this.assertCodexAllowed(scope.kind, resolveEffectiveProvider({ isCreate: true, sealed: false, requestProvider: provider }));
@@ -358,8 +364,8 @@ export class KnowledgeChatService {
         ownerId: scope.kind === 'DOCTOR' ? scope.ownerId : null,
       },
     });
-    const runId = (await this.insertActiveRun(session.id, provider, { prompt }))!;
-    const ticket = await this.launch(runId, provider, null, scope.kind, session);
+    const runId = (await this.insertActiveRun(session.id, provider, { prompt, attachments }))!;
+    const ticket = await this.launch(runId, provider, null, scope.kind, session, attachments);
     return { sessionId: session.id, runId, ticket };
   }
 
@@ -385,7 +391,7 @@ export class KnowledgeChatService {
       }));
       const runId = await this.insertActiveRun(sessionId, retryProvider, input, { onlyWhileUnsealed: true });
       if (runId) {
-        const ticket = await this.launch(runId, retryProvider, null, scope.kind, session);
+        const ticket = await this.launch(runId, retryProvider, null, scope.kind, session, input.attachments);
         return { runId, ticket };
       }
       // Lost the race: a session appeared while we were claiming. Continue it on ITS agent.
@@ -401,7 +407,7 @@ export class KnowledgeChatService {
       isCreate: false, sealed: true, sessionProvider, requestProvider: provider,
     }));
     const runId = (await this.insertActiveRun(sessionId, sessionProvider, input))!;
-    const ticket = await this.launch(runId, sessionProvider, session.providerSessionId!, scope.kind, session);
+    const ticket = await this.launch(runId, sessionProvider, session.providerSessionId!, scope.kind, session, input.attachments);
     return { runId, ticket };
   }
 
@@ -424,6 +430,10 @@ export class KnowledgeChatService {
     resumeSessionId: string | null,
     kind: SessionKind,
     session: { id: string; plantId?: string | null; ownerId?: string | null },
+    // Attachments are the ONE thing that legitimately cannot come from the admitted run row — they are
+    // deliberately not persisted (spec §4.1.1, no column). Everything else `launch()` sends still comes
+    // from the row read below; do NOT widen this into a full `input` parameter (see the note above).
+    attachments: AttachmentDto[] | undefined,
   ): Promise<string> {
     const logPath = this.logPath(kind, runId);
     try {
@@ -492,6 +502,9 @@ export class KnowledgeChatService {
               // Omission is the contract — an absent system message must be ABSENT, never
               // present-and-empty, which the package would read as a sentinel that looks like data.
               ...(row.systemMessageText ? { systemMessage: row.systemMessageText } : {}),
+              // Same omission contract as systemMessage above: an absent attachment list must be ABSENT,
+              // never present-and-empty.
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
               logPath,
               resumeSessionId,
               env: perRunEnv,
