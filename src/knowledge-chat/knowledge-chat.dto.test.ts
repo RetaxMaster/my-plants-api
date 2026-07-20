@@ -101,3 +101,43 @@ describe('API-owned attachment validation (spec §4.1.1)', () => {
     expect(await errorsFor({ command: { name: 'compact', args: '' }, attachments: [validAttachment()] })).not.toEqual([]);
   });
 });
+
+describe('the decoded-size check is EXACT, not an estimate', () => {
+  // Regression guard. The original implementation estimated decoded size as `floor(base64Length*3/4)`,
+  // which rounds a non-multiple-of-3 raw size UP to the next multiple of 3 — so a payload genuinely UNDER
+  // the total cap could be refused as over it. Real image files are not multiples of 3, so this was
+  // reachable by ordinary use, not a contrived edge case. It failed conservatively (never over-accepting),
+  // which is exactly why no security test would ever have caught it.
+  const b64 = (raw: number) => Buffer.alloc(raw, 0x41).toString('base64');
+
+  it('accepts the largest legal set even when no file size is a multiple of 3', async () => {
+    // Six files summing to EXACTLY the 20 MiB total cap, with sizes chosen so five of them are not
+    // multiples of 3. Under the old estimate this set was scored ~10 bytes over and refused.
+    const sizes = [3495251, 3495252, 3495253, 3495254, 3495255, 3495255];
+    const total = sizes.reduce((a, b) => a + b, 0);
+    expect(total).toBe(20 * 1024 * 1024); // the set really is AT the cap, not under it
+
+    const attachments = sizes.map((n, i) => ({
+      id: `x${i}`,
+      filename: `p${i}.png`,
+      mimeType: 'image/png',
+      data: b64(n),
+    }));
+    expect(await errorsFor({ prompt: 'at the cap exactly', attachments })).toEqual([]);
+  });
+
+  it('still refuses a set one byte over the total cap', async () => {
+    // The other side of the boundary — an exact check must not become a permissive one.
+    const sizes = [3495251, 3495252, 3495253, 3495254, 3495255, 3495256];
+    expect(sizes.reduce((a, b) => a + b, 0)).toBe(20 * 1024 * 1024 + 1);
+
+    const attachments = sizes.map((n, i) => ({
+      id: `y${i}`,
+      filename: `p${i}.png`,
+      mimeType: 'image/png',
+      data: b64(n),
+    }));
+    const errors = await errorsFor({ prompt: 'one byte over', attachments });
+    expect(JSON.stringify(errors)).toContain('isValidAttachmentSet');
+  });
+});

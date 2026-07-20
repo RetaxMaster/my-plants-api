@@ -78,12 +78,27 @@ export class IsBase64Payload implements ValidatorConstraintInterface {
   }
 }
 
+/**
+ * The EXACT decoded size of a base64 payload, in bytes.
+ *
+ * `Buffer.byteLength(s, 'base64')` computes this from the string's length and padding WITHOUT allocating
+ * or decoding, so it is cheap enough to run on every attachment of every request.
+ *
+ * The obvious `Math.floor((s.length * 3) / 4)` is NOT equivalent and was a real defect: for a raw size
+ * that is not a multiple of 3, base64 pads to `4*ceil(n/3)`, and that formula rounds the answer UP to the
+ * next multiple of 3. Six attachments of arbitrary real-world sizes could therefore be estimated up to
+ * `maxCount * 2` bytes heavier than they are — enough to refuse a payload that is genuinely UNDER the cap.
+ * It erred toward rejecting rather than over-accepting, so it was never a safety hole, but "your images
+ * are too large" for images that are not is still a lie the owner cannot act on.
+ */
+const decodedBase64Bytes = (s: string): number => Buffer.byteLength(s, 'base64');
+
 @ValidatorConstraint({ name: 'isWithinAttachmentFileBytes' })
 export class IsWithinAttachmentFileBytes implements ValidatorConstraintInterface {
   validate(value: unknown): boolean {
     if (typeof value !== 'string') return false;
     // Decoded size, not the base64 length — the cap is over the image, not over its encoding.
-    return Math.floor((value.length * 3) / 4) <= ATTACHMENT_CAPS.maxFileBytes;
+    return decodedBase64Bytes(value) <= ATTACHMENT_CAPS.maxFileBytes;
   }
   defaultMessage(): string {
     return `each attachment must not exceed ${ATTACHMENT_CAPS.maxFileBytes} bytes`;
@@ -126,7 +141,7 @@ export class IsValidAttachmentSet implements ValidatorConstraintInterface {
     if ((args.object as { command?: unknown }).command !== undefined && items.length > 0) return false;
     const ids = new Set(items.map((i) => i?.id));
     if (ids.size !== items.length) return false;
-    const total = items.reduce((sum, i) => sum + Math.floor(((i?.data?.length ?? 0) * 3) / 4), 0);
+    const total = items.reduce((sum, i) => sum + (typeof i?.data === 'string' ? decodedBase64Bytes(i.data) : 0), 0);
     return total <= ATTACHMENT_CAPS.maxTotalBytes;
   }
   defaultMessage(): string {

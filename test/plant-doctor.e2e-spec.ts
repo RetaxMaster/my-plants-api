@@ -333,7 +333,7 @@ describe('Plant Doctor (e2e)', () => {
     it('accepts the TRUE MAXIMUM legal payload — every cap simultaneously at its limit', async () => {
       // The near-max case above is not the maximum: it sits at 18 of 20 MiB with a short prompt, so it
       // would still pass if the derivation were ~10% too small. This one has no slack in the attachment
-      // dimensions at once — 6 files (the count cap) and ~20 MiB decoded (the total cap) simultaneously.
+      // dimensions at once — 6 files (the count cap) and EXACTLY 20 MiB decoded (the total cap).
       //
       // EMPIRICAL FINDING on the prompt dimension: the plan drafted a prompt near the PROTOCOL's
       // MAX_PROMPT_BYTES ceiling (131072 bytes = 128 KiB — that cap counts the COMPOSED prompt+system-
@@ -346,21 +346,23 @@ describe('Plant Doctor (e2e)', () => {
       // largest prompt our own DTO permits instead of silently shrinking the attachment payload to dodge
       // the mismatch.
       //
-      // SECOND EMPIRICAL FINDING: `IsValidAttachmentSet` does not total the RAW byte count — it re-derives
-      // each file's decoded size from its BASE64 STRING LENGTH (`floor(base64Length*3/4)`), which rounds a
-      // raw size that is not a multiple of 3 UP to the next multiple of 3 (base64 encodes in 3-byte groups).
-      // A naive `floor(20 MiB / 6)` per file is one such non-multiple, and the rounding-up across 6 files
-      // pushed the recomputed total 10 bytes past the 20 MiB cap — refused with a 400, not the 201 this
-      // test asserts. Aligning `perFile` down to the nearest multiple of 3 makes the encode/decode
-      // round-trip exact, so the validator's estimate matches the raw size with zero inflation.
+      // SECOND EMPIRICAL FINDING, since fixed at the root: this test originally failed with a 400 because
+      // `IsValidAttachmentSet` ESTIMATED each file's decoded size as `floor(base64Length*3/4)`, which rounds
+      // a raw size that is not a multiple of 3 UP — inflating a 6-file set by up to 12 bytes and refusing a
+      // payload genuinely under the cap. The tempting fix was to align these sizes down to a multiple of 3
+      // so the estimate happened to come out exact; that would have made the test pass while leaving real
+      // clients (whose images are not multiples of 3) refused early. The validator now measures the exact
+      // decoded length instead, so this test can use sizes that are deliberately NOT multiples of 3 and
+      // land on the cap precisely. See the boundary tests in knowledge-chat.dto.test.ts.
       const rawMax = 20 * 1024 * 1024;
-      const perFileRaw = Math.floor(rawMax / 6);
-      const perFile = perFileRaw - (perFileRaw % 3);
-      const attachments = Array.from({ length: 6 }, (_, i) => ({
+      // Six sizes summing to EXACTLY 20 MiB, five of them not multiples of 3.
+      const sizes = [3495251, 3495252, 3495253, 3495254, 3495255, 3495255];
+      expect(sizes.reduce((a, b) => a + b, 0)).toBe(rawMax);
+      const attachments = sizes.map((n, i) => ({
         id: `m${i}`,
         filename: `photo-${i}.png`,
         mimeType: 'image/png',
-        data: Buffer.alloc(perFile, 0x41).toString('base64'),
+        data: Buffer.alloc(n, 0x41).toString('base64'),
       }));
       const prompt = 'x'.repeat(20_000); // CreateSessionDto's own @MaxLength(20_000) ceiling
 
