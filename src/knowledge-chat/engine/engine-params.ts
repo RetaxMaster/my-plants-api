@@ -12,6 +12,14 @@ export interface EngineParams {
   secret: string;
   logDir: string; // logRoot allow-list + where this engine's run logs live (absolute)
   stateDir: string; // durable runId→logPath index + the codexRolesVerified record (absolute)
+  /**
+   * The engine's `uploadRoot` — where it durably stores attachment bytes under its own TTL (absolute).
+   * MUST EXIST at construction: the package resolves it with realpathSync and THROWS if it cannot, so a
+   * default under storage/ is not enough on a fresh checkout — the service creates it before createServer().
+   * It must also be owned by the engine's OS user and not group/other-writable (B7), or the engine refuses
+   * to boot. Per-engine, never shared: each engine owns its own root.
+   */
+  uploadDir: string;
 }
 
 // DI tokens: two engine instances + two orchestrators are provided under these symbols so the registry and
@@ -30,6 +38,7 @@ export function knowledgeEngineParams(env: Env): EngineParams {
     secret: env.KNOWLEDGE_CHAT_ENGINE_SECRET,
     logDir: env.KNOWLEDGE_CHAT_LOG_DIR,
     stateDir: env.KNOWLEDGE_CHAT_STATE_DIR,
+    uploadDir: env.KNOWLEDGE_CHAT_UPLOAD_DIR,
   };
 }
 
@@ -42,5 +51,6 @@ export function doctorEngineParams(env: Env): EngineParams {
     secret: env.PLANT_DOCTOR_CHAT_ENGINE_SECRET,
     logDir: env.PLANT_DOCTOR_LOG_DIR,
     stateDir: env.PLANT_DOCTOR_STATE_DIR,
+    uploadDir: env.PLANT_DOCTOR_UPLOAD_DIR,
   };
 }

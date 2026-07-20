@@ -20,6 +20,7 @@ const knowledgeParams: EngineParams = {
   secret: 'secret-value',
   logDir: '/var/knowledge-chat/logs',
   stateDir: '/var/knowledge-chat/state',
+  uploadDir: '/var/knowledge-chat/uploads',
 };
 
 // The own-run locator seam: it tells the engine WHICH runs a conversation is made of, so a reopened chat
@@ -84,6 +85,7 @@ describe('buildEngineConfig', () => {
       secret: 's'.repeat(16),
       logDir: '/var/doc-logs',
       stateDir: '/var/doc-state',
+      uploadDir: '/var/doc-uploads',
     };
     const cfg = buildEngineConfig(doctorParams, env, {} as any, locator);
     expect(cfg.port).toBe(8400);

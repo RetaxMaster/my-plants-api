@@ -26,6 +26,7 @@ export default defineConfig({
       // records/logs/workspaces (some carrying live scoped tokens), so pin them OUTSIDE the repo tree — the
       // suite must never pollute (or commit) the working copy.
       KNOWLEDGE_CHAT_STATE_DIR: '/tmp/pd-e2e/knowledge-chat-state',
+      KNOWLEDGE_CHAT_UPLOAD_DIR: '/tmp/pd-e2e/knowledge-chat-uploads',
       // The Plant Doctor engine has the same required-no-default keys; supply dummies and keep it inert
       // (no port binding, no CLI spawn) so EVERY e2e file boots — not just the doctor spec.
       PLANT_DOCTOR_ENGINE_ENABLED: 'false',
@@ -33,6 +34,7 @@ export default defineConfig({
       PLANT_DOCTOR_ENGINE_CWD: '/tmp/plant-doctor-e2e',
       PLANT_DOCTOR_STATE_DIR: '/tmp/pd-e2e/plant-doctor-state',
       PLANT_DOCTOR_LOG_DIR: '/tmp/pd-e2e/plant-doctor-logs',
+      PLANT_DOCTOR_UPLOAD_DIR: '/tmp/pd-e2e/plant-doctor-uploads',
       PLANT_DOCTOR_WORKSPACE_ROOT: '/tmp/pd-e2e/plant-doctor-workspaces',
     },
   },

@@ -20,6 +20,7 @@ const params: EngineParams = {
   secret: 's'.repeat(16),
   logDir: '/tmp/knowledge-chat-test-logs',
   stateDir: '/tmp/knowledge-chat-test-state',
+  uploadDir: '/tmp/knowledge-chat-test-uploads',
 };
 
 describe('KnowledgeChatEngineService (disabled)', () => {

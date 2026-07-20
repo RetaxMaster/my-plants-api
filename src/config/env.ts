@@ -74,6 +74,12 @@ export const envSchema = dbSchema.extend({
   // a tmp dir that a reboot wipes. Kept out of KNOWLEDGE_CHAT_LOG_DIR: that dir is the engine's
   // `logRoot` allow-list, and the index is not a run log.
   KNOWLEDGE_CHAT_STATE_DIR: z.string().min(1).default('storage/knowledge-chat-state').transform((v) => resolve(v)),
+  // The engine's `uploadRoot`: where it durably stores chat image ATTACHMENTS under its own TTL. ABSOLUTE
+  // for the same reason as the dirs above, and created at boot with mode 0700 — the engine REFUSES TO
+  // CONSTRUCT if it does not exist, is group/other-writable, or is not owned by the engine's OS user (B7),
+  // so a misconfigured directory fails the deploy loudly instead of at request time. Never /tmp: a
+  // world-writable dir fails the mode check by construction.
+  KNOWLEDGE_CHAT_UPLOAD_DIR: z.string().min(1).default('storage/knowledge-chat-uploads').transform((v) => resolve(v)),
   KNOWLEDGE_ENGINE_CWD: z.string().min(1), // required — isolated knowledge-engine checkout
   CLAUDE_BIN: z.string().min(1).default('claude'),
   CODEX_BIN: z.string().min(1).default('codex'),
@@ -120,6 +126,9 @@ export const envSchema = dbSchema.extend({
   PLANT_DOCTOR_LOG_DIR: z.string().min(1).default('storage/plant-doctor').transform((v) => resolve(v)),
   // The doctor engine's DURABLE run index + the codexRolesVerified record. Persistent, ABSOLUTE.
   PLANT_DOCTOR_STATE_DIR: z.string().min(1).default('storage/plant-doctor-state').transform((v) => resolve(v)),
+  // The doctor engine's `uploadRoot` — same rules as KNOWLEDGE_CHAT_UPLOAD_DIR, and deliberately a
+  // SEPARATE directory: each engine owns its own upload root, never a shared one.
+  PLANT_DOCTOR_UPLOAD_DIR: z.string().min(1).default('storage/plant-doctor-uploads').transform((v) => resolve(v)),
   // Per-session isolated workspaces (each holds a doctor-context.json + scoped token). Persistent and,
   // in prod, OUTSIDE the deploy/build tree so a deploy never wipes an in-flight diagnosis. ABSOLUTE.
   PLANT_DOCTOR_WORKSPACE_ROOT: z.string().min(1).default('storage/plant-doctor-workspaces').transform((v) => resolve(v)),
