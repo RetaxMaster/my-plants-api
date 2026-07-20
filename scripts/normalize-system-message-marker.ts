@@ -18,10 +18,22 @@
 //   3. THEN run this script with `--after-survey`:
 //        npm run migrate:normalize-system-marker -- --after-survey
 //      Omitting the flag is a hard refusal — no row is read for update and nothing is written.
-//   4. This script IS IDEMPOTENT. `strip()` in the core module only rewrites a value that still carries
+//   4. CONCURRENCY: this script is now SAFE TO RUN AGAINST A LIVE API — unlike its two siblings
+//      (promote-legacy-system-messages.ts, rescue-legacy-logs.ts), it does NOT need the API/engines
+//      stopped. `KnowledgeChatRun.systemMessageText` is write-once (set exactly once inside `admitRun`'s
+//      `.create()`, never `.update()`d anywhere — verified by a full-repo grep) so a plain unconditional
+//      write is safe: there is no in-place row to race. `KnowledgeChatSession.pendingSystemMessage` is an
+//      ACTIVE MAILBOX SLOT that live traffic writes concurrently (claimed by `admitRun`, restored by
+//      `transitionConsumed`, queued by proposal decline/failure paths), so every write to it here is a
+//      COMPARE-AND-SWAP guarded by the exact value this pass read (mirroring the idiom
+//      `system-message-delivery.ts` already uses for the same column). Losing that race is not treated as
+//      a failure: the row is left untouched and reported as a named skip, and a later re-run (this script
+//      is idempotent — see point 5) picks up whatever state it settles into. See the big comments in
+//      `normalize-system-message-marker.core.ts` above each loop for the full reasoning.
+//   5. This script IS IDEMPOTENT. `strip()` in the core module only rewrites a value that still carries
 //      the prefix, so a second (or Nth) run reports zero updates and changes nothing on disk. Re-running
-//      it after a partial failure, or just to double-check, is always safe.
-//   5. `KnowledgeChatRun.prompt` is DELIBERATELY NEVER REWRITTEN by this script. Only
+//      it after a partial failure, a skipped race, or just to double-check, is always safe.
+//   6. `KnowledgeChatRun.prompt` is DELIBERATELY NEVER REWRITTEN by this script. Only
 //      `KnowledgeChatRun.systemMessageText` and `KnowledgeChatSession.pendingSystemMessage` are touched.
 //      This is why the `prompt` column is permanently MIXED after this runs (some rows still carry the
 //      marker inside their concatenated prompt, some never had it) — see
@@ -66,14 +78,37 @@ async function main(): Promise<void> {
       updateRun: async (id, value) => {
         await prisma.knowledgeChatRun.update({ where: { id }, data: { systemMessageText: value } });
       },
-      updateSession: async (id, value) => {
-        await prisma.knowledgeChatSession.update({ where: { id }, data: { pendingSystemMessage: value } });
+      // COMPARE-AND-SWAP: the WHERE clause re-asserts the exact value this pass read, in the same idiom as
+      // `system-message-delivery.ts`'s `updateMany ... where pendingSystemMessage: null`. `count === 1`
+      // means the write landed on the row unchanged since the read; `count === 0` means something else
+      // (a concurrent claim, restore, or fresh queue) reached it first, so this pass MUST NOT overwrite
+      // whatever is there now.
+      updateSessionIfUnchanged: async (id, from, to) => {
+        const res = await prisma.knowledgeChatSession.updateMany({
+          where: { id, pendingSystemMessage: from },
+          data: { pendingSystemMessage: to },
+        });
+        return res.count === 1;
       },
       surveyCompleted: afterSurvey,
+      // Per-row progress, printed AS EACH ROW LANDS — not batched behind the final summary — so an
+      // operator recovering from a run that throws partway through still has a paper trail of what already
+      // committed. Mirrors `Promoted ${path}` in promote-legacy-system-messages.ts and the per-run outcome
+      // logging in rescue-legacy-logs.ts.
+      onRunUpdated: (id) => console.log(`  run ${id}: systemMessageText normalised`),
+      onSessionUpdated: (id) => console.log(`  session ${id}: pendingSystemMessage normalised`),
+      onSessionSkipped: (id, reason) => console.warn(`  SKIPPED session ${id}: ${reason}`),
     });
 
     console.log(`Normalised ${result.runsUpdated} KnowledgeChatRun.systemMessageText row(s).`);
     console.log(`Normalised ${result.sessionsUpdated} KnowledgeChatSession.pendingSystemMessage row(s).`);
+    if (result.sessionsSkipped.length > 0) {
+      console.warn(
+        `${result.sessionsSkipped.length} session row(s) were SKIPPED (lost the CAS race) — re-run this ` +
+        `script to pick them up once traffic settles, or leave them: a value written by post-change code ` +
+        `carries no marker and needs no further handling.`,
+      );
+    }
     console.log('KnowledgeChatRun.prompt was NOT touched (deliberate — see this file\'s header comment).');
   } finally {
     await prisma.$disconnect();
