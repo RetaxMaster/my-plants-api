@@ -215,3 +215,68 @@ describe('upload root construction (spec §4.2, B7)', () => {
     }
   });
 });
+
+describe('execute() failure mapping (spec §7)', () => {
+  /**
+   * The WIRING test. `mapEngineFailure` is tested exhaustively in engine-error.test.ts, but that proves
+   * the pure function, not that `execute()` actually calls it — the branch that turns a real non-OK
+   * `/execute` response into our typed exception is its own claim, and without this it is only exercised
+   * implicitly. It also pins the two properties that must hold at the boundary: the engine's prose is
+   * LOGGED IN FULL server-side, and NOTHING but our code and the status crosses to the caller.
+   */
+  function makeServiceWithLogger() {
+    const service = makeRunningEngineServiceForTest();
+    const logged: string[] = [];
+    // `Object.create` does not run instance-field initialisers, so `this.logger` is undefined on the
+    // reach-in helper. Supplying a spy is what makes the log assertion observable at all.
+    Object.assign(service, { logger: { error: (m: string) => logged.push(m), log: () => {}, warn: () => {} } });
+    return { service, logged };
+  }
+
+  it('throws our typed exception carrying the mapped code, not a generic Error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 413,
+        text: async () => JSON.stringify({ error: 'attachment exceeds the per-file limit of 10485760 bytes' }),
+      }) as unknown as Response),
+    );
+    const { service } = makeServiceWithLogger();
+
+    await expect(
+      service.execute({ runId: 'r', provider: 'claude', prompt: 'x', logPath: '/tmp/r.ndjson', resumeSessionId: null }),
+    ).rejects.toMatchObject({ mapped: { code: 'attachment_too_large', status: 413 } });
+    vi.unstubAllGlobals();
+  });
+
+  it('LOGS the engine prose server-side but never puts it in the exception the client sees', async () => {
+    // `detail` is a raw Error.message that can carry an ABSOLUTE SERVER PATH, and the event-stream
+    // redaction does not touch these HTTP bodies. Surfacing a real cause must not become a disclosure of
+    // the deployment's directory layout.
+    const body = JSON.stringify({
+      error: 'attachment write failed',
+      detail: '/srv/myplants/apps/my-plants/storage/plant-doctor-uploads/x.png',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 422, text: async () => body }) as unknown as Response));
+    const { service, logged } = makeServiceWithLogger();
+
+    const err = await service
+      .execute({ runId: 'r2', provider: 'claude', prompt: 'x', logPath: '/tmp/r2.ndjson', resumeSessionId: null })
+      .catch((e: unknown) => e);
+
+    expect(logged.join('\n')).toContain('/srv/myplants');
+    expect(JSON.stringify((err as { getResponse(): unknown }).getResponse())).toBe('{"code":"attachment_write_failed"}');
+    vi.unstubAllGlobals();
+  });
+
+  it('does not throw on a non-JSON error body — it degrades to the neutral code', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 502, text: async () => '<html>bad gateway</html>' }) as unknown as Response));
+    const { service } = makeServiceWithLogger();
+
+    await expect(
+      service.execute({ runId: 'r3', provider: 'claude', prompt: 'x', logPath: '/tmp/r3.ndjson', resumeSessionId: null }),
+    ).rejects.toMatchObject({ mapped: { code: 'request_failed', status: 502 } });
+    vi.unstubAllGlobals();
+  });
+});
