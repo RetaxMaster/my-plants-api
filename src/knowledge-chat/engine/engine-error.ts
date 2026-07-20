@@ -80,7 +80,9 @@ export function mapEngineFailure(status: number, body: unknown): MappedEngineFai
       : '';
 
   for (const rule of PREFIX_RULES) {
-    if (rule.status === status && prose.startsWith(rule.prefix)) return { code: rule.code, status };
+    // Normalise the rule side too, so "every prefix must be authored lowercase" is enforced structurally
+    // rather than by a convention a future rule could quietly break.
+    if (rule.status === status && prose.startsWith(rule.prefix.toLowerCase())) return { code: rule.code, status };
   }
   return { code: NEUTRAL_BY_STATUS[status] ?? 'request_failed', status };
 }

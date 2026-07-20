@@ -31,12 +31,20 @@ export function classifyLaunchFailure(err: unknown): LaunchFailureClass {
   // A mapped engine failure is a CONFIRMED refusal: /execute answered before spawning anything, so the
   // queued message is provably still undelivered and must be restored. Only 4xx qualifies — a 5xx may have
   // been returned after the run already spawned, which is exactly the AMBIGUOUS case the protocol defaults
-  // to. Keep this ahead of the legacy message-string checks; the generic Error path no longer fires for
-  // /execute failures at all.
+  // to.
+  //
+  // BE PRECISE ABOUT WHAT THIS BRANCH DOES AND DOES NOT REPLACE. `EngineFailureException` extends
+  // `HttpException`, which sets a numeric `.status` own property, so the generic status check below would
+  // already classify these identically — this branch is kept for explicitness about the one error type we
+  // mint ourselves, NOT because the generic check stopped working. Everything else below is still live and
+  // must not be removed as "dead": in particular, a `fetch()` that never gets a response at all (the engine
+  // is down mid-deploy) rejects with `ECONNREFUSED`/`ENOTFOUND` and never becomes an
+  // `EngineFailureException` — that is a genuine pre-spawn proof this function would otherwise lose.
   if (err instanceof EngineFailureException) {
     return err.mapped.status >= 400 && err.mapped.status < 500 ? 'PRE_SPAWN' : 'AMBIGUOUS';
   }
   const e = (err ?? {}) as { code?: string; status?: number };
+  // No response was ever received, so the request provably never reached a spawned process.
   if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') return 'PRE_SPAWN';
   // A 4xx is the engine itself rejecting the request — it parsed it and declined, so no run was spawned.
   if (typeof e.status === 'number' && e.status >= 400 && e.status < 500) return 'PRE_SPAWN';
