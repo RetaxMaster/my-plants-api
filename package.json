@@ -20,7 +20,8 @@
     "user:create": "tsx scripts/create-user.ts",
     "user:list": "tsx scripts/list-users.ts",
     "knowledge-chat:rescue-logs": "tsx scripts/rescue-legacy-logs.ts",
-    "migrate:promote-system-messages": "tsx scripts/promote-legacy-system-messages.ts"
+    "migrate:promote-system-messages": "tsx scripts/promote-legacy-system-messages.ts",
+    "migrate:normalize-system-marker": "tsx scripts/normalize-system-message-marker.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1079.0",
