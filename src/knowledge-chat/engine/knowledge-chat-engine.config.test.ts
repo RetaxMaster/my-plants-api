@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildEngineConfig, KNOWLEDGE_ENGINE_CLAUDE_ARGS } from './knowledge-chat-engine.config.js';
+import { ATTACHMENT_CAPS, UPLOAD_TTL_MS } from './body-limit.js';
 import type { EngineParams } from './engine-params.js';
 
 // Shared knobs only (bins, sandbox, timeouts, CORS) now come from env; the per-engine facts come from params.
@@ -26,6 +27,9 @@ const knowledgeParams: EngineParams = {
 // The own-run locator seam: it tells the engine WHICH runs a conversation is made of, so a reopened chat
 // is rebuilt from our own canonical logs.
 const locator = { runsForSession: async () => [] };
+
+/** The knowledge params with any per-test override applied — so a test can vary ONE fact and no more. */
+const paramsFixture = (overrides: Partial<EngineParams> = {}): EngineParams => ({ ...knowledgeParams, ...overrides });
 
 describe('buildEngineConfig', () => {
   it('maps params + env + orchestrator to the createServer config (127.0.0.1, cors, timeouts)', () => {
@@ -94,5 +98,31 @@ describe('buildEngineConfig', () => {
     expect(cfg.stateDir).toBe('/var/doc-state');
     expect(cfg.providers.claude?.cwd).toBe('/srv/doctor');
     expect(cfg.providers.codex?.cwd).toBe('/srv/doctor');
+  });
+});
+
+describe('attachment configuration (spec §4.2)', () => {
+  it('passes the SINGLE cap declaration through to the engine, never a second copy', () => {
+    const config = buildEngineConfig(paramsFixture({ uploadDir: '/tmp/uploads-x' }), env, {} as any, locator);
+
+    expect(config.uploadRoot).toBe('/tmp/uploads-x');
+    expect(config.uploadMaxCount).toBe(ATTACHMENT_CAPS.maxCount);
+    expect(config.uploadMaxFileBytes).toBe(ATTACHMENT_CAPS.maxFileBytes);
+    expect(config.uploadMaxTotalBytes).toBe(ATTACHMENT_CAPS.maxTotalBytes);
+    expect(config.uploadTtlMs).toBe(UPLOAD_TTL_MS);
+  });
+
+  it('leaves bodyLimitBytes at the package default so construction VALIDATES it against our caps', () => {
+    // The engine's own limit is a fixed 32 MiB that the package validates against the configured caps and
+    // rejects at construction if it does not cover them. That construction-time throw is the desired
+    // failure direction, and the reason we do not need to match its arithmetic exactly.
+    const config = buildEngineConfig(paramsFixture({ uploadDir: '/tmp/uploads-x' }), env, {} as any, locator);
+    expect(config.bodyLimitBytes).toBeUndefined();
+  });
+
+  it('uses a per-engine upload root, so the two engines never share one', () => {
+    const ke = buildEngineConfig(paramsFixture({ uploadDir: '/tmp/ke-up' }), env, {} as any, locator);
+    const pd = buildEngineConfig(paramsFixture({ uploadDir: '/tmp/pd-up' }), env, {} as any, locator);
+    expect(ke.uploadRoot).not.toBe(pd.uploadRoot);
   });
 });

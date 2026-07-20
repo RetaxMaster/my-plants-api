@@ -6,6 +6,7 @@ import type {
 } from '@retaxmaster/agents-realtime-server';
 import type { Env } from '../../config/env.js';
 import type { EngineParams } from './engine-params.js';
+import { ATTACHMENT_CAPS, UPLOAD_TTL_MS } from './body-limit.js';
 
 // Non-interactive, stream-json NDJSON — the Claude ADAPTER parses exactly this shape and translates it
 // into canonical AgentEvents. `-p` reads the prompt from stdin (fed by the runner); --verbose is
@@ -71,6 +72,22 @@ export function buildEngineConfig(
     // Lets the engine recognize the runs WE executed for a session, so reopening a conversation rebuilds
     // it from our OWN canonical logs (rich tool cards + diffs) instead of a poorer native re-read.
     ownRunLocator,
+    // Attachments (spec §4.2). The caps come from the ONE declaration in body-limit.ts, which also derives
+    // our Nest body limit — so the API and the engine can never disagree about what is acceptable.
+    //
+    // `uploadRoot` is per-engine and must EXIST, be owned by the engine's OS user and not be
+    // group/other-writable, or createServer() throws (B7). The service creates it with mode 0700 before
+    // constructing, so a misconfigured directory fails the deploy loudly rather than at 3am.
+    uploadRoot: params.uploadDir,
+    uploadMaxCount: ATTACHMENT_CAPS.maxCount,
+    uploadMaxFileBytes: ATTACHMENT_CAPS.maxFileBytes,
+    uploadMaxTotalBytes: ATTACHMENT_CAPS.maxTotalBytes,
+    // How long the AGENT can re-examine an earlier image. The browser is unaffected: a restored attachment
+    // renders as a filename and an icon regardless (spec §4.3).
+    uploadTtlMs: UPLOAD_TTL_MS,
+    // bodyLimitBytes is DELIBERATELY not set. The package default (32 MiB) is validated against the caps
+    // above at construction and throws if it does not cover them — which is the failure direction we want.
+    //
     // onRun intentionally omitted: no system-prompt injection — each checkout's own CLAUDE.md / AGENTS.md
     // steers whichever agent runs.
   };

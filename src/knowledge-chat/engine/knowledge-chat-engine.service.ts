@@ -102,19 +102,40 @@ export class KnowledgeChatEngineService implements ChatEngine, OnModuleInit, OnM
     return `http://127.0.0.1:${port}`;
   }
 
+  /**
+   * Everything that must happen BEFORE the engine can listen: the directory preconditions, then
+   * construction.
+   *
+   * Split out of `onModuleInit` deliberately, because construction is a separately testable claim and
+   * `listen()` is not: binding a real port is something NO test in this repo does, and a boot test that
+   * ran the whole of onModuleInit would leave a listening socket open — passing locally and then failing
+   * elsewhere with EADDRINUSE against the running dev API, or hanging vitest, for a reason nobody
+   * connects back to the test. `createServer()` validates its config but binds nothing, so pointing the
+   * boot tests HERE exercises the real construction path with no socket involved.
+   */
+  private async prepareServer(): Promise<AgentsRealtimeServer> {
+    // All three dirs are engine preconditions: logDir is the `logRoot` allow-list a run log must live
+    // under, stateDir holds the durable run index. createServer creates the first two itself, but we own
+    // them here too so a fresh checkout boots with no manual setup.
+    await mkdir(this.params.logDir, { recursive: true });
+    await mkdir(this.params.stateDir, { recursive: true });
+    // The upload root MUST EXIST before createServer(): the package resolves it with realpathSync and
+    // throws if it cannot, so a default under storage/ is not enough on a fresh checkout. Mode 0700 also
+    // satisfies B7 up front — the engine refuses to boot on a group/other-writable root or one owned by
+    // another OS user — so a misconfigured directory fails the deploy loudly at construction rather than
+    // at 3am on the first attachment.
+    await mkdir(this.params.uploadDir, { recursive: true, mode: 0o700 });
+    return createServer(buildEngineConfig(this.params, this.env, this.orchestrator, this.orchestrator));
+  }
+
   async onModuleInit(): Promise<void> {
     if (!this.params.enabled) {
       this.logger.warn(`Chat engine [${this.params.kind}] disabled — not listening.`);
       return;
     }
-    // Both dirs are engine preconditions: logDir is the `logRoot` allow-list a run log must live under,
-    // stateDir holds the durable run index. createServer creates them itself, but we own them here too so
-    // a fresh checkout boots with no manual setup.
-    await mkdir(this.params.logDir, { recursive: true });
-    await mkdir(this.params.stateDir, { recursive: true });
     // The orchestrator is BOTH the host-backend seam and the own-run locator (it is the only thing that
     // knows which runs belong to which conversation).
-    this.server = createServer(buildEngineConfig(this.params, this.env, this.orchestrator, this.orchestrator));
+    this.server = await this.prepareServer();
     // Close the construction cycle: the orchestrator can only claim a run as "ours" if the engine can
     // resolve its log — which it can only answer once it exists. See runsForSession.
     this.orchestrator.setRunLogResolver(this.server.runLogResolver);
