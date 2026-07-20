@@ -16,10 +16,12 @@ import { acquireEngineLock } from './lib/acquire-engine-port-lock.js';
 
 // The lock's TOCTOU reasoning + EADDRINUSE-only signal now live once, in acquireEngineLock — shared with
 // promote-legacy-system-messages.ts rather than forked (see that helper's own header comment).
+// No trailing "...and re-run this script" here — acquireEngineLock's own message already ends with that
+// CTA, so this description supplies only the diagnostic + the prod-specific stop command, once.
 const KNOWLEDGE_CHAT_ENGINE_ALREADY_UP =
   'the knowledge-chat engine (embedded in the API process) — or another copy of this script — is up. ' +
   'The durable run index has exactly one writer, so running now would corrupt it. Stop the API first ' +
-  '(in production: `pm2 stop my-plants-api`) and re-run this script.';
+  '(in production: `pm2 stop my-plants-api`).';
 
 async function main() {
   const env = loadEnv();

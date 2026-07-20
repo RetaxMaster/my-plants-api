@@ -1,5 +1,5 @@
 import { basename, join } from 'node:path';
-import { promoteLegacySystemMessages } from '@retaxmaster/agents-realtime-server';
+import { promoteLegacySystemMessages, scanCanonicalLog, validateCanonicalLog, type LogExpectation } from '@retaxmaster/agents-realtime-server';
 import { makeRecognizer } from './legacy-system-recognizer.js';
 
 // Everything `makeRecognizer` needs from a run row. Deliberately NOT the whole Prisma row, and deliberately
@@ -45,6 +45,16 @@ export interface RootSurveyCount {
   rescuedMatches: number;
 }
 
+// A file that promoted at least one turn but is NOT recorded as a match — either its replacement failed
+// structural validation, or the original log did not carry enough of its own identity to validate against
+// in the first place. Surfaced loudly rather than silently folded into "no match": this is the one place
+// a real defect (in the recognizer, in `promoteLegacySystemMessages`, or in a malformed source file) would
+// show up before it ever reaches disk.
+export interface SkippedFile {
+  path: string;
+  reason: string;
+}
+
 export interface Survey {
   logRoots: string[];
   matches: SurveyMatch[];
@@ -52,6 +62,32 @@ export interface Survey {
   rescuedMatches: number;
   filesScanned: number;
   perRoot: RootSurveyCount[];
+  skipped: SkippedFile[];
+}
+
+// Build the identity `validateCanonicalLog` checks the REPLACEMENT against, from the ORIGINAL file's own
+// header + session.started — never from a second, independently-sourced identity. The replacement must
+// describe the SAME run the original already did (promotion only splices a `turn.input` line after an
+// existing `user.prompt`; it never touches the header or any session line), so self-consistency is exactly
+// the right bar: "did splicing in the turn.input corrupt the file", not "does this match some external
+// record". A log with no `session.started` at all, or with more than one DISTINCT provider session id,
+// carries no single authoritative identity to validate against, so it is refused rather than guessed at.
+function buildSelfExpectation(runId: string, originalText: string): { ok: true; expectation: LogExpectation } | { ok: false; reason: string } {
+  const scan = scanCanonicalLog(originalText);
+  if (!scan.ok) {
+    return { ok: false, reason: `cannot validate replacement: original log failed to scan: ${scan.reason}` };
+  }
+  const distinctSessionIds = new Set(scan.sessionIds);
+  if (distinctSessionIds.size === 0) {
+    return { ok: false, reason: 'cannot validate replacement: original log carries no session.started to anchor the validation expectation' };
+  }
+  if (distinctSessionIds.size > 1) {
+    return { ok: false, reason: `cannot validate replacement: original log carries ${distinctSessionIds.size} distinct session ids — refusing to guess which is authoritative` };
+  }
+  return {
+    ok: true,
+    expectation: { runId, provider: scan.header.provider, providerSessionId: [...distinctSessionIds][0] },
+  };
 }
 
 /**
@@ -59,7 +95,16 @@ export interface Survey {
  * the run id from the filename (a run's log path is `${logDir}/${runId}.ndjson`), loads that run's
  * consumed-system-message facts, builds the recognizer with `makeRecognizer` — the ONE recognizer
  * implementation, never a second one — and runs `promoteLegacySystemMessages` IN MEMORY. It records
- * `{ path, replacement, promoted }` only when `stats.turnsPromoted > 0`; nothing on disk is touched.
+ * `{ path, replacement, promoted }` only when `stats.turnsPromoted > 0` AND the replacement passes
+ * `validateCanonicalLog` against an identity self-derived from the ORIGINAL file (see
+ * `buildSelfExpectation`); nothing on disk is touched either way.
+ *
+ * Validating here, not after the write, is the whole point of surveying first: the engine's log reader is
+ * FAIL-CLOSED (one malformed interior line rejects the entire conversation, the same reasoning
+ * `legacy-log-rescue.core.ts` documents at its own `validateCanonicalLog` call), so a bad replacement does
+ * not degrade a chat, it BRICKS it — and the survey is the one moment that failure is still cheap. A
+ * promoted-but-invalid file is never silently dropped either: it is recorded in `skipped` with a named
+ * reason, so an operator sees it instead of a quiet, unexplained gap between "promotable" and "promoted".
  *
  * `turnsPromoted: 0` on every file is ALSO what a successful RE-RUN of the real promotion looks like — the
  * package skips any `user.prompt` whose next line already contains `turn.input`. So an all-zero survey does
@@ -69,6 +114,7 @@ export interface Survey {
  */
 export async function surveyLogRoots(deps: SurveyDeps): Promise<Survey> {
   const matches: SurveyMatch[] = [];
+  const skipped: SkippedFile[] = [];
   const perRoot: RootSurveyCount[] = [];
   let filesScanned = 0;
 
@@ -89,12 +135,24 @@ export async function surveyLogRoots(deps: SurveyDeps): Promise<Survey> {
       const recognize = makeRecognizer(run);
       const { canonical, stats } = promoteLegacySystemMessages(text, { recognize });
 
-      if (stats.turnsPromoted > 0) {
-        const rescued = deps.isRescuedLog(text);
-        matches.push({ root, path, replacement: canonical, promoted: stats.turnsPromoted, rescued });
-        rootMatches++;
-        if (rescued) rootRescued++;
+      if (stats.turnsPromoted === 0) continue;
+
+      const selfExpectation = buildSelfExpectation(runId, text);
+      if (!selfExpectation.ok) {
+        skipped.push({ path, reason: selfExpectation.reason });
+        continue;
       }
+
+      const verdict = validateCanonicalLog(canonical, selfExpectation.expectation);
+      if (!verdict.ok) {
+        skipped.push({ path, reason: `replacement failed validation: ${verdict.reasons.join('; ')}` });
+        continue;
+      }
+
+      const rescued = deps.isRescuedLog(text);
+      matches.push({ root, path, replacement: canonical, promoted: stats.turnsPromoted, rescued });
+      rootMatches++;
+      if (rescued) rootRescued++;
     }
 
     filesScanned += rootFilesScanned;
@@ -108,10 +166,16 @@ export async function surveyLogRoots(deps: SurveyDeps): Promise<Survey> {
     rescuedMatches: matches.filter((m) => m.rescued).length,
     filesScanned,
     perRoot,
+    skipped,
   };
 }
 
 export interface PromotionDeps {
+  // NEITHER of these actually stops a process. The real driver implements them as a VERIFICATION that the
+  // API / the engines are already down (a TCP port-lock refusal — see acquire-engine-port-lock.ts), on the
+  // assumption an operator has already run the real stop (e.g. `pm2 stop my-plants-api`) beforehand. This
+  // module only guarantees WHEN they are called (before any backup or write), never that calling them has
+  // any side effect on a running process.
   stopApi: () => Promise<void> | void;
   stopEngines: () => Promise<void> | void;
   // Called once per log root (BOTH, never just the one that matched) — the precondition is "the corpus is

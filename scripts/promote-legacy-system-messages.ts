@@ -5,8 +5,9 @@
 // "already applied" apart from "there was never anything to apply". This script therefore ALWAYS surveys
 // first and only ever writes when both (a) the survey found something AND (b) `--apply` was passed.
 import '../src/config/load-env-file.js';
-import { readdir, readFile, cp, mkdir } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { readdir, readFile, cp, mkdir, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { basename, dirname, join, relative } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { scanCanonicalLog } from '@retaxmaster/agents-realtime-server';
 import { loadEnv } from '../src/config/env.js';
@@ -25,11 +26,66 @@ function isRescuedLog(text: string): boolean {
   return scan.ok && !scan.sawIdentity && scan.sawSessionStarted;
 }
 
+async function listFilesRecursive(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listFilesRecursive(full)));
+    } else if (entry.isFile()) {
+      files.push(full);
+    }
+  }
+  return files;
+}
+
+async function sha256OfFile(path: string): Promise<string> {
+  const bytes = await readFile(path);
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+// The backup is the ONLY rollback net once files start getting rewritten below — a bare `cp` gives zero
+// signal if it silently under-copies, and by the time the operator actually needs the backup, the sole
+// other copy has already been overwritten. So this is a COPY-THEN-VERIFY: every source file must exist at
+// its destination counterpart with a MATCHING CONTENT HASH (not just a size — the corpus here is tiny
+// NDJSON transcripts, so a full hash costs nothing and catches a same-size corruption a size check would
+// miss), and the file COUNT must match too (catching a silently dropped file a per-file loop alone would
+// never notice). Any mismatch throws BEFORE `promoteSurveyedMatches` ever reaches the write loop — this
+// runs for every root before any file is rewritten.
 async function backupLogDir(root: string): Promise<string> {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = join(process.cwd(), 'storage', 'promote-legacy-system-messages-backups', stamp, basename(root));
   await mkdir(dirname(dest), { recursive: true });
   await cp(root, dest, { recursive: true });
+
+  const sourceFiles = await listFilesRecursive(root);
+  for (const file of sourceFiles) {
+    const rel = relative(root, file);
+    const destFile = join(dest, rel);
+    const destStat = await stat(destFile).catch(() => null);
+    if (!destStat) {
+      throw new Error(
+        `Backup verification FAILED: ${destFile} is missing from the backup of ${root} -> ${dest}. ` +
+        `Refusing to proceed — no file has been rewritten.`,
+      );
+    }
+    const [sourceHash, destHash] = await Promise.all([sha256OfFile(file), sha256OfFile(destFile)]);
+    if (sourceHash !== destHash) {
+      throw new Error(
+        `Backup verification FAILED: ${destFile} content hash does not match its source ${file} ` +
+        `(backup of ${root} -> ${dest}). Refusing to proceed — no file has been rewritten.`,
+      );
+    }
+  }
+  const destFileCount = (await listFilesRecursive(dest)).length;
+  if (destFileCount !== sourceFiles.length) {
+    throw new Error(
+      `Backup verification FAILED: source ${root} has ${sourceFiles.length} file(s) but backup ${dest} has ` +
+      `${destFileCount} — refusing to proceed. No file has been rewritten.`,
+    );
+  }
+
   return dest;
 }
 
@@ -42,6 +98,12 @@ function printSurvey(survey: Survey, logRoots: string[]): void {
     `Total: ${survey.totalMatches} promotable file(s) across the corpus, ${survey.rescuedMatches} of which ` +
     `are in RESCUED logs (the highest-yield subset — where a match is actually plausible).`,
   );
+  if (survey.skipped.length > 0) {
+    console.warn(`WARN: ${survey.skipped.length} file(s) promoted a turn in memory but were REFUSED (not applied):`);
+    for (const s of survey.skipped) {
+      console.warn(`  ${s.path}: ${s.reason}`);
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -112,7 +174,12 @@ async function main(): Promise<void> {
           const dest = await backupLogDir(root);
           console.log(`Backed up ${root} -> ${dest}`);
         },
-        writeFile: (path, content) => atomicReplaceFile(path, content),
+        writeFile: async (path, content) => {
+          await atomicReplaceFile(path, content);
+          // Mirrors the "Backed up ... -> ..." line above: an operator recovering from a crashed --apply
+          // in production has no other way to tell which files were already rewritten before the crash.
+          console.log(`Promoted ${path}`);
+        },
       });
       console.log(`Promoted ${survey.totalMatches} file(s).`);
     } finally {

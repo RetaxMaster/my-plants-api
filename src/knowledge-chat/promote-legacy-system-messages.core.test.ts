@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { buildLogHeader } from '@retaxmaster/agents-realtime-protocol';
 import { surveyLogRoots, promoteSurveyedMatches, type Survey } from './promote-legacy-system-messages.core.js';
 
 // CORRECTION 1 (measured against the installed package, not assumed from the plan): the plan's draft
@@ -17,15 +18,28 @@ import { surveyLogRoots, promoteSurveyedMatches, type Survey } from './promote-l
 // session.started). Here it is injected as `isRescuedLog(text)` so the core stays pure/testable — `loadRun`
 // returns only `{ systemMessageText, systemMessageState }`, matching what `makeRecognizer` actually needs.
 
-// Fixture provenance (same observed shape legacy-system-recognizer.test.ts documents): the marker sits on
-// BOTH `prompt`/log-text and `systemMessageText` as the pre-3.0.x code wrote them.
-const MARKED = '[system] The user declined your request.';
+// A GENUINE canonical log (post-code-review addendum): the core module now gates every match through
+// `validateCanonicalLog`, built from a self-derived identity (the ORIGINAL file's own header +
+// session.started — see `buildSelfExpectation`). So any fixture expected to become a MATCH must be a
+// structurally real canonical log — header, a `user.prompt` lead, and a `session.started` — or the
+// replacement is correctly refused as unvalidatable and lands in `skipped`, never `matches`. Built with the
+// package's own `buildLogHeader`, never a hand-rolled second implementation of the header shape.
+function canonicalLog(opts: { runId: string; leadText: string; providerSessionId: string; startedAtMs?: number }): string {
+  const header = buildLogHeader({ provider: 'claude', runId: opts.runId, startedAtMs: opts.startedAtMs ?? 1000 });
+  const lead = JSON.stringify({ type: 'user.prompt', text: opts.leadText });
+  const sessionStarted = JSON.stringify({ type: 'session.started', provider: 'claude', providerSessionId: opts.providerSessionId });
+  return [header, lead, sessionStarted].join('\n') + '\n';
+}
 
 function userPromptLine(text: string): string {
   return JSON.stringify({ type: 'user.prompt', text });
 }
 
 const NOT_RESCUED = () => false;
+
+// Fixture provenance (same observed shape legacy-system-recognizer.test.ts documents): the marker sits on
+// BOTH `prompt`/log-text and `systemMessageText` as the pre-3.0.x code wrote them.
+const MARKED = '[system] The user declined your request.';
 
 describe('the survey-first migration (spec 3.4, Task 24)', () => {
   it('reports a count and makes NO DESTRUCTIVE MOVE when the corpus has no matches', async () => {
@@ -46,6 +60,7 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
     expect(survey.totalMatches).toBe(0);
     expect(survey.rescuedMatches).toBe(0);
     expect(survey.filesScanned).toBe(2); // one file per root, both roots scanned
+    expect(survey.skipped).toEqual([]);
 
     await promoteSurveyedMatches(survey, { stopApi, stopEngines, backup, writeFile });
 
@@ -56,18 +71,19 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
   });
 
   it('reports the RESCUED runs separately, as the subset where a match is actually plausible', async () => {
-    const line = userPromptLine(`${MARKED}\n\nHow is my fern?`);
+    const text = canonicalLog({ runId: 'run-9', leadText: `${MARKED}\n\nHow is my fern?`, providerSessionId: 'sess-9' });
 
     const survey = await surveyLogRoots({
       logRoots: ['/tmp/logs-a'],
       readDir: async () => ['run-9.ndjson'],
-      readFile: async () => `${line}\n`,
+      readFile: async () => text,
       loadRun: async () => ({ systemMessageText: MARKED, systemMessageState: 'CONSUMED' }),
       // Structural rescue signal, injected — the real driver derives this from scanCanonicalLog, never a
       // DB flag (Correction 2).
       isRescuedLog: () => true,
     });
 
+    expect(survey.skipped).toEqual([]);
     expect(survey.totalMatches).toBe(1);
     expect(survey.rescuedMatches).toBe(1);
     expect(survey.matches[0]).toMatchObject({
@@ -91,14 +107,37 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
     expect(readDir.mock.calls.map(([root]) => root)).toEqual(['/tmp/logs-a', '/tmp/logs-b']);
   });
 
+  it('refuses a promotable turn whose replacement fails structural validation, and says so loudly', async () => {
+    // A "canonical" file whose header claims a DIFFERENT runId than its own filename — exactly the kind of
+    // corruption validateCanonicalLog exists to catch. promoteLegacySystemMessages happily promotes the
+    // turn (it never looks at the header at all); the survey must still refuse to record it as a match.
+    const text = canonicalLog({ runId: 'some-other-run', leadText: `${MARKED}\n\nHow is my fern?`, providerSessionId: 'sess-x' });
+
+    const survey = await surveyLogRoots({
+      logRoots: ['/tmp/logs-a'],
+      readDir: async () => ['run-mismatched.ndjson'],
+      readFile: async () => text,
+      loadRun: async () => ({ systemMessageText: MARKED, systemMessageState: 'CONSUMED' }),
+      isRescuedLog: NOT_RESCUED,
+    });
+
+    expect(survey.totalMatches).toBe(0);
+    expect(survey.matches).toEqual([]);
+    expect(survey.skipped).toHaveLength(1);
+    expect(survey.skipped[0].path).toBe('/tmp/logs-a/run-mismatched.ndjson');
+    expect(survey.skipped[0].reason).toMatch(/failed validation/);
+  });
+
   it('computes and validates EVERY replacement before writing ANY file', async () => {
     // Everything quiesced BEFORE the backup, backup BEFORE any write, and every replacement computed up
     // front: promoteLegacySystemMessages is pure and fails loudly per call, but a script that has already
     // replaced earlier files is only PARTIALLY APPLIED — the backup, not the function's purity, is the
     // rollback. The API is stopped too: a live API admits runs that append to the very logs being rewritten.
+    const runA = canonicalLog({ runId: 'run-a', leadText: `${MARKED}\n\nHow is my fern?`, providerSessionId: 'sess-a' });
+    const runB = canonicalLog({ runId: 'run-b', leadText: `${MARKED}\n\nShould I repot?`, providerSessionId: 'sess-b' });
     const filesByPath: Record<string, string> = {
-      '/tmp/logs-a/run-a.ndjson': `${userPromptLine(`${MARKED}\n\nHow is my fern?`)}\n`,
-      '/tmp/logs-a/run-b.ndjson': `${userPromptLine(`${MARKED}\n\nShould I repot?`)}\n`,
+      '/tmp/logs-a/run-a.ndjson': runA,
+      '/tmp/logs-a/run-b.ndjson': runB,
     };
 
     const survey = await surveyLogRoots({
@@ -109,18 +148,27 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
       isRescuedLog: NOT_RESCUED,
     });
 
+    expect(survey.skipped).toEqual([]);
     expect(survey.totalMatches).toBe(2);
 
     const order: string[] = [];
     const stopApi = vi.fn(async () => { order.push('stop-api'); });
     const stopEngines = vi.fn(async () => { order.push('stop-engines'); });
     const backup = vi.fn(async (_root: string) => { order.push('backup'); });
-    const writeFile = vi.fn(async () => { order.push('write'); });
+    const writeFile = vi.fn(async (_path: string, _content: string) => { order.push('write'); });
 
     await promoteSurveyedMatches(survey, { stopApi, stopEngines, backup, writeFile });
 
     expect(order.slice(0, 3)).toEqual(['stop-api', 'stop-engines', 'backup']);
     expect(order.filter((o) => o === 'write')).toHaveLength(2);
+
+    // CONTENT, not just count: each match's OWN (path, replacement) pair must reach writeFile — a defect
+    // that writes match A's replacement to match B's path (a scrambled write) passes a count-only
+    // assertion but must not pass this one. Compared as SORTED pairs since only "computed before written"
+    // is promised, not the write order relative to `survey.matches`.
+    const expectedPairs = survey.matches.map((m) => JSON.stringify([m.path, m.replacement])).sort();
+    const actualPairs = writeFile.mock.calls.map(([path, content]) => JSON.stringify([path, content])).sort();
+    expect(actualPairs).toEqual(expectedPairs);
   });
 
   it('backs up EVERY log root, not just the one that matched', async () => {
@@ -134,6 +182,7 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
         { root: '/tmp/logs-a', filesScanned: 1, matches: 1, rescuedMatches: 0 },
         { root: '/tmp/logs-b', filesScanned: 1, matches: 0, rescuedMatches: 0 },
       ],
+      skipped: [],
     };
 
     const backup = vi.fn(async (_root: string) => {});
@@ -157,5 +206,6 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
     });
 
     expect(survey.totalMatches).toBe(0);
+    expect(survey.skipped).toEqual([]);
   });
 });
