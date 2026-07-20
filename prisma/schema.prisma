@@ -550,8 +550,11 @@ model KnowledgeChatRun {
   // conflating them is a silent loss of history.
   sessionTracked    Boolean      @default(true) @map("session_tracked")
   // The user's message for this turn — NULL on a COMMAND turn, because a command is not text: it is an
-  // instruction to the agent's runtime and it travels in its own field, never inside a prompt. Exactly one
-  // of (prompt) / (commandName) is set on any row. The alternative — keeping this NOT NULL and storing the
+  // instruction to the agent's runtime and it travels in its own field, never inside a prompt. It is ALSO
+  // NULL on a SYSTEM-MESSAGE-ONLY turn (a decline-triggered run, whose whole input is the host's notice in
+  // `systemMessageText`) — legal since the agents-realtime 3.0.x adoption, and the reason migration 0024
+  // widened the DB CHECK from a strict prompt-XOR-command to "at least one input, prompt and command still
+  // mutually exclusive". The alternative — keeping this NOT NULL and storing the
   // literal "/compact" — is a value that LOOKS like data and IS a sentinel, and it is the open door for
   // some later code path to re-send it as a prompt. That is the precise bug agents-realtime 2.0.0 exists
   // to delete, so we do not reintroduce it in our own table.

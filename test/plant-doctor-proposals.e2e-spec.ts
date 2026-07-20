@@ -570,7 +570,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       expect(res.body.status).toBe('EXPIRED');
     });
 
-    it('a new prompt turn expires the pending proposal and prefixes the not-approved nudge', async () => {
+    it('a new prompt turn expires the pending proposal and carries the not-approved nudge in its OWN column', async () => {
       const p = await proposeAndGetPending();
       await makeSessionIdle();
 
@@ -580,7 +580,12 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       const row = await ctx.prisma.doctorWriteProposal.findUnique({ where: { id: p.id } });
       expect(row!.status).toBe('EXPIRED');
       const run = await ctx.prisma.knowledgeChatRun.findUnique({ where: { id: turn.body.runId } });
-      expect(run!.prompt).toBe('The user still has not approved the request.\n\nwhy is it yellow?');
+      // The nudge is no longer PREFIXED onto the prompt (spec §3.1). `prompt` now means exactly "what the
+      // user typed" and the notice rides its own column, delivered out of band as the package's
+      // `systemMessage`. Asserting both halves separately is the point: a single concatenated assertion
+      // could not tell "delivered in its own field" from "silently dropped".
+      expect(run!.prompt).toBe('why is it yellow?');
+      expect(run!.systemMessageText).toBe('The user still has not approved the request.');
       expect(run!.systemMessageState).toBe('CONSUMED');
     });
 
@@ -616,10 +621,21 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       const res = await ownerPost(`/proposals/${p.id}/decline`, {});
       expect(res.status).toBe(200);
 
-      const runsAfter = await ctx.prisma.knowledgeChatRun.findMany({ where: { sessionId }, orderBy: { createdAt: 'desc' } });
+      const runsAfter = await ctx.prisma.knowledgeChatRun.findMany({ where: { sessionId } });
       expect(runsAfter.length).toBe(runsBefore + 1);
-      expect(runsAfter[0]!.prompt).toContain('The user declined your request.');
-      expect(runsAfter[0]!.systemMessageState).toBe('CONSUMED');
+
+      // Identify the decline-triggered run by the PROPOSAL IT CARRIES, not by `orderBy createdAt desc`.
+      // `created_at` has second granularity here, so several runs in one fast test share a timestamp and
+      // "newest" is a coin flip — this assertion used to read a sibling run's prompt and fail for a reason
+      // that had nothing to do with the behaviour under test.
+      const declineRun = runsAfter.find((r) => r.systemMessageProposalId === p.id);
+      expect(declineRun).toBeDefined();
+      // A SYSTEM-MESSAGE-ONLY turn: no prompt at all, the notice in its own column. Before the 3.0.x
+      // adoption this row carried `prompt = '[system] ...'`, which is what let it satisfy the old
+      // prompt-XOR-command CHECK by accident; migration 0024 admits the shape the spec actually defines.
+      expect(declineRun!.prompt).toBeNull();
+      expect(declineRun!.systemMessageText).toBe('The user declined your request.');
+      expect(declineRun!.systemMessageState).toBe('CONSUMED');
 
       const session = await ctx.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
       expect(session!.pendingSystemMessage).toBeNull(); // consumed, not duplicated

@@ -253,8 +253,22 @@ export class ProposalsService {
       await this.chat.startQueuedSystemTurn(sessionId);
     } catch (err) {
       // A 409 here is the EXPECTED, in-contract outcome when a run is already active: the message stays
-      // queued and the active run's successor will carry it. Anything else is logged and swallowed.
-      this.logger.log(`decline ${proposalId}: no turn started (${(err as Error).message}); message stays queued`);
+      // queued and the active run's successor will carry it — routine, so it logs at log level.
+      //
+      // ANYTHING ELSE IS A DEFECT AND MUST SAY SO. Swallowing every failure at the same quiet level is how
+      // the 3.0.x adoption's system-message-only turn went undetected: the run insert violated the old
+      // prompt-XOR-command CHECK (fixed by migration 0024), the exception landed here, and a declined
+      // proposal produced no run and no visible complaint — the agent silently never learned it had been
+      // declined. Still swallowed, because the decision is durably recorded and a launch failure must
+      // never fail the owner's click (spec §5.3.1); but an unexpected cause is now loud in the logs.
+      if (err instanceof ConflictException) {
+        this.logger.log(`decline ${proposalId}: a run is already active; message stays queued`);
+      } else {
+        this.logger.error(
+          `decline ${proposalId}: queued system turn FAILED to start (${(err as Error).message}); the message stays queued but this is not an expected outcome`,
+          (err as Error).stack,
+        );
+      }
     }
 
     const fresh = await this.prisma.doctorWriteProposal.findUnique({ where: { id: proposalId } });
