@@ -59,6 +59,30 @@ describe('computeAdherence', () => {
     });
     expect(a).toBeNull();
   });
+
+  it('clamps the anchor so it is never after the event (first watering before acquisition)', () => {
+    const a = computeAdherence({
+      occurredOn: day('2026-07-07'),
+      previousAnchor: day('2026-07-08'), // acquisition fallback, AFTER the event
+      scheduledDueOn: day('2026-07-15'),
+      hadOverride: false,
+    });
+    expect(a?.previousAnchorOn).toEqual(day('2026-07-07')); // clamped to the event date, never after it
+    expect(a?.observedDays).toBe(0); // no longer -1
+    expect(a?.eligible).toBe(false); // still ineligible — no eligible cycle is created by the clamp
+  });
+
+  it('leaves a normal (anchor before event) cycle untouched', () => {
+    const a = computeAdherence({
+      occurredOn: day('2026-06-20'),
+      previousAnchor: day('2026-06-13'),
+      scheduledDueOn: day('2026-06-23'),
+      hadOverride: false,
+    });
+    expect(a?.previousAnchorOn).toEqual(day('2026-06-13'));
+    expect(a?.observedDays).toBe(7);
+    expect(a?.eligible).toBe(true);
+  });
 });
 
 describe('eligibleCycles', () => {
