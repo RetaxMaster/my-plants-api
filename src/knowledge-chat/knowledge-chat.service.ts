@@ -421,7 +421,7 @@ export class KnowledgeChatService {
       );
       if (!leased) {
         // A refused lease is a CONFIRMED pre-spawn outcome — /execute has demonstrably not been called —
-        // so any `[system]` message this run consumed goes back on the session for its successor to carry.
+        // so any system message this run consumed goes back on the session for its successor to carry.
         // (The catch below will also fire on the throw; its conditional update matches 0 rows because the
         // run is already terminal here, so it is a no-op.)
         await this.prisma.$transaction((tx) =>

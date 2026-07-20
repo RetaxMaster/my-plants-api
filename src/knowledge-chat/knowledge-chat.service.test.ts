@@ -542,7 +542,7 @@ const doctorSession = (over: Record<string, unknown> = {}) =>
 describe('KnowledgeChatService.startQueuedSystemTurn', () => {
   it('starts a run whose prompt IS the queued message, and consumes it off the session', async () => {
     const { svc, run, sessions, runs, engine } = setup({
-      sessions: [doctorSession({ pendingSystemMessage: '[system] The user declined your request.', pendingSystemMessageProposalId: 'prop-1' })],
+      sessions: [doctorSession({ pendingSystemMessage: 'The user declined your request.', pendingSystemMessageProposalId: 'prop-1' })],
       runs: [doneRun()],
     });
 
@@ -551,7 +551,7 @@ describe('KnowledgeChatService.startQueuedSystemTurn', () => {
     expect(runId).toBeTruthy();
     const created = runs.get(runId!)!;
     // Carried ALONE — no trailing blank from a naive prefix onto the empty prompt.
-    expect(created.prompt).toBe('[system] The user declined your request.');
+    expect(created.prompt).toBe('The user declined your request.');
     expect((created as never as Record<string, unknown>).systemMessageState).toBe('CONSUMED');
     expect((created as never as Record<string, unknown>).systemMessageProposalId).toBe('prop-1');
     // At-most-once: it is gone from the session, so a second turn cannot redeliver it.
@@ -568,23 +568,23 @@ describe('KnowledgeChatService.startQueuedSystemTurn', () => {
 
   it('does nothing on an UNSEALED session — there is no agent thread to continue yet', async () => {
     const { svc, run, sessions, runs } = setup({
-      sessions: [doctorSession({ providerSessionId: null, pendingSystemMessage: '[system] The user declined your request.' })],
+      sessions: [doctorSession({ providerSessionId: null, pendingSystemMessage: 'The user declined your request.' })],
     });
     expect(await run(() => svc.startQueuedSystemTurn('s1'))).toBeNull();
     expect(runs.size).toBe(0);
     // The message is NOT consumed — it waits for the owner's first real turn.
-    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('The user declined your request.');
   });
 
   it('throws Conflict when a run is already active, LEAVING the message queued for that run successor', async () => {
     // Idle is never pre-checked with a read (that would be a TOCTOU); the activeKey unique index decides.
     const { svc, run, sessions } = setup({
-      sessions: [doctorSession({ pendingSystemMessage: '[system] The user declined your request.' })],
+      sessions: [doctorSession({ pendingSystemMessage: 'The user declined your request.' })],
       runs: [activeRun()],
     });
     await expect(run(() => svc.startQueuedSystemTurn('s1'))).rejects.toBeInstanceOf(ConflictException);
     // Nothing was lost: the message is still on the session.
-    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('The user declined your request.');
   });
 });
 
@@ -602,7 +602,7 @@ describe('run admission expires pending proposals (through the real service)', (
 
     expect(proposals.get('prop-1').status).toBe('EXPIRED');
     expect(proposals.get('prop-1').pendingKey).toBeNull(); // or the index blocks every future proposal
-    expect(runs.get(out.runId)!.prompt).toBe('[system] The user still has not approved the request.\n\nwhy is it yellow?');
+    expect(runs.get(out.runId)!.prompt).toBe('The user still has not approved the request.\n\nwhy is it yellow?');
     expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBeNull(); // consumed
   });
 
@@ -619,7 +619,7 @@ describe('run admission expires pending proposals (through the real service)', (
     expect(runs.get(out.runId)!.prompt).toBeNull();
     expect((runs.get(out.runId)! as never as Record<string, unknown>).commandName).toBe('compact');
     // Prefixing prose onto a command would corrupt it, so the message waits for the next PROMPT turn.
-    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user still has not approved the request.');
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('The user still has not approved the request.');
   });
 });
 
@@ -644,17 +644,17 @@ describe('the launch lease is wired into launch()', () => {
     expect(refused.activeKey).toBeNull();
   });
 
-  it('restores a consumed [system] message when the lease is refused', async () => {
+  it('restores a consumed system message when the lease is refused', async () => {
     // A refused lease is CONFIRMED pre-spawn, so the nudge must survive for the next run to carry.
     const { svc, run, sessions, codexVerification } = setup({
-      sessions: [doctorSession({ provider: 'codex', pendingSystemMessage: '[system] The user declined your request.' })],
+      sessions: [doctorSession({ provider: 'codex', pendingSystemMessage: 'The user declined your request.' })],
       runs: [doneRun()],
     });
     codexVerification.isVerified.mockResolvedValueOnce(true).mockResolvedValue(false);
 
     await expect(run(() => svc.resume('s1', { prompt: 'hi' }, undefined, DS))).rejects.toBeInstanceOf(ConflictException);
 
-    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('[system] The user declined your request.');
+    expect((sessions.get('s1') as never as Record<string, unknown>).pendingSystemMessage).toBe('The user declined your request.');
   });
 
   it('reaches /execute normally when the lease is granted', async () => {

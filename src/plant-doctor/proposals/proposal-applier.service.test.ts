@@ -156,7 +156,7 @@ describe('ProposalApplierService', () => {
     expect(res.status).toBe('FAILED');
     expect(tx.knowledgeChatSession.update).toHaveBeenCalledTimes(1);
     expect((tx.knowledgeChatSession.update.mock.calls[0]![0] as { data: { pendingSystemMessage: string } }).data
-      .pendingSystemMessage).toBe(`[system] Your request could not be applied: ${res.failureReason}`);
+      .pendingSystemMessage).toBe(`Your request could not be applied: ${res.failureReason}`);
   });
 
   it('records resolvedByUserId on FAILED: the failed approver, and NULL for a failed auto-apply', async () => {

@@ -119,7 +119,7 @@ export class KnowledgeChatOrchestrator implements Orchestrator, OwnRunLocator {
             `the agent binary is installed and on PATH (CLAUDE_BIN / CODEX_BIN) and authenticated, that ` +
             `${names.cwd} exists, and that ${names.log} (the engine's logRoot) and ` +
             `${names.state} are absolute, writable directories.`;
-    // The status write and the settling of any `[system]` message this run consumed share ONE transaction
+    // The status write and the settling of any system message this run consumed share ONE transaction
     // (spec 5.5.4): a run that ends without ever reaching the agent must give the message back BEFORE its
     // active slot is freed, or the next run is admitted without it and the nudge is silently lost.
     const { count } = await this.prisma.$transaction(async (tx) => {

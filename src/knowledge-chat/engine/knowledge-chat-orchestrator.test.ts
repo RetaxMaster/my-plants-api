@@ -3,7 +3,7 @@ import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
 
 type Status = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
 interface Run { id: string; sessionId: string; provider: string; providerSessionId?: string | null; sessionTracked?: boolean; commandName?: string | null; createdAt?: Date; status: Status; activeKey: string | null; pid: number | null; procStartTime: string | null; startedAt: Date | null; finishedAt: Date | null; exitCode: number | null; error: string | null;
-  // The `[system]` message this run claimed from its session, and what became of it (migration 0022).
+  // The system message this run claimed from its session, and what became of it (migration 0022).
   systemMessageText?: string | null; systemMessageProposalId?: string | null; systemMessageState?: string | null }
 interface Session { id: string; provider?: string; providerSessionId: string | null; pendingRunId?: string | null;
   pendingSystemMessage?: string | null; pendingSystemMessageProposalId?: string | null }
@@ -64,7 +64,7 @@ function makePrismaFake(runs: Run[], sessions: Session[]) {
         return { count: 1 };
       },
     },
-    // `runFinished` now settles any consumed `[system]` message in the SAME transaction as the status
+    // `runFinished` now settles any consumed system message in the SAME transaction as the status
     // write. This is a REAL transaction, rollback included: a double that merely runs the callback cannot
     // distinguish "these two writes are atomic" — the property the at-most-once guarantee rests on — from
     // two independent writes, so it would be green either way.
@@ -433,12 +433,12 @@ describe('KnowledgeChatOrchestrator.runsForSession — an UNTRACKED run is unkno
   });
 });
 
-describe('KnowledgeChatOrchestrator.runFinished — [system] message settling', () => {
+describe('KnowledgeChatOrchestrator.runFinished — system message settling', () => {
   const consumingRun = (over: Partial<Run> = {}): Run => ({
     id: 'r1', sessionId: 's1', provider: 'claude', providerSessionId: null, status: 'RUNNING',
     activeKey: 'ACTIVE', pid: 1, procStartTime: '1', startedAt: new Date(), finishedAt: null,
     exitCode: null, error: null,
-    systemMessageText: '[system] The user declined your request.',
+    systemMessageText: 'The user declined your request.',
     systemMessageProposalId: 'prop-1',
     systemMessageState: 'CONSUMED',
     ...over,
@@ -465,7 +465,7 @@ describe('KnowledgeChatOrchestrator.runFinished — [system] message settling', 
       .runFinished('r1', { exitCode: 1, stopped: false, stderrTail: 'boom' });
 
     expect(run.systemMessageState).toBe('RESTORED');
-    expect(session.pendingSystemMessage).toBe('[system] The user declined your request.');
+    expect(session.pendingSystemMessage).toBe('The user declined your request.');
     expect(session.pendingSystemMessageProposalId).toBe('prop-1');
     expect(run.activeKey).toBeNull(); // and the slot is freed in the same transaction
   });

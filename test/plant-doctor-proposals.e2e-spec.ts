@@ -580,7 +580,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       const row = await ctx.prisma.doctorWriteProposal.findUnique({ where: { id: p.id } });
       expect(row!.status).toBe('EXPIRED');
       const run = await ctx.prisma.knowledgeChatRun.findUnique({ where: { id: turn.body.runId } });
-      expect(run!.prompt).toBe('[system] The user still has not approved the request.\n\nwhy is it yellow?');
+      expect(run!.prompt).toBe('The user still has not approved the request.\n\nwhy is it yellow?');
       expect(run!.systemMessageState).toBe('CONSUMED');
     });
 
@@ -591,7 +591,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       await ctx.prisma.doctorWriteProposal.updateMany({ where: { id: p.id }, data: { status: 'EXPIRED', pendingKey: null } });
       await ctx.prisma.knowledgeChatSession.update({
         where: { id: sessionId },
-        data: { pendingSystemMessage: '[system] The user declined your request.', pendingSystemMessageProposalId: p.id },
+        data: { pendingSystemMessage: 'The user declined your request.', pendingSystemMessageProposalId: p.id },
       });
 
       const turn = await asOwner(request(ctx.server()).post(`/plants/${plantId}/diagnose/sessions/${sessionId}/runs`))
@@ -603,10 +603,10 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       expect(run!.systemMessageState).toBeNull();
       // Prefixing prose onto a command would corrupt it, so the message waits for the next PROMPT turn.
       const session = await ctx.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
-      expect(session!.pendingSystemMessage).toBe('[system] The user declined your request.');
+      expect(session!.pendingSystemMessage).toBe('The user declined your request.');
     });
 
-    it('declining on an IDLE session starts a new run carrying the declined [system] message', async () => {
+    it('declining on an IDLE session starts a new run carrying the declined system message', async () => {
       const p = await proposeAndGetPending();
       // MAKE THE SESSION IDLE. Without this the decline takes the "a run is active" branch and this test
       // would pass while proving the OPPOSITE of its name.
@@ -618,7 +618,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
 
       const runsAfter = await ctx.prisma.knowledgeChatRun.findMany({ where: { sessionId }, orderBy: { createdAt: 'desc' } });
       expect(runsAfter.length).toBe(runsBefore + 1);
-      expect(runsAfter[0]!.prompt).toContain('[system] The user declined your request.');
+      expect(runsAfter[0]!.prompt).toContain('The user declined your request.');
       expect(runsAfter[0]!.systemMessageState).toBe('CONSUMED');
 
       const session = await ctx.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
@@ -638,7 +638,7 @@ describe('doctor write proposals — full lifecycle (e2e)', () => {
       expect(row!.status).toBe('DECLINED');
       expect(await ctx.prisma.knowledgeChatRun.count({ where: { sessionId } })).toBe(runsBefore);
       const session = await ctx.prisma.knowledgeChatSession.findUnique({ where: { id: sessionId } });
-      expect(session!.pendingSystemMessage).toBe('[system] The user declined your request.');
+      expect(session!.pendingSystemMessage).toBe('The user declined your request.');
     });
 
     it('resolving a proposal of another owner is 404, never 403', async () => {
