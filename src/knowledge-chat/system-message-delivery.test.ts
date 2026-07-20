@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { classifyLaunchFailure, restoreOnPreSpawnFailure, settleConsumedMessage } from './system-message-delivery.js';
+import { EngineFailureException } from './engine/engine-error.js';
 
 describe('classifyLaunchFailure', () => {
   it('treats a connection refusal and a 4xx rejection as CONFIRMED pre-spawn', () => {
@@ -22,6 +23,18 @@ describe('classifyLaunchFailure', () => {
     expect(classifyLaunchFailure(new Error('something nobody anticipated'))).toBe('AMBIGUOUS');
     expect(classifyLaunchFailure(undefined)).toBe('AMBIGUOUS');
     expect(classifyLaunchFailure(null)).toBe('AMBIGUOUS');
+  });
+
+  it('classifies a mapped engine 4xx as a CONFIRMED pre-spawn failure', () => {
+    expect(classifyLaunchFailure(new EngineFailureException({ code: 'attachment_too_large', status: 413 })))
+      .toBe('PRE_SPAWN');
+    expect(classifyLaunchFailure(new EngineFailureException({ code: 'request_failed', status: 422 })))
+      .toBe('PRE_SPAWN');
+  });
+
+  it('leaves a 5xx AMBIGUOUS — the run may already have spawned', () => {
+    expect(classifyLaunchFailure(new EngineFailureException({ code: 'request_failed', status: 503 })))
+      .toBe('AMBIGUOUS');
   });
 });
 

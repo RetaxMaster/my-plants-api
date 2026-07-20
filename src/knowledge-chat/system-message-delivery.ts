@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { EngineFailureException } from './engine/engine-error.js';
 
 const logger = new Logger('SystemMessageDelivery');
 
@@ -27,6 +28,14 @@ type ConsumedRun = {
  * establish the truth. Only failures that PROVE the request never reached a process are PRE_SPAWN.
  */
 export function classifyLaunchFailure(err: unknown): LaunchFailureClass {
+  // A mapped engine failure is a CONFIRMED refusal: /execute answered before spawning anything, so the
+  // queued message is provably still undelivered and must be restored. Only 4xx qualifies — a 5xx may have
+  // been returned after the run already spawned, which is exactly the AMBIGUOUS case the protocol defaults
+  // to. Keep this ahead of the legacy message-string checks; the generic Error path no longer fires for
+  // /execute failures at all.
+  if (err instanceof EngineFailureException) {
+    return err.mapped.status >= 400 && err.mapped.status < 500 ? 'PRE_SPAWN' : 'AMBIGUOUS';
+  }
   const e = (err ?? {}) as { code?: string; status?: number };
   if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') return 'PRE_SPAWN';
   // A 4xx is the engine itself rejecting the request — it parsed it and declined, so no run was spawned.

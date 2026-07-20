@@ -7,6 +7,7 @@ import type { Env } from '../../config/env.js';
 import type { EngineParams } from './engine-params.js';
 import { KnowledgeChatOrchestrator } from './knowledge-chat-orchestrator.js';
 import { buildEngineConfig } from './knowledge-chat-engine.config.js';
+import { EngineFailureException, mapEngineFailure } from './engine-error.js';
 
 // The agents this host registers in the engine's provider registry. ONE source for the list: the
 // registry (knowledge-chat-engine.config.ts), the forced re-probe fan-out below, and the DTO's accepted
@@ -208,7 +209,15 @@ export class KnowledgeChatEngineService implements ChatEngine, OnModuleInit, OnM
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`Engine /execute failed (${res.status}): ${text}`);
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = undefined;
+      }
+      // Logged server-side IN FULL, dropped at the boundary. The engine's prose never reaches a user.
+      this.logger.error(`Engine /execute failed (${res.status}) for run ${req.runId}: ${text}`);
+      throw new EngineFailureException(mapEngineFailure(res.status, body));
     }
   }
 }
