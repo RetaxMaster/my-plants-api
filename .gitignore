@@ -19,3 +19,8 @@ storage/photo-inbox/
 # Secret-grade log-directory snapshots taken by promote-legacy-system-messages.ts --apply (conversation
 # transcripts) — the rollback net for that migration, never committed.
 storage/promote-legacy-system-messages-backups/
+# Chat image attachment upload roots (agents-realtime 3.0.x uploadRoot for the knowledge-chat and
+# plant-doctor engines) — durably stored user-attached photos under a 24h TTL, NEVER committed. This repo
+# is public; the moment anyone attaches an image locally, git must not offer to commit a private photo.
+storage/knowledge-chat-uploads/
+storage/plant-doctor-uploads/
