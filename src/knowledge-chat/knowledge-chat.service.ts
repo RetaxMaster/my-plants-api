@@ -260,7 +260,7 @@ export class KnowledgeChatService {
     const runId = await this.insertActiveRun(sessionId, provider, input);
     if (!runId) return null;
 
-    await this.launch(runId, provider, input, session.providerSessionId, kind, session);
+    await this.launch(runId, provider, session.providerSessionId, kind, session);
     return runId;
   }
 
@@ -334,7 +334,7 @@ export class KnowledgeChatService {
       },
     });
     const runId = (await this.insertActiveRun(session.id, provider, { prompt }))!;
-    const ticket = await this.launch(runId, provider, { prompt }, null, scope.kind, session);
+    const ticket = await this.launch(runId, provider, null, scope.kind, session);
     return { sessionId: session.id, runId, ticket };
   }
 
@@ -360,7 +360,7 @@ export class KnowledgeChatService {
       }));
       const runId = await this.insertActiveRun(sessionId, retryProvider, input, { onlyWhileUnsealed: true });
       if (runId) {
-        const ticket = await this.launch(runId, retryProvider, input, null, scope.kind, session);
+        const ticket = await this.launch(runId, retryProvider, null, scope.kind, session);
         return { runId, ticket };
       }
       // Lost the race: a session appeared while we were claiming. Continue it on ITS agent.
@@ -376,7 +376,7 @@ export class KnowledgeChatService {
       isCreate: false, sealed: true, sessionProvider, requestProvider: provider,
     }));
     const runId = (await this.insertActiveRun(sessionId, sessionProvider, input))!;
-    const ticket = await this.launch(runId, sessionProvider, input, session.providerSessionId!, scope.kind, session);
+    const ticket = await this.launch(runId, sessionProvider, session.providerSessionId!, scope.kind, session);
     return { runId, ticket };
   }
 
@@ -384,10 +384,18 @@ export class KnowledgeChatService {
   // engine failure mark the run FAILED immediately AND clear activeKey. For a DOCTOR run, the per-session
   // workspace + doctor-context.json + scoped token are prepared BEFORE execute() and the workspace path is
   // injected as PLANT_DOCTOR_SESSION_WORKSPACE via the per-run env (Task-2 seam).
+  /**
+   * SPEC §3.1.1 — the last mile reads the ADMITTED RUN ROW, never the caller's argument.
+   *
+   * This used to take the caller's `input` and send `input.prompt`. That was the live defect: `admitRun`
+   * composed and persisted the turn, and then `launch` sent something else — so the queued system message
+   * was consumed, marked CONSUMED, and never reached the agent, while a decline-triggered turn (whose
+   * caller passes an empty prompt) delivered an empty turn. The run row is the custody the at-most-once
+   * protocol already maintains, so it is the only correct source. Do NOT reintroduce an `input` parameter.
+   */
   private async launch(
     runId: string,
     provider: AgentProvider,
-    input: TurnInput,
     resumeSessionId: string | null,
     kind: SessionKind,
     session: { id: string; plantId?: string | null; ownerId?: string | null },
@@ -432,10 +440,37 @@ export class KnowledgeChatService {
         throw new ConflictException('run could not acquire the launch lease');
       }
 
+      // Read the row admitted in the same transaction. `prompt` is the user's text (or null on a
+      // message-only turn) and `systemMessageText` is the message this run claimed from its session.
+      // NOTE: there is deliberately no attachment column on the run row (spec §4.1.1) — attachments are
+      // threaded through in memory, so do not add `attachments` to this select.
+      const row = await this.prisma.knowledgeChatRun.findUnique({
+        where: { id: runId },
+        select: { prompt: true, systemMessageText: true, commandName: true, commandArgs: true },
+      });
+      if (!row) throw new Error(`Run ${runId} vanished between admission and launch`);
+
       await this.engines.engineFor(kind).execute(
-        input.command
-          ? { runId, provider, command: input.command, logPath, resumeSessionId, env: perRunEnv }
-          : { runId, provider, prompt: input.prompt, logPath, resumeSessionId, env: perRunEnv },
+        row.commandName
+          ? {
+              runId,
+              provider,
+              command: { name: row.commandName, args: row.commandArgs ?? '' },
+              logPath,
+              resumeSessionId,
+              env: perRunEnv,
+            }
+          : {
+              runId,
+              provider,
+              prompt: row.prompt,
+              // Omission is the contract — an absent system message must be ABSENT, never
+              // present-and-empty, which the package would read as a sentinel that looks like data.
+              ...(row.systemMessageText ? { systemMessage: row.systemMessageText } : {}),
+              logPath,
+              resumeSessionId,
+              env: perRunEnv,
+            },
       );
       return ticket;
     } catch (err) {
