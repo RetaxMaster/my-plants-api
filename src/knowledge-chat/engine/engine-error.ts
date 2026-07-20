@@ -24,19 +24,37 @@ export type EngineErrorCode =
  *
  * The prefix match is EXPLICITLY A HEURISTIC OVER PROSE, NOT A CONTRACT, so it must FAIL SAFE.
  * Order matters: the specific 413 prefixes are listed before the broad `attachment` one.
+ *
+ * EVERY PREFIX BELOW WAS READ OFF THE INSTALLED PACKAGE, NOT IMAGINED. They are the literal `error`
+ * strings `@retaxmaster/agents-realtime-server@3.0.0` emits, with the status each is actually returned
+ * with, verified in `node_modules/@retaxmaster/agents-realtime-server/dist/index.js` (the responses around
+ * lines 1659, 1699-1707, 1798, 1853, 1869, 1887, 1894). This matters because three plausible-sounding
+ * prefixes that were NOT observed — "attachments are not configured", "attachment content does not match"
+ * and "turn.input event too large" — match nothing the engine ever says, so each would have silently
+ * degraded a nameable failure to a neutral code while every unit test stayed green, because the tests and
+ * the rules would have shared the same invented prose. When upgrading the package, re-read the strings;
+ * a rule that matches nothing fails open and is invisible, which is why the drift guard in the test file
+ * asserts each prefix still matches something the engine really emits.
  */
-const PREFIX_RULES: ReadonlyArray<{ status: number; prefix: string; code: EngineErrorCode }> = [
-  { status: 422, prefix: 'attachments are not configured', code: 'attachments_unavailable' },
+export const PREFIX_RULES: ReadonlyArray<{ status: number; prefix: string; code: EngineErrorCode }> = [
+  // "attachments require the engine's `uploadRoot` to be configured"
+  { status: 422, prefix: 'attachments require', code: 'attachments_unavailable' },
+  // "attachment path rejected" / "attachment write failed" (both carry a `detail` with a server path)
   { status: 422, prefix: 'attachment path rejected', code: 'attachment_write_failed' },
   { status: 422, prefix: 'attachment write failed', code: 'attachment_write_failed' },
+  // "attachment mimeType is not an allowed image type: <mime>"
   { status: 422, prefix: 'attachment mimetype is not an allowed image type', code: 'attachment_corrupt' },
-  { status: 422, prefix: 'attachment content does not match', code: 'attachment_corrupt' },
+  // "attachment bytes do not match the declared mimeType (<mime>)" — the magic-byte sniff
+  { status: 422, prefix: 'attachment bytes do not match the declared mimetype', code: 'attachment_corrupt' },
+  // "composed prompt too large" / "turn input too large" — note: NOT "turn.input event too large"
   { status: 413, prefix: 'composed prompt too large', code: 'message_too_long' },
-  { status: 413, prefix: 'turn.input event too large', code: 'message_too_long' },
-  // OUR DRIFT ALARM: the engine's own body parser refuses an oversized request BEFORE any attachment
-  // validation runs. It can only fire if a local mirror constant in body-limit.ts drifted HIGH, which the
-  // CI assertion there is designed to catch first.
+  { status: 413, prefix: 'turn input too large', code: 'message_too_long' },
+  // OUR DRIFT ALARM: "request body too large" — the engine's own body parser refuses an oversized request
+  // BEFORE any attachment validation runs. It can only fire if a local mirror constant in body-limit.ts
+  // drifted HIGH, which the CI assertion there is designed to catch first.
   { status: 413, prefix: 'request body', code: 'payload_too_large' },
+  // The broad 413 catch-all, LAST: "attachment exceeds the per-file limit of N bytes" and "attachments
+  // exceed the total limit of N bytes" both land here.
   { status: 413, prefix: 'attachment', code: 'attachment_too_large' },
 ];
 
