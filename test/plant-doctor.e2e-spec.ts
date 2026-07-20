@@ -276,6 +276,116 @@ describe('Plant Doctor (e2e)', () => {
     });
   });
 
+  // Task 15 — prove the WHOLE attachment chain (DTO -> derived body limit -> engine `execute()`) end to
+  // end, near the maximum, over the REAL Nest pipeline (configureApp() applies the same ValidationPipe +
+  // derived body limit main.ts does). Placed HERE, deliberately BEFORE the "finalizing the run..." test
+  // below: that test deletes sidA, and the DTO-validation test in this block relies on sidA still
+  // existing. It does NOT rely on runA being finished — the command+attachments refusal is decided by the
+  // global ValidationPipe, which runs at the Nest PIPE stage, strictly before the controller ever calls the
+  // service's active-run conflict check — so a still-open runA cannot turn our expected 400 into a 409.
+  describe('attachments cross the whole transport, near the maximum (Task 15)', () => {
+    it('accepts a near-maximum attachment payload end to end through Nest', async () => {
+      // This runs on the DOCTOR surface deliberately (this whole file IS the doctor e2e): it is the surface
+      // whose per-run `env` is populated (session workspace path + scoped JWT), so it also pins env's
+      // contribution to the REQUEST_ENVELOPE allowance body-limit.ts sets for it. REQUEST_ENVELOPE is an
+      // allowance the package does not enforce, and the doctor is the surface that fills it.
+      const perFile = 3 * 1024 * 1024; // 6 files x 3 MiB = 18 MiB, just under the 20 MiB total cap
+      const attachments = Array.from({ length: 6 }, (_, i) => ({
+        id: `a${i}`,
+        filename: `photo-${i}.png`,
+        mimeType: 'image/png',
+        data: Buffer.alloc(perFile, 0x41).toString('base64'),
+      }));
+
+      const res = await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions`))
+        .send({ prompt: 'look at these', provider: 'claude', attachments });
+
+      // PIN THE POSITIVE STATUS. A wall of `not.toBe(...)` passes on a 404 (wrong route), a 401 (broken
+      // auth fixture) or a 500 (anything at all) — none of which prove the body crossed the transport.
+      expect(res.status).toBe(201);
+      // And prove the attachments actually arrived intact, rather than being silently whitelisted away by
+      // the global ValidationPipe — the exact failure mode the DTO warns about.
+      const call = executeCalls.find((c) => c.runId === res.body.runId)!;
+      expect(call.attachments).toHaveLength(6);
+      expect(call.attachments!.map((a) => a.id)).toContain('a0');
+
+      const workspace = call.env!.PLANT_DOCTOR_SESSION_WORKSPACE;
+      await rm(workspace, { recursive: true, force: true });
+    });
+
+    it('refuses an over-cap payload with OUR refusal, and never reaches the engine', async () => {
+      const attachments = Array.from({ length: 7 }, (_, i) => ({
+        id: `b${i}`,
+        filename: `photo-${i}.png`,
+        mimeType: 'image/png',
+        data: Buffer.alloc(1024, 0x41).toString('base64'),
+      }));
+
+      const before = executeCalls.length;
+      const res = await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions`))
+        .send({ prompt: 'too many', provider: 'claude', attachments });
+
+      expect(res.status).toBe(400);
+      // "never reaches the engine" is half the claim and the half a status assertion cannot make.
+      expect(executeCalls.length).toBe(before);
+    });
+
+    it('accepts the TRUE MAXIMUM legal payload — every cap simultaneously at its limit', async () => {
+      // The near-max case above is not the maximum: it sits at 18 of 20 MiB with a short prompt, so it
+      // would still pass if the derivation were ~10% too small. This one has no slack in the attachment
+      // dimensions at once — 6 files (the count cap) and ~20 MiB decoded (the total cap) simultaneously.
+      //
+      // EMPIRICAL FINDING on the prompt dimension: the plan drafted a prompt near the PROTOCOL's
+      // MAX_PROMPT_BYTES ceiling (131072 bytes = 128 KiB — that cap counts the COMPOSED prompt+system-
+      // message string and is enforced by the ENGINE). But `CreateSessionDto.prompt` carries its OWN, much
+      // stricter `@MaxLength(20_000)` (20,000 UTF-16 code units). A 120 KiB prompt is refused by OUR OWN
+      // DTO with a 400 long before the request ever reaches the derived body limit or the engine — so it
+      // cannot prove what this test claims. The true maximum this API actually accepts on the prompt
+      // dimension is the DTO's 20,000-char ceiling, not the protocol's 128 KiB one. We keep the dimensions
+      // body-limit.ts actually governs (attachment count + total bytes) simultaneously maxed, and use the
+      // largest prompt our own DTO permits instead of silently shrinking the attachment payload to dodge
+      // the mismatch.
+      //
+      // SECOND EMPIRICAL FINDING: `IsValidAttachmentSet` does not total the RAW byte count — it re-derives
+      // each file's decoded size from its BASE64 STRING LENGTH (`floor(base64Length*3/4)`), which rounds a
+      // raw size that is not a multiple of 3 UP to the next multiple of 3 (base64 encodes in 3-byte groups).
+      // A naive `floor(20 MiB / 6)` per file is one such non-multiple, and the rounding-up across 6 files
+      // pushed the recomputed total 10 bytes past the 20 MiB cap — refused with a 400, not the 201 this
+      // test asserts. Aligning `perFile` down to the nearest multiple of 3 makes the encode/decode
+      // round-trip exact, so the validator's estimate matches the raw size with zero inflation.
+      const rawMax = 20 * 1024 * 1024;
+      const perFileRaw = Math.floor(rawMax / 6);
+      const perFile = perFileRaw - (perFileRaw % 3);
+      const attachments = Array.from({ length: 6 }, (_, i) => ({
+        id: `m${i}`,
+        filename: `photo-${i}.png`,
+        mimeType: 'image/png',
+        data: Buffer.alloc(perFile, 0x41).toString('base64'),
+      }));
+      const prompt = 'x'.repeat(20_000); // CreateSessionDto's own @MaxLength(20_000) ceiling
+
+      const res = await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions`))
+        .send({ prompt, provider: 'claude', attachments });
+
+      expect(res.status).not.toBe(413); // the body parser must admit the largest legal request
+      expect(res.status).toBe(201);
+
+      const call = executeCalls.find((c) => c.runId === res.body.runId)!;
+      const workspace = call.env!.PLANT_DOCTOR_SESSION_WORKSPACE;
+      await rm(workspace, { recursive: true, force: true });
+    });
+
+    it('refuses a command carrying attachments', async () => {
+      const res = await as1(request(server()).post(`/plants/${plantA}/diagnose/sessions/${sidA}/runs`))
+        .send({
+          command: { name: 'compact', args: '' },
+          attachments: [{ id: 'c1', filename: 'x.png', mimeType: 'image/png', data: 'QUFB' }],
+        });
+
+      expect(res.status).toBe(400);
+    });
+  });
+
   it('finalizing the run through the REAL orchestrator unblocks delete, which sweeps the session', async () => {
     await doctorOrch.runStarted(runA, { pid: 4242, procStartTime: '1', sessionId: 'uuid-doc-abc' });
     await doctorOrch.runFinished(runA, { exitCode: 0, stopped: false, stderrTail: null });

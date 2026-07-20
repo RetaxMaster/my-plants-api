@@ -24,12 +24,25 @@ import { configureApp } from '../../src/config/configure-app.js';
  * validation failures into silent 201s. A second copy drifting from this one would produce two
  * different "hermetic" stacks and e2e results that disagree for no visible reason.
  */
-export type ExecuteCall = { kind: string; runId: string; env?: Record<string, string> };
+export type ExecuteCall = {
+  kind: string;
+  runId: string;
+  env?: Record<string, string>;
+  // Attachments are deliberately NOT persisted on the run row (spec §4.1.1) — they pass THROUGH the
+  // request in memory. Capturing them here is the only way an e2e can prove they actually crossed the
+  // transport rather than being silently stripped by the global whitelist ValidationPipe.
+  attachments?: Array<{ id: string; filename: string; mimeType: string; data: string }>;
+};
 
 const makeFakeEngine = (kind: string, executeCalls: ExecuteCall[]) => ({
   logDir: mkdtempSync(join(tmpdir(), `pd-e2e-${kind}-`)),
-  execute: async (req: { runId: string; logPath: string; env?: Record<string, string> }) => {
-    executeCalls.push({ kind, runId: req.runId, env: req.env });
+  execute: async (req: {
+    runId: string;
+    logPath: string;
+    env?: Record<string, string>;
+    attachments?: ExecuteCall['attachments'];
+  }) => {
+    executeCalls.push({ kind, runId: req.runId, env: req.env, attachments: req.attachments });
     await mkdir(dirname(req.logPath), { recursive: true });
     await writeFile(req.logPath, `{"type":"log.header","schemaVersion":"1.0.0","runId":"${req.runId}"}\n`, {
       flag: 'wx',
