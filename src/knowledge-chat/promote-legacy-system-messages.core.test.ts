@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildLogHeader } from '@retaxmaster/agents-realtime-protocol';
+import { buildLogHeader, buildDoneLine } from '@retaxmaster/agents-realtime-protocol';
 import { surveyLogRoots, promoteSurveyedMatches, type Survey } from './promote-legacy-system-messages.core.js';
 
 // CORRECTION 1 (measured against the installed package, not assumed from the plan): the plan's draft
@@ -126,6 +126,58 @@ describe('the survey-first migration (spec 3.4, Task 24)', () => {
     expect(survey.skipped).toHaveLength(1);
     expect(survey.skipped[0].path).toBe('/tmp/logs-a/run-mismatched.ndjson');
     expect(survey.skipped[0].reason).toMatch(/failed validation/);
+  });
+
+  it('promotes a turn in a log that never established a session — the package\'s own exemption for a pre-spawn failure/cancel, not a refusal we invent', async () => {
+    // No `session.started` at all: the provider invocation failed/was cancelled before ever reaching the
+    // agent. This IS a genuinely promotable pre-3.0.0 shape (systemMessageState can be CONSUMED before the
+    // CLI is ever invoked), and validateCanonicalLog's own `neverEstablishedASession` exemption accepts it
+    // — a non-success terminal (buildDoneLine('failed')) on a log with no session is not an error. Refusing
+    // this shape up front (an earlier version of this module did) would corrupt the exact measurement this
+    // migration exists to make: whether anything needs promoting at all.
+    const text = [
+      buildLogHeader({ provider: 'claude', runId: 'run-prespawn', startedAtMs: 1000 }),
+      JSON.stringify({ type: 'user.prompt', text: `${MARKED}\n\nHow is my fern?` }),
+      buildDoneLine('failed'),
+    ].join('\n') + '\n';
+
+    const survey = await surveyLogRoots({
+      logRoots: ['/tmp/logs-a'],
+      readDir: async () => ['run-prespawn.ndjson'],
+      readFile: async () => text,
+      loadRun: async () => ({ systemMessageText: MARKED, systemMessageState: 'CONSUMED' }),
+      isRescuedLog: NOT_RESCUED,
+    });
+
+    expect(survey.skipped).toEqual([]);
+    expect(survey.totalMatches).toBe(1);
+    expect(survey.matches[0]).toMatchObject({ path: '/tmp/logs-a/run-prespawn.ndjson', promoted: 1 });
+  });
+
+  it('refuses to validate (and reports it) a log carrying more than one DISTINCT session id', async () => {
+    // Two session.started lines with different providerSessionId: there is no single authoritative
+    // identity to build an expectation from, and no exemption in the package covers this shape (unlike the
+    // zero-session case above) — refused up front, never handed to validateCanonicalLog to guess at.
+    const text = [
+      buildLogHeader({ provider: 'claude', runId: 'run-multi', startedAtMs: 1000 }),
+      JSON.stringify({ type: 'user.prompt', text: `${MARKED}\n\nHow is my fern?` }),
+      JSON.stringify({ type: 'session.started', provider: 'claude', providerSessionId: 'sess-1' }),
+      JSON.stringify({ type: 'session.started', provider: 'claude', providerSessionId: 'sess-2' }),
+    ].join('\n') + '\n';
+
+    const survey = await surveyLogRoots({
+      logRoots: ['/tmp/logs-a'],
+      readDir: async () => ['run-multi.ndjson'],
+      readFile: async () => text,
+      loadRun: async () => ({ systemMessageText: MARKED, systemMessageState: 'CONSUMED' }),
+      isRescuedLog: NOT_RESCUED,
+    });
+
+    expect(survey.totalMatches).toBe(0);
+    expect(survey.matches).toEqual([]);
+    expect(survey.skipped).toHaveLength(1);
+    expect(survey.skipped[0].path).toBe('/tmp/logs-a/run-multi.ndjson');
+    expect(survey.skipped[0].reason).toMatch(/distinct session ids/);
   });
 
   it('computes and validates EVERY replacement before writing ANY file', async () => {

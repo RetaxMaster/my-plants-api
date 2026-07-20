@@ -63,7 +63,17 @@ async function backupLogDir(root: string): Promise<string> {
   for (const file of sourceFiles) {
     const rel = relative(root, file);
     const destFile = join(dest, rel);
-    const destStat = await stat(destFile).catch(() => null);
+    // ENOENT (genuinely missing) is distinguished from any other stat failure (e.g. a permission error) —
+    // this is the error text on the rollback net, read under pressure, and misreporting "permission denied"
+    // as "missing" would send an operator looking in the wrong place. Either way the outcome is the same
+    // (throw before any write), but the message tells the truth about which one happened.
+    const destStat = await stat(destFile).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === 'ENOENT') return null;
+      throw new Error(
+        `Backup verification FAILED: could not read the backup copy of ${file} at ${destFile} ` +
+        `(${err?.message ?? err}) — refusing to proceed. No file has been rewritten.`,
+      );
+    });
     if (!destStat) {
       throw new Error(
         `Backup verification FAILED: ${destFile} is missing from the backup of ${root} -> ${dest}. ` +

@@ -65,28 +65,40 @@ export interface Survey {
   skipped: SkippedFile[];
 }
 
+// A run whose provider invocation failed or was cancelled BEFORE a session was ever established writes a
+// canonical log with no `session.started` at all — and it is a genuinely promotable pre-3.0.0 shape:
+// `KnowledgeChatRun.systemMessageState` can plausibly be `CONSUMED` (the concatenated prompt was already
+// built) before the provider CLI is ever invoked. `validateCanonicalLog`'s own `checkCanonicalLog` has a
+// dedicated, load-bearing exemption for exactly this — `neverEstablishedASession`: a non-success terminal
+// (`failed`/`cancelled`) on a log with no session.started is accepted, not refused. So this placeholder is
+// PROVABLY INERT, not a guess: `checkCanonicalLog` only ever compares `expectation.providerSessionId`
+// against entries of `scan.sessionIds`, and that comparison loop never runs over an empty array — no real
+// session id could ever disagree with a value nothing is compared to.
+const NO_SESSION_ESTABLISHED_PLACEHOLDER = 'no-session-established' as const;
+
 // Build the identity `validateCanonicalLog` checks the REPLACEMENT against, from the ORIGINAL file's own
 // header + session.started — never from a second, independently-sourced identity. The replacement must
 // describe the SAME run the original already did (promotion only splices a `turn.input` line after an
 // existing `user.prompt`; it never touches the header or any session line), so self-consistency is exactly
 // the right bar: "did splicing in the turn.input corrupt the file", not "does this match some external
-// record". A log with no `session.started` at all, or with more than one DISTINCT provider session id,
-// carries no single authoritative identity to validate against, so it is refused rather than guessed at.
+// record". Zero `session.started` lines is handed to `validateCanonicalLog`'s own exemption (see the
+// placeholder's comment above) rather than refused here — deferring to the shared policy is the whole point
+// of reusing it instead of re-deriving its rules. Only more than one DISTINCT provider session id is refused
+// up front: that shape carries no single authoritative identity to validate against, and no exemption in the
+// package covers it.
 function buildSelfExpectation(runId: string, originalText: string): { ok: true; expectation: LogExpectation } | { ok: false; reason: string } {
   const scan = scanCanonicalLog(originalText);
   if (!scan.ok) {
     return { ok: false, reason: `cannot validate replacement: original log failed to scan: ${scan.reason}` };
   }
   const distinctSessionIds = new Set(scan.sessionIds);
-  if (distinctSessionIds.size === 0) {
-    return { ok: false, reason: 'cannot validate replacement: original log carries no session.started to anchor the validation expectation' };
-  }
   if (distinctSessionIds.size > 1) {
     return { ok: false, reason: `cannot validate replacement: original log carries ${distinctSessionIds.size} distinct session ids — refusing to guess which is authoritative` };
   }
+  const providerSessionId = distinctSessionIds.size === 1 ? [...distinctSessionIds][0] : NO_SESSION_ESTABLISHED_PLACEHOLDER;
   return {
     ok: true,
-    expectation: { runId, provider: scan.header.provider, providerSessionId: [...distinctSessionIds][0] },
+    expectation: { runId, provider: scan.header.provider, providerSessionId },
   };
 }
 
