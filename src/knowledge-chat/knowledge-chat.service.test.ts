@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { ConflictException, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { OwnerService } from '../owner/owner.service.js';
-import { KnowledgeChatService } from './knowledge-chat.service.js';
+import { KnowledgeChatService, mapRunToTurn } from './knowledge-chat.service.js';
 
 type Status = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
 // NOTE: `activeKey` mirrors the DB column — 'ACTIVE' on a non-terminal run, null once terminal; the
@@ -819,5 +819,74 @@ describe('turn framing — all three conditions of spec 3.1', () => {
     });
     expect(body.prompt).toContain('<agents-rt:user-message>');
     expect(body.prompt).toContain('<agents-rt:attachments>');
+  });
+});
+
+/**
+ * Reader 1 of the MIXED `prompt` column (spec §3.1.1).
+ *
+ * Fixture provenance: the marker-prefixed prompt below is the shape the pre-change `admitRun` was OBSERVED
+ * writing against the real database — see the header of `legacy-prompt-split.test.ts`. Both the marked and
+ * the normalised spelling of `systemMessageText` are exercised, because a live database holds both
+ * depending on whether the §3.5 normalisation has run yet.
+ */
+describe('the turn mapping de-concatenates a pre-change row (reader 1)', () => {
+  const base = { id: 'r1', commandName: null, commandArgs: null, status: 'SUCCEEDED' };
+  const LOG_BASE = 'http://api/knowledge-chat';
+
+  it('yields the user half only for a pre-change concatenated row (marker on both columns)', () => {
+    const turn = mapRunToTurn(
+      {
+        ...base,
+        prompt: '[system] The user declined your request.\n\nHow is my fern?',
+        systemMessageText: '[system] The user declined your request.',
+      },
+      LOG_BASE,
+    );
+    expect(turn.prompt).toBe('How is my fern?');
+    expect(turn.prompt).not.toContain('[system]');
+  });
+
+  it('yields the user half only once the run row has been normalised (asymmetric)', () => {
+    const turn = mapRunToTurn(
+      {
+        ...base,
+        prompt: '[system] The user declined your request.\n\nHow is my fern?',
+        systemMessageText: 'The user declined your request.',
+      },
+      LOG_BASE,
+    );
+    expect(turn.prompt).toBe('How is my fern?');
+    expect(turn.prompt).not.toContain('[system]');
+  });
+
+  it('yields an empty prompt for a pre-change message-only row', () => {
+    const turn = mapRunToTurn(
+      {
+        ...base,
+        prompt: '[system] The user declined your request.',
+        systemMessageText: 'The user declined your request.',
+      },
+      LOG_BASE,
+    );
+    expect(turn.prompt).toBe('');
+  });
+
+  it('passes a post-change row through untouched', () => {
+    const turn = mapRunToTurn(
+      { ...base, prompt: 'How is my fern?', systemMessageText: 'The user declined your request.' },
+      LOG_BASE,
+    );
+    expect(turn.prompt).toBe('How is my fern?');
+  });
+
+  it('never adds systemMessageText to the wire contract', () => {
+    // The rule runs server-side precisely so the chat contract gains no key: resolving it in the browser
+    // would mean shipping the column to both the admin and the diagnose routes.
+    const turn = mapRunToTurn(
+      { ...base, prompt: 'How is my fern?', systemMessageText: 'The user declined your request.' },
+      LOG_BASE,
+    );
+    expect('systemMessageText' in turn).toBe(false);
   });
 });

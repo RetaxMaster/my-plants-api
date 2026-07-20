@@ -16,6 +16,7 @@ import { resolveEffectiveProvider } from './effective-provider.js';
 import { WORKSPACE_ENV } from './doctor-workspace-env.js';
 import { type SessionScope, whereForScope, sessionMatchesScope } from './session-scope.js';
 import { SYSTEM_MESSAGE } from './system-message.js';
+import { splitStoredPrompt } from './legacy-prompt-split.js';
 import { ACTIVE_RUN_STATUSES } from './run-status.js';
 import { takeLaunchLease } from './launch-lease.js';
 import { classifyLaunchFailure, restoreOnPreSpawnFailure, settleConsumedMessage } from './system-message-delivery.js';
@@ -130,6 +131,37 @@ export async function admitRun(
       systemMessageState: consume ? 'CONSUMED' : null,
     },
   });
+}
+
+/**
+ * Reader 1 of the MIXED `prompt` column (spec §3.1.1). Exported as a module-level function so the
+ * de-concatenation can be unit-tested without standing up the service.
+ *
+ * The rule runs HERE, server-side, rather than in the browser: it needs `systemMessageText`, which
+ * `KnowledgeChatTurn` does not carry and cannot derive — resolving it client-side would mean adding the
+ * column to the chat contract on both the admin and diagnose routes. So the raw concatenation never
+ * reaches the wire, and the contract gains no key.
+ */
+export function mapRunToTurn(
+  run: {
+    id: string;
+    prompt: string | null;
+    systemMessageText: string | null;
+    commandName: string | null;
+    commandArgs: string | null;
+    status: string;
+  },
+  logBase: string,
+) {
+  const split = splitStoredPrompt(run.prompt, run.systemMessageText);
+  return {
+    runId: run.id,
+    prompt: split ? split.userMessage : run.prompt,
+    command: run.commandName ? { name: run.commandName, args: run.commandArgs ?? '' } : null,
+    status: run.status,
+    isActive: (ACTIVE as readonly string[]).includes(run.status),
+    logUrl: `${logBase}/runs/${run.id}/log`,
+  };
 }
 
 @Injectable()
@@ -300,14 +332,7 @@ export class KnowledgeChatService {
       providerSessionId: session.providerSessionId,
       kind: session.kind,
       plantId: session.plantId,
-      turns: session.runs.map((r) => ({
-        runId: r.id,
-        prompt: r.prompt,
-        command: r.commandName ? { name: r.commandName, args: r.commandArgs ?? '' } : null,
-        status: r.status,
-        isActive: (ACTIVE as readonly string[]).includes(r.status),
-        logUrl: `${logBase}/runs/${r.id}/log`,
-      })),
+      turns: session.runs.map((r) => mapRunToTurn(r, logBase)),
     };
   }
 
