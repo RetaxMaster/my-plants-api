@@ -355,7 +355,7 @@ describe('Plant Doctor (e2e)', () => {
       // decoded length instead, so this test can use sizes that are deliberately NOT multiples of 3 and
       // land on the cap precisely. See the boundary tests in knowledge-chat.dto.test.ts.
       const rawMax = 20 * 1024 * 1024;
-      // Six sizes summing to EXACTLY 20 MiB, five of them not multiples of 3.
+      // Six sizes summing to EXACTLY 20 MiB, three of them not multiples of 3.
       const sizes = [3495251, 3495252, 3495253, 3495254, 3495255, 3495255];
       expect(sizes.reduce((a, b) => a + b, 0)).toBe(rawMax);
       const attachments = sizes.map((n, i) => ({

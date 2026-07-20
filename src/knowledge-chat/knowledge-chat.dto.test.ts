@@ -110,9 +110,10 @@ describe('the decoded-size check is EXACT, not an estimate', () => {
   // which is exactly why no security test would ever have caught it.
   const b64 = (raw: number) => Buffer.alloc(raw, 0x41).toString('base64');
 
-  it('accepts the largest legal set even when no file size is a multiple of 3', async () => {
-    // Six files summing to EXACTLY the 20 MiB total cap, with sizes chosen so five of them are not
-    // multiples of 3. Under the old estimate this set was scored ~10 bytes over and refused.
+  it('accepts the largest legal set even when file sizes are not multiples of 3', async () => {
+    // Six files summing to EXACTLY the 20 MiB total cap, with sizes chosen so three of them are not
+    // multiples of 3 (enough to reproduce the old over-count, which inflated this set by 4 bytes).
+    // Under the old estimate this set was scored over the cap and refused.
     const sizes = [3495251, 3495252, 3495253, 3495254, 3495255, 3495255];
     const total = sizes.reduce((a, b) => a + b, 0);
     expect(total).toBe(20 * 1024 * 1024); // the set really is AT the cap, not under it

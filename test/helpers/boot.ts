@@ -31,7 +31,12 @@ export type ExecuteCall = {
   // Attachments are deliberately NOT persisted on the run row (spec §4.1.1) — they pass THROUGH the
   // request in memory. Capturing them here is the only way an e2e can prove they actually crossed the
   // transport rather than being silently stripped by the global whitelist ValidationPipe.
-  attachments?: Array<{ id: string; filename: string; mimeType: string; data: string }>;
+  //
+  // METADATA ONLY, never the base64 `data`. `executeCalls` lives for the whole file's boot, so retaining
+  // the payload would pin tens of megabytes per large-attachment test in memory for every test that
+  // follows — measured at +270 MB peak RSS across this file. `bytes` preserves the one thing an assertion
+  // could still want from the payload (that it arrived at full size) without holding the payload itself.
+  attachments?: Array<{ id: string; filename: string; mimeType: string; bytes: number }>;
 };
 
 const makeFakeEngine = (kind: string, executeCalls: ExecuteCall[]) => ({
@@ -40,9 +45,19 @@ const makeFakeEngine = (kind: string, executeCalls: ExecuteCall[]) => ({
     runId: string;
     logPath: string;
     env?: Record<string, string>;
-    attachments?: ExecuteCall['attachments'];
+    attachments?: Array<{ id: string; filename: string; mimeType: string; data: string }>;
   }) => {
-    executeCalls.push({ kind, runId: req.runId, env: req.env, attachments: req.attachments });
+    executeCalls.push({
+      kind,
+      runId: req.runId,
+      env: req.env,
+      attachments: req.attachments?.map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        bytes: Buffer.byteLength(a.data, 'base64'),
+      })),
+    });
     await mkdir(dirname(req.logPath), { recursive: true });
     await writeFile(req.logPath, `{"type":"log.header","schemaVersion":"1.0.0","runId":"${req.runId}"}\n`, {
       flag: 'wx',
