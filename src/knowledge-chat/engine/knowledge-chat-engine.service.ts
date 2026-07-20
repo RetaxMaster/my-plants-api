@@ -28,7 +28,34 @@ export type ExecuteRequest = {
   // Task-2 seam note: the vendored /execute handler must thread the body `env` to the supervisor; that
   // minimal package thread is the one integration-gated dependency. The host side is wired here now.)
   env?: Record<string, string>;
-} & ({ prompt: string; command?: never } | { command: AgentCommand; prompt?: never });
+} & (
+  | {
+      // A PROMPT turn. `prompt` may be null when the turn carries ONLY a system message — legal since
+      // 3.0.0, and it retires the empty-string workaround that used to deliver a blank turn to the agent.
+      prompt: string | null;
+      // The HOST-ORIGINATED notice for this turn (3.0.0, break B1). It travels OUT OF BAND — the engine
+      // composes it into an `<agents-rt:system-message>` block and hands the runner the same string via
+      // AGENTS_RT_SYSTEM_MESSAGE so the adapter can honor-or-fail on it. Never concatenated by us.
+      //
+      // OMISSION IS THE CONTRACT: an absent system message must be ABSENT, never present-and-empty.
+      // `systemMessage: ''` is a sentinel that looks like data — the exact mistake `prompt: ''` made
+      // before 2.0.0 — and it would make a turn that carried no notice render a system bubble.
+      systemMessage?: string | null;
+      attachments?: readonly ExecuteAttachment[];
+      command?: never;
+    }
+  // Commands never carry a system message or an attachment: the engine answers 400 to either combination,
+  // so the union makes it unrepresentable rather than discoverable at runtime.
+  | { command: AgentCommand; prompt?: never; systemMessage?: never; attachments?: never }
+);
+
+/** One attachment as it crosses the wire: base64 bytes plus the metadata the engine validates. */
+export type ExecuteAttachment = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  data: string; // base64
+};
 
 // The engine surface the shared service + the two controllers depend on. Both engine instances (KNOWLEDGE
 // and DOCTOR) implement it, so the registry can hand back either behind one type (reuse-not-fork, Spec 3 §2).

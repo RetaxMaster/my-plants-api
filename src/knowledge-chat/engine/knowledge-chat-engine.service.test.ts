@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { KnowledgeChatEngineService } from './knowledge-chat-engine.service.js';
 import type { EngineParams } from './engine-params.js';
 
@@ -48,5 +48,71 @@ describe('KnowledgeChatEngineService (disabled)', () => {
     const svc = new KnowledgeChatEngineService(params, baseEnv, {} as any);
     await svc.onModuleInit();
     expect(await svc.providerStatus()).toEqual([]);
+  });
+});
+
+/**
+ * The service refuses to execute unless `server` is set; these tests only exercise the HTTP body shape, so
+ * a truthy stand-in is enough. Reaching in is deliberate: standing up a real engine would bind a port,
+ * which no test in this repo does.
+ */
+function makeRunningEngineServiceForTest() {
+  const service = Object.create(KnowledgeChatEngineService.prototype) as KnowledgeChatEngineService;
+  Object.assign(service, {
+    server: { port: 9999 },
+    params: { ...params, secret: 'test-secret', port: 9999 },
+  });
+  return service;
+}
+
+describe('execute() request body', () => {
+  it('sends systemMessage as its own field, never concatenated into the prompt', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fakeFetch = vi.fn(async (url: string, init: { body: string }) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+    });
+    vi.stubGlobal('fetch', fakeFetch);
+
+    const service = makeRunningEngineServiceForTest();
+    await service.execute({
+      runId: 'run-1',
+      provider: 'claude',
+      logPath: '/tmp/x.ndjson',
+      resumeSessionId: null,
+      prompt: 'How is my fern?',
+      systemMessage: 'The user declined your request.',
+    });
+
+    expect(calls[0]!.body).toMatchObject({
+      prompt: 'How is my fern?',
+      systemMessage: 'The user declined your request.',
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('allows a system-message-only turn with a null prompt', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_u: string, init: { body: string }) => {
+        bodies.push(JSON.parse(init.body));
+        return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+      }),
+    );
+
+    const service = makeRunningEngineServiceForTest();
+    await service.execute({
+      runId: 'run-2',
+      provider: 'claude',
+      logPath: '/tmp/y.ndjson',
+      resumeSessionId: null,
+      prompt: null,
+      systemMessage: 'The user still has not approved the request.',
+    });
+
+    expect(bodies[0]!.prompt).toBeNull();
+    expect(bodies[0]!.systemMessage).toBe('The user still has not approved the request.');
+    vi.unstubAllGlobals();
   });
 });
