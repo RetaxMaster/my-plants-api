@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Test } from '@nestjs/testing';
-import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { type INestApplication } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -8,6 +8,7 @@ import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 import { ImageUploadService } from '../src/storage/image-upload.service.js';
 import { WeatherService } from '../src/weather/weather.service.js';
+import { configureApp } from '../src/config/configure-app.js';
 
 // Cover-photo + profile over the REAL HTTP stack (guard -> CLS actor -> ownership -> Prisma -> DB).
 // ImageUploadService is faked (records upload/delete so we can assert orphan-safe replace ordering);
@@ -42,7 +43,7 @@ describe('Plant cover-photo & profile (e2e)', () => {
       .overrideProvider(WeatherService).useValue({ forCity: async () => null })
       .compile();
     app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true })); // mirror main.ts
+    configureApp(app); // the SAME configuration main.ts applies — never a hand-kept copy
     await app.init();
 
     prisma = app.get(PrismaService);

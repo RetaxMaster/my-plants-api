@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Test } from '@nestjs/testing';
-import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { type INestApplication } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -13,6 +13,7 @@ import { PrismaService } from '../src/prisma/prisma.service.js';
 import { WeatherService } from '../src/weather/weather.service.js';
 import { KNOWLEDGE_ENGINE, KNOWLEDGE_ORCHESTRATOR } from '../src/knowledge-chat/engine/engine-params.js';
 import type { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledge-chat-orchestrator.js';
+import { configureApp } from '../src/config/configure-app.js';
 
 // End-to-end for the admin knowledge-chat HTTP surface over the REAL stack (global JwtAuthGuard →
 // controller-scoped RolesGuard → service → Prisma → DB), against a running MariaDB.
@@ -62,7 +63,7 @@ describe('Knowledge Chat (e2e)', () => {
       .overrideProvider(KNOWLEDGE_ENGINE).useValue(fakeEngine)
       .compile();
     app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true })); // mirror main.ts
+    configureApp(app); // the SAME configuration main.ts applies — never a hand-kept copy
     await app.init();
 
     prisma = app.get(PrismaService);
@@ -214,5 +215,23 @@ describe('Knowledge Chat (e2e)', () => {
     await orchestrator.runFinished(cmd.body.runId, { exitCode: 0, stopped: false, stderrTail: null });
     await asAdmin(request(server()).delete(`/knowledge-chat/sessions/${sessionId}`)).expect(200);
     await asAdmin(request(server()).get(`/knowledge-chat/sessions/${sessionId}`)).expect(404);
+  });
+
+  it('accepts a JSON body far above the 100 kb Express default', async () => {
+    // Without a configured limit, Nest runs on Express's default 100 kb and a single 200 kb photo is
+    // refused by OUR OWN API before it ever reaches the engine.
+    //
+    // This asserts the limit configured by `configureApp()` — the SAME function main.ts calls — rather
+    // than a copy re-declared in this file. A hand-mirrored limit here would only ever prove that this
+    // test file configured itself correctly, which is not the claim.
+    const bigPrompt = 'x'.repeat(300 * 1024);
+    const res = await asAdmin(request(server()).post('/knowledge-chat/sessions')).send({
+      prompt: bigPrompt,
+      provider: 'claude',
+    });
+
+    // The DTO's own length cap refuses it (400), which is OUR refusal with OUR message. The point of this
+    // assertion is that it is NOT a 413 from the body parser: the bytes got through the transport.
+    expect(res.status).not.toBe(413);
   });
 });

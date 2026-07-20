@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { type INestApplication } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { mkdtempSync } from 'node:fs';
@@ -12,6 +12,7 @@ import { WeatherService } from '../../src/weather/weather.service.js';
 import { ImageUploadService } from '../../src/storage/image-upload.service.js';
 import { CodexRoleVerificationService } from '../../src/knowledge-chat/codex-role-verification.service.js';
 import { KNOWLEDGE_ENGINE, DOCTOR_ENGINE } from '../../src/knowledge-chat/engine/engine-params.js';
+import { configureApp } from '../../src/config/configure-app.js';
 
 /**
  * ONE full-app boot for every Plant Doctor e2e file.
@@ -19,9 +20,9 @@ import { KNOWLEDGE_ENGINE, DOCTOR_ENGINE } from '../../src/knowledge-chat/engine
  * This exists because two e2e specs need the identical hermetic stack, and copying the block would
  * fork it: the `WeatherService` stub (startup recompute otherwise hits live weather and hangs
  * offline), the fake image uploader, BOTH fake engines (no `claude`/`codex` is ever spawned), and the
- * manual `ValidationPipe` — which is NOT inherited from `main.ts` and whose absence turns validation
- * failures into silent 201s. A second copy drifting from this one would produce two different
- * "hermetic" stacks and e2e results that disagree for no visible reason.
+ * shared `configureApp()` call — which is NOT inherited from `main.ts` and whose absence turns
+ * validation failures into silent 201s. A second copy drifting from this one would produce two
+ * different "hermetic" stacks and e2e results that disagree for no visible reason.
  */
 export type ExecuteCall = { kind: string; runId: string; env?: Record<string, string> };
 
@@ -80,8 +81,7 @@ export async function bootTestApp(): Promise<BootedApp> {
     .compile();
 
   const app = moduleRef.createNestApplication();
-  // NOT inherited from main.ts — must be re-applied by hand in every e2e boot.
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  configureApp(app); // the SAME configuration main.ts applies — never a hand-kept copy
   await app.init();
 
   const prisma = app.get(PrismaService);
