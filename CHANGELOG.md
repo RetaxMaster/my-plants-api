@@ -24,6 +24,12 @@ to do and decide.
   only the system notice) into existence, and the mismatch made the whole write illegal. **Migration `0024`**
   widens that constraint to also admit a system-message-only turn; every row already in the database already
   satisfies it, so no backfill runs.
+- **The care engine could anchor an adaptation cycle after the very event it was measuring.** When the
+  engine learns from how you actually water — nudging a plant's cadence toward your real rhythm — each
+  learning cycle is pinned to a reference date (its anchor). In an edge case that anchor could land *after*
+  the event the cycle was meant to measure, describing a span of negative length and feeding the adaptation a
+  nonsensical interval. The anchor is now clamped so it can never sit later than the event it measures.
+  Normal watering is unaffected; only the impossible case is corrected.
 
 ### Added
 
@@ -109,6 +115,11 @@ to do and decide.
 - A queued system message is now delivered by launching the agent from the run row the platform already
   admitted, rather than from a separately-passed input — the same at-most-once guarantee above now also
   covers the message that used to go missing (see Fixed).
+- **The Plant Doctor's proposal-operation contract now lives in the shared
+  `@retaxmaster/my-plants-species-schema` package**, with the API keeping only a thin NestJS adapter over it.
+  This is an internal refactor — the `POST …/proposals` request and response contract is unchanged, no
+  migration and no new environment variable — that retires a hand-maintained copy of the operation shapes so
+  the API and the doctor can never disagree about what a proposal may contain.
 
 ### For developers
 
