@@ -223,6 +223,47 @@ export class KnowledgeChatService {
         });
       }
     }
+    await this.reconcileStrandedConsumed(sessionId);
+  }
+
+  /**
+   * Settle a message stranded on an ALREADY-TERMINAL run.
+   *
+   * ⚠️ WITHOUT THIS, THE `AMBIGUOUS` BRANCH IS A PERMANENT SILENT DROP — not the deferral it claims to be.
+   *
+   * `launchRun`'s AMBIGUOUS path deliberately leaves the message `CONSUMED` and marks the run FAILED with
+   * `activeKey: null`, on the stated reasoning that "reconciliation will settle it once it can establish
+   * whether a turn was produced". That reasoning had no implementation behind it. There are exactly two
+   * settlers of a CONSUMED message, and neither can ever see such a run again:
+   *
+   *   1. `reconcileStaleActive` queries `activeKey: ACTIVE_KEY` — the AMBIGUOUS branch just nulled it.
+   *   2. the orchestrator's `runFinished` fires on the ENGINE's terminal callback — which never comes,
+   *      because the whole premise of the failure is that the engine may never have received the run.
+   *
+   * So the notice sat in `CONSUMED` forever, the session slot stayed empty, and the owner's decline was
+   * never relayed to the agent — the exact symptom this feature exists to end, one layer down. Spec §5.5.4's
+   * invariant ("a queued message is never silently dropped") was false on every AMBIGUOUS outcome.
+   *
+   * **Why it is gated on staleness, and why that is required for at-most-once.** An AMBIGUOUS failure means
+   * the run MAY have spawned and be running right now. Settling immediately could restore a message the
+   * agent has already read, which it receives as a second refusal for the same proposal — the duplication
+   * the whole classification exists to prevent. Waiting for the run-timeout window means a genuinely spawned
+   * run has had its full life to report; after it, `providerSessionId` is a settled fact rather than a race.
+   * `transitionConsumed`'s conditional update still elects a single winner, so a late callback racing this
+   * sweep is safe either way.
+   */
+  private async reconcileStrandedConsumed(sessionId: string): Promise<void> {
+    const stranded = (await this.prisma.knowledgeChatRun.findMany({
+      where: { sessionId, activeKey: null, systemMessageState: 'CONSUMED' },
+    })) as unknown as KnowledgeChatRunRow[];
+    for (const run of stranded) {
+      if (!this.isStale(run)) continue;
+      await this.prisma.$transaction(async (tx) => {
+        // Same signal reconcileStaleActive uses: a run that never reached the agent never got a provider
+        // session id, so its message was never read and goes back on the session.
+        await settleConsumedMessage(tx, run, { producedAgentTurn: run.providerSessionId !== null });
+      });
+    }
   }
 
   // Atomically claim the single active slot: reconcile a stale run, then INSERT a new run holding
@@ -520,8 +561,11 @@ export class KnowledgeChatService {
         if (failure === 'PRE_SPAWN') {
           await restoreOnPreSpawnFailure(tx, runId, `Launch failed: ${(err as Error).message}`);
         } else {
-          // AMBIGUOUS: do NOT restore. Leave the message CONSUMED on the run row and let reconciliation
-          // settle it once it can establish whether a turn was actually produced.
+          // AMBIGUOUS: do NOT restore. Leave the message CONSUMED on the run row; `reconcileStrandedConsumed`
+          // settles it once the run-timeout window has passed and `providerSessionId` is a settled fact
+          // rather than a race. That sweep is what makes this branch a genuine DEFERRAL — without it,
+          // nulling `activeKey` below puts the run out of reach of every settler and the message is dropped
+          // silently and permanently. Do not remove one without the other.
           await tx.knowledgeChatRun.updateMany({
             where: { id: runId, status: { in: [...ACTIVE] } },
             data: {

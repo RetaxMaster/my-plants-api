@@ -27,6 +27,25 @@ type ConsumedRun = {
  * same proposal. Wrongly classifying as AMBIGUOUS only defers the decision to reconciliation, which can
  * establish the truth. Only failures that PROVE the request never reached a process are PRE_SPAWN.
  */
+/** The syscall codes that PROVE no response was ever received, so the request never reached a process. */
+const PRE_SPAWN_SYSCALL_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND']);
+
+/**
+ * Walk an error's `cause` chain (and any `AggregateError.errors` branches) looking for a syscall code that
+ * proves the request never reached a spawned process.
+ *
+ * Bounded by a depth cap and a `seen` set: a `cause` chain is attacker-irrelevant here but IS allowed to be
+ * cyclic, and an unbounded walk on the failure path would turn an engine outage into a hang.
+ */
+function hasPreSpawnSyscallCode(err: unknown, seen = new Set<unknown>(), depth = 0): boolean {
+  if (depth > 8 || err === null || typeof err !== 'object' || seen.has(err)) return false;
+  seen.add(err);
+  const e = err as { code?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof e.code === 'string' && PRE_SPAWN_SYSCALL_CODES.has(e.code)) return true;
+  if (Array.isArray(e.errors) && e.errors.some((x) => hasPreSpawnSyscallCode(x, seen, depth + 1))) return true;
+  return hasPreSpawnSyscallCode(e.cause, seen, depth + 1);
+}
+
 export function classifyLaunchFailure(err: unknown): LaunchFailureClass {
   // A mapped engine failure is a CONFIRMED refusal: /execute answered before spawning anything, so the
   // queued message is provably still undelivered and must be restored. Only 4xx qualifies — a 5xx may have
@@ -44,8 +63,24 @@ export function classifyLaunchFailure(err: unknown): LaunchFailureClass {
     return err.mapped.status >= 400 && err.mapped.status < 500 ? 'PRE_SPAWN' : 'AMBIGUOUS';
   }
   const e = (err ?? {}) as { code?: string; status?: number };
-  // No response was ever received, so the request provably never reached a spawned process.
-  if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') return 'PRE_SPAWN';
+  // ⚠️ THE SYSCALL CODE IS NOT ON THE ERROR WE ACTUALLY RECEIVE — IT IS ON ITS `cause`.
+  //
+  // `KnowledgeChatEngineService.execute()` calls the global `fetch` (undici). A refused connection does
+  // NOT reject with an error carrying `code: 'ECONNREFUSED'`; it rejects with `TypeError: fetch failed`
+  // whose `code` is `undefined` and whose `cause` carries the syscall code. Measured on this runtime
+  // (Node v24.13.1):
+  //
+  //   fetch('http://127.0.0.1:54999') -> TypeError('fetch failed'), e.code === undefined,
+  //                                      e.cause.code === 'ECONNREFUSED'
+  //   fetch('http://…​.invalid')       -> same shape, e.cause.code === 'ENOTFOUND'
+  //
+  // Reading `e.code` alone therefore made this branch DEAD on the only path it exists for, and an
+  // engine-down launch fell through to AMBIGUOUS. That is not a harmless deferral: the AMBIGUOUS branch
+  // frees `activeKey`, and `reconcileStaleActive` only ever queries `activeKey: ACTIVE_KEY` — so nothing
+  // ever settles the run again and its CONSUMED message is stranded FOREVER, silently. Undici also nests
+  // (and may wrap several attempts in an `AggregateError`), so walk the chain rather than peeking one
+  // level down.
+  if (hasPreSpawnSyscallCode(err)) return 'PRE_SPAWN';
   // A 4xx is the engine itself rejecting the request — it parsed it and declined, so no run was spawned.
   if (typeof e.status === 'number' && e.status >= 400 && e.status < 500) return 'PRE_SPAWN';
   return 'AMBIGUOUS';

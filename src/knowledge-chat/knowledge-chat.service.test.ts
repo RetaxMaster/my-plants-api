@@ -84,7 +84,12 @@ function setup(seed: { sessions?: Session[]; runs?: Run[]; proposals?: any[] } =
         if (r && include?.session) return { ...r, session: sessions.get(r.sessionId) };
         return r;
       },
-      findMany: async ({ where }: any) => [...runs.values()].filter((r) => (where?.sessionId ? r.sessionId === where.sessionId : true) && (where?.activeKey !== undefined ? r.activeKey === where.activeKey : true)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
+      // `systemMessageState` is filtered here for the same reason `activeKey` is: the stranded-message
+      // sweep queries `{ activeKey: null, systemMessageState: 'CONSUMED' }`, and a fake that ignored the
+      // second clause would hand the service a row set the real database would never return — letting a
+      // sweep that over-selects pass. (`settleConsumedMessage` re-checks the state internally, so the
+      // difference is invisible in the outcome and would only ever show up as a wrong row count.)
+      findMany: async ({ where }: any) => [...runs.values()].filter((r) => (where?.sessionId ? r.sessionId === where.sessionId : true) && (where?.activeKey !== undefined ? r.activeKey === where.activeKey : true) && (where?.systemMessageState !== undefined ? (r as any).systemMessageState === where.systemMessageState : true)).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
       update: async ({ where, data }: any) => { const r = runs.get(where.id); if (!r) throw new Error(`run not found: ${where.id}`); Object.assign(r, data); return r; },
       updateMany: async ({ where, data }: any) => { let count = 0; for (const r of runs.values()) { const active = where.status?.in ? where.status.in.includes(r.status) : true; if ((where.id ? r.id === where.id : where.sessionId ? r.sessionId === where.sessionId : true) && active) { Object.assign(r, data); count++; } } return { count }; },
     },
@@ -267,6 +272,79 @@ describe('single-active-run guard (DB-enforced, atomic)', () => {
     expect(runs.get('r1')!.status).toBe('FAILED'); // reconciled
     expect(runs.get('r1')!.activeKey).toBeNull(); // slot freed
     expect(engine.execute).toHaveBeenCalledWith(expect.objectContaining({ runId: out.runId }));
+  });
+
+  // ⚠️ THESE THREE PIN THE FIX FOR A PERMANENT SILENT DROP — read the reasoning before touching them.
+  //
+  // An AMBIGUOUS launch failure (engine 5xx, timeout, anything unrecognised) deliberately leaves the
+  // message CONSUMED and marks the run FAILED with `activeKey: null`. That put the run out of reach of
+  // BOTH settlers — `reconcileStaleActive` only queries `activeKey: 'ACTIVE'`, and the orchestrator's
+  // callback never fires for a run the engine may never have received — so the owner's decline notice sat
+  // in CONSUMED forever with the session slot empty. Spec §5.5.4 says a queued message is never silently
+  // dropped; without `reconcileStrandedConsumed` that was false on every AMBIGUOUS outcome.
+  it('restores a message stranded CONSUMED on an already-terminal run once it is stale', async () => {
+    const old = new Date(Date.now() - 3 * 3_600_000); // past timeout + buffer
+    const stranded = doneRun({
+      id: 'r1', status: 'FAILED', activeKey: null, providerSessionId: null,
+      systemMessageText: 'The user declined your request.', systemMessageState: 'CONSUMED',
+      startedAt: old, createdAt: old, finishedAt: old,
+    } as any);
+    const { svc, run, runs, sessions } = setup({
+      sessions: [session({ createdAt: old, updatedAt: old, pendingSystemMessage: null } as any)],
+      runs: [stranded],
+    });
+
+    const out = await run(() => svc.resume('s1', { prompt: 'x' }, undefined, KS));
+
+    // The stranded run gave its message back...
+    expect((runs.get('r1') as any).systemMessageState).toBe('RESTORED');
+    // ...and THIS SAME resume then admitted a run that consumed it, so the notice the owner's decline
+    // produced actually reaches the agent. Asserting the session's slot here would fail for the RIGHT
+    // reason — the sweep runs inside `insertActiveRun`, so by the time `resume` returns the restored
+    // message has already been claimed by the new run. That end-to-end hop is the property worth pinning:
+    // "restored" only matters if something downstream carries it.
+    expect((runs.get(out.runId) as any).systemMessageText).toBe('The user declined your request.');
+    expect((runs.get(out.runId) as any).systemMessageState).toBe('CONSUMED');
+    expect((sessions.get('s1') as any).pendingSystemMessage).toBeNull(); // consumed, at-most-once
+  });
+
+  it('does NOT restore a stranded message while the run could still be alive — at-most-once wins', async () => {
+    // Fresh (not yet stale): an AMBIGUOUS failure means the run MAY have spawned and be running right now.
+    // Restoring here would hand the agent a SECOND copy of a refusal it has already read. The sweep must
+    // wait out the run-timeout window before `providerSessionId` is a settled fact rather than a race.
+    const stranded = doneRun({
+      id: 'r1', status: 'FAILED', activeKey: null, providerSessionId: null,
+      systemMessageText: 'The user declined your request.', systemMessageState: 'CONSUMED',
+    } as any);
+    const { svc, run, runs, sessions } = setup({
+      sessions: [session({ pendingSystemMessage: null } as any)],
+      runs: [stranded],
+    });
+
+    await run(() => svc.resume('s1', { prompt: 'x' }, undefined, KS));
+
+    expect((sessions.get('s1') as any).pendingSystemMessage).toBeNull();
+    expect((runs.get('r1') as any).systemMessageState).toBe('CONSUMED');
+  });
+
+  it('marks a stranded message DELIVERED — never restored — when the run DID reach the agent', async () => {
+    // `providerSessionId` set is this repo's existing proof the run reached the agent and produced output,
+    // so the message was read. Restoring it would be the duplicate the classification exists to prevent.
+    const old = new Date(Date.now() - 3 * 3_600_000);
+    const stranded = doneRun({
+      id: 'r1', status: 'FAILED', activeKey: null, providerSessionId: 'uuid-agent',
+      systemMessageText: 'The user declined your request.', systemMessageState: 'CONSUMED',
+      startedAt: old, createdAt: old, finishedAt: old,
+    } as any);
+    const { svc, run, runs, sessions } = setup({
+      sessions: [session({ createdAt: old, updatedAt: old, pendingSystemMessage: null } as any)],
+      runs: [stranded],
+    });
+
+    await run(() => svc.resume('s1', { prompt: 'x' }, undefined, KS));
+
+    expect((sessions.get('s1') as any).pendingSystemMessage).toBeNull();
+    expect((runs.get('r1') as any).systemMessageState).toBe('DELIVERED');
   });
 
   it('two concurrent starts on one session → exactly one succeeds, the other gets 409', async () => {

@@ -1,3 +1,5 @@
+import { createServer } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi } from 'vitest';
 import { classifyLaunchFailure, restoreOnPreSpawnFailure, settleConsumedMessage } from './system-message-delivery.js';
 import { EngineFailureException } from './engine/engine-error.js';
@@ -7,6 +9,55 @@ describe('classifyLaunchFailure', () => {
     expect(classifyLaunchFailure(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe('PRE_SPAWN');
     expect(classifyLaunchFailure(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))).toBe('PRE_SPAWN');
     expect(classifyLaunchFailure(Object.assign(new Error('x'), { status: 422 }))).toBe('PRE_SPAWN');
+  });
+
+  // ⚠️ THIS FIXTURE IS OBSERVED, NOT AUTHORED — and that distinction is the whole point of the test.
+  //
+  // The hand-built `{ code: 'ECONNREFUSED' }` fixture above is a shape the production error NEVER has.
+  // `execute()` calls the global `fetch` (undici), which rejects with `TypeError: fetch failed` carrying
+  // `code: undefined` and the syscall code one level down on `cause`. So the assertion above passed while
+  // the branch was dead on the only path it exists for. This test gets its error from a REAL rejected
+  // fetch against a closed port, which is the only way to keep the two in sync.
+  it('classifies a REAL undici fetch rejection (engine down) as PRE_SPAWN, not AMBIGUOUS', async () => {
+    // Bind port 0 to have the OS pick a free port, then close it — so the port is known-closed, and the
+    // test cannot flake by colliding with a real listener.
+    const probe = createServer();
+    await new Promise<void>((res) => probe.listen(0, '127.0.0.1', res));
+    const port = (probe.address() as AddressInfo).port;
+    await new Promise<void>((res) => probe.close(() => res()));
+
+    const err = await fetch(`http://127.0.0.1:${port}/execute`).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    // Guard the guard: if this ever stops being the nested shape, the test must say so loudly rather than
+    // quietly re-passing for the wrong reason.
+    expect(err).toBeInstanceOf(TypeError);
+    expect((err as { code?: unknown }).code).toBeUndefined();
+    expect((err as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED');
+
+    expect(classifyLaunchFailure(err)).toBe('PRE_SPAWN');
+  });
+
+  it('finds a pre-spawn code nested deeper, and terminates on a cyclic cause chain', () => {
+    const deep = Object.assign(new Error('outer'), {
+      cause: Object.assign(new Error('mid'), { cause: Object.assign(new Error('inner'), { code: 'ENOTFOUND' }) }),
+    });
+    expect(classifyLaunchFailure(deep)).toBe('PRE_SPAWN');
+
+    // Undici can wrap several connection attempts; every branch must be inspected.
+    const aggregate = Object.assign(new Error('fetch failed'), {
+      cause: new AggregateError([new Error('ipv6 attempt'), Object.assign(new Error('ipv4'), { code: 'ECONNREFUSED' })]),
+    });
+    expect(classifyLaunchFailure(aggregate)).toBe('PRE_SPAWN');
+
+    // A cyclic chain must return, not hang — this runs on the failure path of a live outage.
+    const a = new Error('a') as Error & { cause?: unknown };
+    const b = new Error('b') as Error & { cause?: unknown };
+    a.cause = b;
+    b.cause = a;
+    expect(classifyLaunchFailure(a)).toBe('AMBIGUOUS');
   });
 
   it('treats a timeout, a lost response and a 5xx as AMBIGUOUS', () => {
