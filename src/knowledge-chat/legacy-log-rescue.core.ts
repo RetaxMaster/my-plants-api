@@ -74,7 +74,7 @@ const SECRET_GRADE_MODE = 0o600;
 // who can read a transcript, in either direction), falling back to 0600 — the engine's own, restrictive
 // default — if the target's mode cannot be read. The temp is created 0600 from the very first byte, so the
 // content is never briefly world-readable on disk even before the chmod.
-async function atomicReplaceFile(path: string, content: string): Promise<void> {
+export async function atomicReplaceFile(path: string, content: string): Promise<void> {
   const tmpPath = join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomUUID()}`);
 
   // The mode to land on the target: the original's, or the secret-grade default. Never the umask's.

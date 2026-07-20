@@ -16,3 +16,6 @@ storage/plant-doctor-state/
 storage/plant-doctor-workspaces/
 # Staged raw upload bytes for the async photo worker (PHOTO_INBOX_DIR default) — runtime, never committed.
 storage/photo-inbox/
+# Secret-grade log-directory snapshots taken by promote-legacy-system-messages.ts --apply (conversation
+# transcripts) — the rollback net for that migration, never committed.
+storage/promote-legacy-system-messages-backups/

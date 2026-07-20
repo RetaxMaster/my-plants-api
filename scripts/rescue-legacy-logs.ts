@@ -4,7 +4,6 @@
 // API would never see these adoptions in its in-memory state anyway. This precondition is ENFORCED below
 // (assertEngineNotRunning), not just documented — see its comment for why.
 import '../src/config/load-env-file.js';
-import { createServer as createTcpProbe } from 'node:net';
 import { PrismaClient } from '@prisma/client';
 import { createServer } from '@retaxmaster/agents-realtime-server';
 import { loadEnv } from '../src/config/env.js';
@@ -13,42 +12,14 @@ import { KnowledgeChatOrchestrator } from '../src/knowledge-chat/engine/knowledg
 import { buildEngineConfig } from '../src/knowledge-chat/engine/knowledge-chat-engine.config.js';
 import { knowledgeEngineParams } from '../src/knowledge-chat/engine/engine-params.js';
 import { rescueLegacyLogs } from '../src/knowledge-chat/legacy-log-rescue.core.js';
+import { acquireEngineLock } from './lib/acquire-engine-port-lock.js';
 
-// CLAIM the engine's port and HOLD it for the entire rescue — this is a LOCK, not a check.
-//
-// The durable run index has exactly ONE legitimate writer. A probe that binds and immediately releases
-// only proves the engine was down at one instant: the API (or a second copy of this script) can start
-// inside the gap between the check and the work, and then two processes write that one index — the exact
-// race the guard exists to prevent (TOCTOU). So we keep the socket LISTENING for the whole run and close
-// it in a `finally`. While we hold it, the API cannot start its engine (it would hit EADDRINUSE on this
-// very port) and neither can a second copy of this script. That turns "please stop the API" from a polite
-// request into real mutual exclusion.
-//
-// EADDRINUSE is the ONLY signal we treat as "already up": any other bind failure (e.g. permission) is a
-// real, unrelated error and is rethrown as-is rather than mis-reported as "the API is running".
-async function acquireEngineLock(port: number): Promise<{ release: () => Promise<void> }> {
-  const lock = createTcpProbe();
-  await new Promise<void>((resolve, reject) => {
-    lock.once('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        reject(new Error(
-          `Refusing to run: 127.0.0.1:${port} is already bound, which means the knowledge-chat engine ` +
-          `(embedded in the API process) — or another copy of this script — is up. The durable run index ` +
-          `has exactly one writer, so running now would corrupt it. Stop the API first (in production: ` +
-          `\`pm2 stop my-plants-api\`) and re-run this script. No file was touched.`,
-        ));
-        return;
-      }
-      reject(err);
-    });
-    lock.once('listening', () => resolve());
-    lock.listen(port, '127.0.0.1');
-  });
-
-  return {
-    release: () => new Promise<void>((resolve) => lock.close(() => resolve())),
-  };
-}
+// The lock's TOCTOU reasoning + EADDRINUSE-only signal now live once, in acquireEngineLock — shared with
+// promote-legacy-system-messages.ts rather than forked (see that helper's own header comment).
+const KNOWLEDGE_CHAT_ENGINE_ALREADY_UP =
+  'the knowledge-chat engine (embedded in the API process) — or another copy of this script — is up. ' +
+  'The durable run index has exactly one writer, so running now would corrupt it. Stop the API first ' +
+  '(in production: `pm2 stop my-plants-api`) and re-run this script.';
 
 async function main() {
   const env = loadEnv();
@@ -56,7 +27,7 @@ async function main() {
   // MUST come before anything else — including constructing the Prisma client — so a refusal exits without
   // touching a single file. And it is HELD (not released) until the `finally` below: for as long as this
   // script runs, nothing else can bring the engine up.
-  const lock = await acquireEngineLock(env.KNOWLEDGE_CHAT_ENGINE_PORT);
+  const lock = await acquireEngineLock(env.KNOWLEDGE_CHAT_ENGINE_PORT, KNOWLEDGE_CHAT_ENGINE_ALREADY_UP);
   console.log(`Holding 127.0.0.1:${env.KNOWLEDGE_CHAT_ENGINE_PORT} for the duration — the API cannot start while this runs.`);
 
   const prisma = new PrismaClient();
