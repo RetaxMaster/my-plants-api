@@ -9,6 +9,36 @@ edit a plant's profile, correct a progress entry, and change its watering or mis
 while it worked. From this release it can only **propose** those changes — you see exactly what it wants
 to do and decide.
 
+### Fixed
+
+- **A declined Plant Doctor proposal never actually reached the agent.** Hitting Decline always recorded
+  your decision correctly — that part never broke. But the notice telling the agent "the user declined your
+  request" was composed and then silently failed to send, so the agent kept working as though you had said
+  nothing. **To be clear about what this is and is not:** this was never a consent-gate failure. The gate is
+  enforced server-side; nothing was ever auto-approved and no change to a plant was ever written without
+  your explicit approval. The only thing that failed was telling the agent afterwards that you had said no —
+  a feedback problem, not a permission problem. It is fixed, and the agent is now told every time.
+- **A second layer of the same bug, one level down:** even once the notice was composed correctly, the
+  database itself refused to store it. A pre-existing CHECK constraint required every turn to carry either a
+  user prompt or an agent command — a shape nobody anticipated a decline-only turn (which carries neither,
+  only the system notice) into existence, and the mismatch made the whole write illegal. **Migration `0024`**
+  widens that constraint to also admit a system-message-only turn; every row already in the database already
+  satisfies it, so no backfill runs.
+
+### Added
+
+- **Image attachments in both chats.** You can attach photos to a message in the knowledge-engine research
+  chat and the per-plant diagnosis chat — up to 6 images per message, 10 MiB each and 20 MiB total, in PNG,
+  JPEG, GIF or WebP. The engine stores them for 24 hours so the agent can see them for its own turn; they are
+  never written onto the conversation's permanent record.
+- **A message queue.** Sending a message while the agent is still working on a turn no longer refuses it —
+  it is held and sent automatically the moment the turn ends. If that turn instead fails or is cancelled, the
+  message is handed back rather than lost.
+- **A native channel for system notices.** Platform notices to the agent — "the user declined your request",
+  "the user still has not approved the request", and the like — now travel structurally alongside your
+  message instead of being pasted as a `[system] ...` prefix onto the front of it. The retired prefix is
+  gone from anything written from this release forward.
+
 ### What you'll notice
 
 - **A proposal, not a change.** When the doctor concludes something should change, a banner appears in
@@ -52,6 +82,16 @@ to do and decide.
   queued-message columns, and a new `LAUNCHING` run status. **No new environment variable.**
 - **`LAUNCHING` is a new value on the run status field.** Clients that render run status should treat it
   as active, alongside `QUEUED` and `RUNNING`.
+- The session/run-creation endpoints on both chat surfaces accept an optional `attachments` array
+  (`id`, `filename`, `mimeType`, base64 `data`), validated server-side (6 files max, 10 MiB each, 20 MiB
+  total, PNG/JPEG/GIF/WebP only); the engine re-validates independently regardless.
+- New env vars `KNOWLEDGE_CHAT_UPLOAD_DIR` and `PLANT_DOCTOR_UPLOAD_DIR`, each defaulting to its own
+  `storage/` subdirectory (created at boot, `0700`) — set them only if you want the upload root elsewhere.
+- **Requires migration `0024`** (see Fixed above): `knowledge_chat_runs`'s prompt/command CHECK constraint
+  is renamed and widened; no environment variable changes.
+- Attachment and transport failures now surface as a small set of stable codes (`attachment_too_large`,
+  `attachment_corrupt`, `attachments_unavailable`, `message_too_long`, `payload_too_large`, …) instead of the
+  engine's own free-text error prose, so a client can branch on them without parsing English.
 
 ### Under the hood
 
@@ -63,6 +103,12 @@ to do and decide.
   them.
 - Messages sent to the agent about your decisions are delivered **at most once**, surviving a crash or a
   failed launch without either duplicating or vanishing.
+- `@retaxmaster/agents-realtime-server` and `-protocol` are upgraded to `3.0.0`; the same client line
+  reaches `3.0.1` in `my-plants-web` (a client-only, documentation-only point release — no behaviour differs
+  from `3.0.0`).
+- A queued system message is now delivered by launching the agent from the run row the platform already
+  admitted, rather than from a separately-passed input — the same at-most-once guarantee above now also
+  covers the message that used to go missing (see Fixed).
 
 ### For developers
 
@@ -77,3 +123,8 @@ to do and decide.
 - **New `APP_ENV` variable**, defaulting to `production` when unset. Nothing in the app's behaviour
   branches on it; it exists so destructive local tooling can refuse to run anywhere it was not
   explicitly invited. Local `.env` files need `APP_ENV=development`; production needs no change.
+- **Two one-time operator scripts** promote pre-3.0.x database rows off the old `[system]`-prefixed
+  convention onto the new structural shape: `npm run migrate:promote-system-messages` (survey-first,
+  backup-verified, read-only until told to apply) followed by `npm run migrate:normalize-system-marker`
+  (strips the retired prefix from the columns it left behind). Neither runs automatically as part of a
+  deploy.
